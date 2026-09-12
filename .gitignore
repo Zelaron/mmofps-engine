@@ -1,0 +1,38 @@
+# Installed dependencies and generated bundles
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local review captures and diagnostic output
+/artifacts/
+*.log
+
+# Machine-local environment and editor files
+.env
+.env.*
+!.env.example
+!.env.sample
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+/data/
+
+# Downloaded assets (npm run assets, also run automatically by build/dev)
+/packages/client/public/fonts/*.ttf
+/packages/client/public/fonts/*.tmp
+
+# Local migration records and retired deployment examples
+/docs/baseline-manifest.json
+/docs/SESSION-RECOVERY.md
+/docs/LEGACY_DEPLOY.md
+/docs/LEGACY_ARCHITECTURE.md
+/deploy/update.sh
+/deploy/mmofps-update.service
+/deploy/mmofps-update.timer
+
+# Test runner output
+/playwright-report/
+/test-results/

@@ -1,0 +1,9 @@
+{
+  "name": "@mmofps/client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "dependencies": {
+    "three": "^0.170.0"
+  }
+}

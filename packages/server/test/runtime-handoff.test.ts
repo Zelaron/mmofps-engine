@@ -1,0 +1,109 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Game, type ServerPlayer } from '../src/game.js';
+import { captureActors, type RuntimeHandoff } from '../src/runtime-handoff.js';
+import { BTN, VEHICLE, rotationFromEuler, vehicleDefinition } from '@shared/index';
+import { namespaceRange } from '@shared/entity-id';
+
+function game(namespace = 0): Game {
+  const g = new Game(1337, { entityNamespace: namespace });
+  (g as unknown as { pickSpawn: () => { x: number; y: number; z: number } }).pickSpawn = () => ({ x: 0, y: 600, z: 0 });
+  g.tick = 1200; g.world.motionTime = g.tick / 60;
+  return g;
+}
+function command(p: ServerPlayer, buttons = 0) {
+  return { seq: p.lastQueuedSeq + 1, buttons, weapon: p.weapon, yaw: .3, pitch: .1, renderTick: 1199, renderFrac: .5 };
+}
+function copy<T>(record: T): T { return JSON.parse(JSON.stringify(record)) as T; }
+function sinks(record: RuntimeHandoff) { return new Map(record.players.map(p => [p.id, null])); }
+
+test('JSON handoff retains jumping, reloads, queued inputs, explosives and lag history with identical next-tick simulation', () => {
+  const source = game(), p = source.addPlayer('Explorer', null, false, 100_000);
+  Object.assign(p.state, { vx: 9.5, vy: 8.6, vz: -2, jumpHeld: true, jumpAscent: true, dodgeCd: .43, simulationTick: 1200 });
+  Object.assign(p, { health: 77, weapon: 1, fireCd: .2, reloadWeapon: 1, reloadCd: .7,
+    reloadHeld: true, regenBlockUntil: 1500, faction: 1, factionChangeAt: 1800,
+    fallCreditAttackerId: 100_001, fallCreditUntilTick: 1250, salvage: 137, spree: 3 });
+  p.ammo[1].magazine = 0; p.discoveries.add('1337:city-2'); p.fullPickupContacts.add(0x80000009);
+  source.queueInput(p, command(p, BTN.FORWARD | BTN.JUMP)); source.step();
+  source.queueInput(p, command(p, BTN.FORWARD));
+  const projectile = { id: namespaceRange(0).first, owner: p.id, weapon: 4, x: 12, y: 620, z: 20,
+    vx: 10, vy: 4, vz: -20, distLeft: 200, fuseLeft: 2, ageSeconds: .3, sleeping: false, homingTarget: 100_001, hullDamageScale: .8 };
+  source.projectiles.set(projectile.id, projectile);
+  source.projectiles.set(projectile.id + 1, { ...projectile, id: projectile.id + 1, weapon: 3, fuseLeft: Infinity });
+  const before = captureActors(source, [p.id]).record;
+  const control = game(2); control.tick = source.tick; control.acceptHandoff(before, sinks(before));
+  const detached = source.takeHandoff([p.id]), wire = copy(detached.record), destination = game(1);
+  assert.equal(source.players.has(p.id), false); assert.equal(source.projectiles.size, 0);
+  assert.ok(wire.history.some(f => f.players.some(q => q.id === p.id)));
+  assert.ok(!JSON.stringify(wire).includes('sink'));
+  assert.equal(wire.projectiles.find(r => r.weapon === 3)!.fuseLeft, null);
+  destination.tick = wire.tick;
+  const [arrived] = destination.acceptHandoff(wire, sinks(wire));
+  assert.equal(destination.projectiles.get(projectile.id + 1)!.fuseLeft, Infinity, 'impact-only rockets do not gain an immediate fuse');
+  assert.equal(arrived.state.vy, p.state.vy); assert.equal(arrived.state.dodgeCd, p.state.dodgeCd);
+  assert.deepEqual(arrived.inputQueue, p.inputQueue); assert.equal(arrived.lastProcessedSeq, p.lastProcessedSeq);
+  assert.equal(arrived.reloadCd, p.reloadCd); assert.deepEqual(arrived.ammo, p.ammo);
+  assert.deepEqual(arrived.discoveries, p.discoveries); assert.deepEqual(arrived.fullPickupContacts, p.fullPickupContacts);
+  arrived.ammo[0].magazine--; assert.notEqual(arrived.ammo[0].magazine, wire.players[0].ammo[0].magazine);
+  arrived.ammo[0].magazine++;
+  destination.step(); control.step();
+  assert.deepEqual(captureActors(destination, [p.id]).record, captureActors(control, [p.id]).record);
+  assert.throws(() => destination.acceptHandoff(wire, sinks(wire)), /occupied/);
+});
+
+test('a passenger handoff includes pilot, aircraft pose, both weapons and projectiles as one unit', () => {
+  const source = game(), pilot = source.addPlayer('Pilot', null, false, 100_000), gunner = source.addPlayer('Gunner', null, false, 100_001);
+  const hullId = namespaceRange(0).first;
+  const hull = { id: hullId, type: VEHICLE.JET, variant: 0, x: 0, y: 600, z: 0, heading: .4,
+    health: vehicleDefinition(VEHICLE.JET)!.maxHealth - 37, occupant: pilot.id, gunner: gunner.id, respawnAtTick: -1 };
+  source.vehicles.set(hullId, hull);
+  for (const [p, seat] of [[pilot, 0], [gunner, 1]] as const) {
+    p.vehicleId = hullId; p.vehFireCd = .4 + seat; p.vehAltCd = 2 + seat; p.useHeld = true;
+    Object.assign(p.state, { vehicle: VEHICLE.JET, vehicleId: hullId, seat, heading: .4, vx: 35, vy: 3, vz: -45,
+      vehicleRotation: rotationFromEuler(.4, .2, -.3), vehiclePitch: .2, vehicleRoll: -.3, boostFuel: .61 });
+    source.queueInput(p, command(p));
+  }
+  source.projectiles.set(hullId, { id: hullId, owner: gunner.id, weapon: 215, x: 1, y: 580, z: 3,
+    vx: 1, vy: -50, vz: 3, ageSeconds: .2, fuseLeft: 3, distLeft: 500, sleeping: false });
+  const detached = source.takeHandoff([gunner.id]);
+  assert.deepEqual(new Set(detached.record.players.map(p => p.id)), new Set([pilot.id, gunner.id]));
+  assert.equal(source.players.size, 0); assert.equal(source.vehicles.size, 0); assert.equal(source.projectiles.size, 0);
+  const destination = game(1); destination.acceptHandoff(copy(detached.record), sinks(detached.record));
+  assert.deepEqual(destination.vehicles.get(hullId), hull);
+  assert.deepEqual(destination.players.get(pilot.id)!.state.vehicleRotation, pilot.state.vehicleRotation);
+  assert.equal(destination.players.get(gunner.id)!.vehFireCd, 1.4);
+  destination.step();
+  const arrivedPilot = destination.players.get(pilot.id)!, arrivedGunner = destination.players.get(gunner.id)!;
+  assert.equal(arrivedPilot.vehicleId, hullId); assert.equal(arrivedGunner.vehicleId, hullId);
+  assert.equal(arrivedGunner.state.px, arrivedPilot.state.px); assert.equal(arrivedGunner.state.py, arrivedPilot.state.py);
+  assert.ok(destination.projectiles.has(hullId));
+});
+
+test('refused handoffs leave both authorities unchanged and local rollback retains the connection and timers', () => {
+  const source = game(), p = source.addPlayer('Explorer', null, false, 100_000);
+  Object.assign(p, { recallSince: 1140, regenBlockUntil: 1300, respawnAtTick: -1, lastInputAtTick: 1198 });
+  Object.assign(p.state, { vx: 14, vy: 4.2, dodgeCd: .7, simulationTick: 1200 });
+  const detached = source.takeHandoff([p.id]), destination = game(1);
+  destination.addPlayer('Already present', null, false, p.id);
+  assert.throws(() => destination.acceptHandoff(detached.record, sinks(detached.record)), /occupied/);
+  assert.equal(source.players.size, 0); assert.equal(destination.players.size, 1);
+  source.tick += 12;
+  const [restored] = source.restoreHandoff(detached);
+  assert.equal(restored, p); assert.equal(p.state.vx, 14); assert.equal(p.state.vy, 4.2); assert.equal(p.state.dodgeCd, .7);
+  assert.equal(p.regenBlockUntil, 1312); assert.equal(p.recallSince, 1152); assert.equal(p.lastInputAtTick, 1210);
+  assert.equal(p.state.simulationTick, 1200, 'platform carry retains the old world time');
+  assert.equal(p.respawnAtTick, -1, 'sentinels never become active timers');
+  assert.throws(() => source.restoreHandoff(detached), /occupied/);
+  const empty = game(2);
+  for (const invalid of [
+    { ...copy(detached.record), seed: 7331 },
+    { ...copy(detached.record), tick: 1201 },
+    { ...copy(detached.record), tick: 800 },
+    { ...copy(detached.record), players: [...detached.record.players, ...detached.record.players] },
+    { ...copy(detached.record), projectiles: [{ id: 1, owner: 123 }] },
+  ]) {
+    assert.throws(() => empty.acceptHandoff(invalid as RuntimeHandoff, sinks(detached.record)));
+    assert.equal(empty.players.size, 0); assert.equal(empty.projectiles.size, 0); assert.equal(empty.vehicles.size, 0);
+  }
+  assert.throws(() => empty.acceptHandoff(detached.record, new Map()), /connection/);
+});

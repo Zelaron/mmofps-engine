@@ -1,0 +1,44 @@
+{
+  "name": "the-mmofps",
+  "private": true,
+  "version": "0.2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.11"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "assets": "node scripts/fetch-assets.mjs",
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "node --experimental-sqlite packages/server/dist/server.cjs",
+    "test": "node scripts/test.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "profile:simulation": "node scripts/profile-simulation.mjs",
+    "profile:realtime": "node scripts/profile-realtime.mjs",
+    "profile:startup": "node scripts/profile-startup.mjs",
+    "check": "npm run typecheck && npm test",
+    "test:browser": "node scripts/browser-check.mjs",
+    "test:entities:browser": "node --import tsx scripts/entity-browser-check.ts",
+    "test:planets:browser": "node --experimental-sqlite --import tsx scripts/planetary-browser-check.ts",
+    "preview": "node scripts/preview.mjs",
+    "test:environment:browser": "node --experimental-sqlite --import tsx scripts/environment-browser-check.ts",
+    "test:camps:browser": "node --experimental-sqlite --import tsx scripts/camp-browser-check.ts",
+    "test:lighting:browser": "node --import tsx scripts/contact-lighting-browser-check.ts",
+    "test:shaders:browser": "node --import tsx scripts/shader-preparation-browser-check.ts",
+    "test:flora:browser": "node --experimental-sqlite --import tsx scripts/flora-browser-check.ts",
+    "test:resources:browser": "node --experimental-sqlite --import tsx scripts/resource-browser-check.ts",
+    "test:scenery:browser": "node --experimental-sqlite --import tsx scripts/scenery-browser-check.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.10.1",
+    "@types/three": "^0.170.0",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

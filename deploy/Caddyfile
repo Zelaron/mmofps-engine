@@ -1,0 +1,4 @@
+# Set DOMAIN to the hostname configured for this server.
+{$DOMAIN:localhost} {
+    reverse_proxy localhost:8080
+}

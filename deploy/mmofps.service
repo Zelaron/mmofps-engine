@@ -1,0 +1,26 @@
+[Unit]
+Description=MMOFPS game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mmofps
+WorkingDirectory=/opt/mmofps/app
+ExecStart=/usr/bin/node --experimental-sqlite packages/server/dist/server.cjs
+Restart=always
+RestartSec=3
+Environment=PORT=8080
+Environment=BOTS=15
+Environment=HOST=127.0.0.1
+Environment=DATA_DIR=/opt/mmofps/app/data
+Environment=MAX_PLAYERS=64
+TimeoutStopSec=20
+# Hardening (optional but cheap)
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
