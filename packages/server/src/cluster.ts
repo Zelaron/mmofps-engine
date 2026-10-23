@@ -19,6 +19,18 @@ interface ClusterOptions {
 }
 interface Worker { planet: PlanetId; process: ChildProcess; port: number }
 
+/** V8 options for every world process. A 64 MiB young generation absorbs the
+ * full-population allocation rate. TurboFan's default inlining budget runs out
+ * inside the deep world-field queries (sdf -> column -> noise), leaving hot
+ * helpers as real calls that box their double arguments and results; a larger
+ * budget keeps them inline. These change speed only, never simulation results
+ * (docs/PERFORMANCE.md). Start external `MMOFPS_ROLE=world` workers with them too. */
+const WORLD_V8_OPTIONS = [
+  '--max-semi-space-size=64',
+  '--max-inlined-bytecode-size-cumulative=11040',
+  '--max-inlined-bytecode-size-absolute=22080',
+] as const;
+
 /** A local deployment has exactly the same HTTP/WS boundaries as remote world
  * workers. Each planet has its own process, simulation, bots and world store. */
 export async function startCluster(options: ClusterOptions = {}) {
@@ -52,7 +64,7 @@ export async function startCluster(options: ClusterOptions = {}) {
   const launch = async (planet: typeof PLANETS[number]): Promise<Worker> => {
     if (stopping) throw new Error('Cluster is stopping');
     const child = fork(entry, [], {
-      execArgv: ['--experimental-sqlite', '--max-semi-space-size=64', ...(entry.endsWith('.ts') ? ['--import', 'tsx'] : [])],
+      execArgv: ['--experimental-sqlite', ...WORLD_V8_OPTIONS, ...(entry.endsWith('.ts') ? ['--import', 'tsx'] : [])],
       stdio: ['ignore', options.log === false ? 'ignore' : 'inherit', 'pipe', 'ipc'],
       env: { ...process.env, MMOFPS_ROLE: 'world', PLANET_ID: planet.id,
         WORLD_NODE_ID: `${planet.id}:${randomUUID()}`, COORDINATOR_URL: `http://${localControlHost}:${control.port}`,
