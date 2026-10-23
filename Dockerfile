@@ -15,6 +15,6 @@ COPY --from=build --chown=node:node /app/packages/client/dist packages/client/di
 RUN mkdir -p /app/data && chown node:node /app/data
 USER node
 EXPOSE 8080
-ENV HOST=0.0.0.0 PORT=8080 BOTS=15 DATA_DIR=/app/data
+ENV HOST=0.0.0.0 PORT=8080 BOTS=192 DATA_DIR=/app/data
 VOLUME ["/app/data"]
 CMD ["node", "--experimental-sqlite", "packages/server/dist/server.cjs"]

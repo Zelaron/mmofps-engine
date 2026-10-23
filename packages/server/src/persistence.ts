@@ -107,14 +107,24 @@ export class WorldStore {
   async flush(): Promise<void> { await Promise.all([...this.writes.values()]); }
 }
 
-export function sessionKey(req: IncomingMessage): string | null {
+function sessionToken(req: IncomingMessage): string | null {
   const token = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('mmofps-session='))?.slice(15);
-  return token && /^[a-f0-9]{64}$/.test(token) ? createHash('sha256').update(token).digest('hex') : null;
+  return token && /^[a-f0-9]{64}$/.test(token) ? token : null;
+}
+export function sessionKey(req: IncomingMessage): string | null {
+  const token = sessionToken(req);
+  return token ? createHash('sha256').update(token).digest('hex') : null;
 }
 export function ensureSession(req: IncomingMessage, res: ServerResponse, extra: object = {}): void {
-  if (!sessionKey(req)) {
-    const secure = 'encrypted' in req.socket && req.socket.encrypted;
-    res.setHeader('Set-Cookie', `mmofps-session=${randomBytes(32).toString('hex')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure ? '; Secure' : ''}`);
+  const token = sessionToken(req);
+  // TLS normally ends at the public reverse proxy, so the backend socket
+  // alone cannot tell whether the browser used HTTPS. Production sets this
+  // flag explicitly instead of trusting a client-supplied forwarding header.
+  const secure = process.env.SESSION_COOKIE_SECURE === '1' || ('encrypted' in req.socket && req.socket.encrypted);
+  // Reissue an existing HTTP cookie when HTTPS is enabled so returning
+  // players receive the Secure attribute without losing their identity.
+  if (!token || secure) {
+    res.setHeader('Set-Cookie', `mmofps-session=${token ?? randomBytes(32).toString('hex')}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure ? '; Secure' : ''}`);
   }
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify({ ready: true, ...extra }));

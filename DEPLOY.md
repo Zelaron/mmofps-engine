@@ -23,6 +23,7 @@ The build automatically downloads two fixed-version font files and checks their 
 | `DATA_DIR` | `data` in cluster mode | Universe SQLite database and a separate directory per local world. |
 | `MAX_PLAYERS` | `64` | Human admission limit per world; not a proven capacity claim. |
 | `BOTS` | `192` | Maximum bot-filled population target per planet, including humans. Default adaptive range: 96–192. |
+| `SESSION_COOKIE_SECURE` | unset | Set to `1` when browsers use HTTPS through a reverse proxy; marks the anonymous session cookie `Secure`. Leave unset for direct local HTTP. |
 | `LOCAL_PLANETS` | `meridian,cinder,nacre` | Worlds supervised locally. An empty value starts only gateway/coordinator. |
 | `COORDINATOR_HOST`, `COORDINATOR_PORT` | `127.0.0.1`, free port | Private coordinator interface. |
 | `COORDINATOR_SECRET` | generated per local run | Service secret, at least 32 characters. Configure it for external workers. |
@@ -41,7 +42,7 @@ docker build -t mmofps-engine .
 docker run -d --name mmofps --restart unless-stopped --stop-timeout 20 -p 8080:8080 -v mmofps-data:/app/data mmofps-engine
 ```
 
-The image builds from source, includes the downloaded fonts and runs as the Node image's unprivileged user. The named volume keeps saves across container replacement. Only the gateway port needs publishing. `.dockerignore` excludes installed dependencies, bundles, local captures, credentials and saves from the build context. Docker itself is optional; the Node commands above are the directly verified installation path.
+The image builds from source, includes the downloaded fonts, uses the same maximum adaptive population of 192 as the Node and systemd configurations, and runs as the Node image's unprivileged user. The named volume keeps saves across container replacement. Only the gateway port needs publishing. For public hosting, put HTTPS in front of the container and set `SESSION_COOKIE_SECURE=1`; the direct HTTP command above is for local use. `.dockerignore` excludes installed dependencies, bundles, local captures, credentials and saves from the build context. Docker itself is optional; the Node commands above are the directly verified installation path.
 
 ## Linux service and HTTPS
 
@@ -53,7 +54,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mmofps
 ```
 
-The service template binds the gateway to loopback for a reverse proxy. `deploy/Caddyfile` reads its hostname from Caddy's `DOMAIN` environment variable, with `localhost` as a local default. Set your public hostname, configure its DNS and allow the proxy's HTTP/HTTPS ports before using it publicly. Caddy forwards WebSocket and HTTP traffic to the gateway on port 8080. Direct Node and Docker startup bind to all interfaces by default; their `HOST` setting can be changed as shown above.
+The service template binds the gateway to loopback for a reverse proxy and sets `SESSION_COOKIE_SECURE=1`. `deploy/Caddyfile` reads its hostname from Caddy's `DOMAIN` environment variable, with `localhost` as a local default. Set your public hostname, configure its DNS and allow the proxy's HTTP/HTTPS ports before using it publicly. Caddy forwards WebSocket and HTTP traffic to the gateway on port 8080. Direct Node and Docker startup bind to all interfaces by default; their `HOST` setting can be changed as shown above.
 
 To update a checkout, stop the service, back up `data/`, use `git pull --ff-only`, run `npm ci` and `npm run build`, then start the service. `npm run check` can validate an update before starting it. There is no automatic updater or deployment workflow enabled by this repository.
 
