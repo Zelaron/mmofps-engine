@@ -96,6 +96,23 @@
   .announce-line { font-size: 24px; font-weight: 700; letter-spacing: 0.05em;
     color: #ffd98a; text-shadow: 0 2px 10px rgba(0,0,0,0.7); opacity: 0;
     text-align: center; animation: pop 3.2s ease-out; }
+  .announce-line.announce-bounty { width: min(650px, 82vw); padding: 16px 22px; box-sizing: border-box;
+    border: 1px solid #c9a65f; border-top: 3px solid #ffe0a2; border-radius: 3px;
+    background: linear-gradient(120deg,#272a23ed,#152528ee); font-size: 18px; line-height: 1.45;
+    letter-spacing: .02em; box-shadow: 0 8px 35px #0006; animation-duration: 8s; }
+  #boss-warning { position: fixed; z-index: 91; top: 29%; left: 50%; transform: translateX(-50%);
+    max-width: 88vw; width: max-content; box-sizing: border-box; padding: 10px 18px;
+    background: #362016ed; color: #ffe0b0; border: 1px solid #ffac67; border-left: 4px solid #ff8c49;
+    text-align: center; pointer-events: none; box-shadow: 0 5px 24px #0005; }
+  #boss-warning[hidden] { display: none; }
+  #boss-warning strong { display: block; font-size: 18px; letter-spacing: .07em; }
+  #boss-warning span { display: block; margin-top: 5px; font-size: 11px; letter-spacing: .035em; }
+  #boss-warning.urgent { color: #fff0e9; border-color: #ff7054; background: #681f16ed; }
+  @media (max-width: 700px), (max-height: 500px) {
+    #boss-warning { top: 25%; padding: 7px 11px; }
+    #boss-warning strong { font-size: 13px; } #boss-warning span { font-size: 9px; }
+    .announce-line.announce-bounty { padding: 10px; font-size: 13px; }
+  }
   @keyframes pop { 0% { opacity: 0; transform: scale(0.8); }
     8% { opacity: 1; transform: scale(1.06); }
     14% { transform: scale(1); }
@@ -172,6 +189,7 @@
   .touch-game { display: none; }
   #touch-controls.active .touch-game { display: block; }
   #touch-controls.active #touch-start { display: none; }
+  body[data-redeploying="true"] #touch-start { display: none; }
   #touch-look { position: absolute; left: 35%; right: 0; top: 0; bottom: 0;
     pointer-events: auto; touch-action: none; }
   #touch-stick { position: absolute; width: 122px; height: 122px; border-radius: 50%;
@@ -324,7 +342,8 @@
   </div>
 
   <div id="debug"></div>
-  <div id="hint">Click to look · WASD move · double-tap dodge · R reload · 1-9 / 0 / wheel weapons · M map + compass · Tab scores · [ ] sensitivity · F3 debug</div>
+  <div id="hyperspeed-status" hidden>HYPERSPEED ×10 · INVULNERABLE · H TO DISABLE</div>
+  <div id="hint">Click to look · WASD move · double-tap dodge · R reload · 1-9 / 0 / wheel weapons · G tactical map · M minimap · H hyperspeed · Tab scores · [ ] sensitivity · F3 debug</div>
 </div>
 <script src="/app.js" defer></script>
 </body>

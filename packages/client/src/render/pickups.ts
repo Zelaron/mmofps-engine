@@ -78,6 +78,7 @@ export class PickupModels {
     opacity: 0.42,
     depthWrite: false,
     side: THREE.DoubleSide,
+    forceSinglePass: true,
   });
   private readonly ammoAccentMaterials = AMMO_ACCENTS.map(
     (color) => new THREE.MeshLambertMaterial({

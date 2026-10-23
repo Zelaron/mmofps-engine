@@ -1,4 +1,4 @@
-import type { Box, World } from '@shared/index';
+import type { Box, RBox, World } from '@shared/index';
 import type { SceneryBounds, SceneryData, SceneryKind } from './scenery-stream.js';
 
 export const STRUCTURE_GENERATION_CELL = 256;
@@ -43,6 +43,28 @@ export class StructureSamples {
     }
     return [...boxes.values()];
   }
+
+  /** A structure cell is the smallest existing canonical work unit. Its
+   * nested generator stays synchronous; only complete cells enter the LRU. */
+  *collectSteps(bounds: SceneryBounds): Generator<void, Box[], void> {
+    const minX = Math.floor((bounds.minX - STRUCTURE_HALF_EXTENT) / STRUCTURE_GENERATION_CELL);
+    const maxX = Math.floor((bounds.maxX + STRUCTURE_HALF_EXTENT) / STRUCTURE_GENERATION_CELL);
+    const minZ = Math.floor((bounds.minZ - STRUCTURE_HALF_EXTENT) / STRUCTURE_GENERATION_CELL);
+    const maxZ = Math.floor((bounds.maxZ + STRUCTURE_HALF_EXTENT) / STRUCTURE_GENERATION_CELL);
+    const boxes = new Map<string, Box>();
+    for (let x = minX; x <= maxX; x++) for (let z = minZ; z <= maxZ; z++) {
+      for (const box of this.collectCell(x, z).source) boxes.set(structureBoxKey(box), box);
+      yield;
+    }
+    this.prefetch.length = 0;
+    if ((maxX - minX + 3) * (maxZ - minZ + 3) <= STRUCTURE_CACHE_CELLS) {
+      for (let x = minX - 1; x <= maxX + 1; x++) for (let z = minZ - 1; z <= maxZ + 1; z++) {
+        if (x >= minX && x <= maxX && z >= minZ && z <= maxZ) continue;
+        if (!this.cells.has(`${x},${z}`)) this.prefetch.push({ x, z });
+      }
+    }
+    return [...boxes.values()];
+  }
 }
 
 export class ScenerySamples {
@@ -54,5 +76,35 @@ export class ScenerySamples {
     if (kind === 'structures') return this.structures.collect(b);
     return this.world.collectBoulders(b.minX, b.maxX, b.minZ, b.maxZ)
       .map(rock => ({ rock, desert: this.world.column(rock.x, rock.z).desert > .5 }));
+  }
+
+  /** Atomic result with cooperative boundaries between canonical cells.
+   * Existing synchronous consumers keep collect(); only the worker drains
+   * this iterator. No partial scenery escapes when a job is cancelled. */
+  *collectSteps(kind: SceneryKind, b: SceneryBounds): Generator<void, SceneryData[SceneryKind], void> {
+    if (kind === 'structures') return yield* this.structures.collectSteps(b);
+    if (kind === 'vegetation') {
+      if (!this.world.collectVegetationCells) return this.collect(kind, b);
+      const out: SceneryData['vegetation'] = [];
+      for (const cell of this.world.collectVegetationCells(b.minX, b.maxX, b.minZ, b.maxZ)) {
+        if (cell) out.push(...cell);
+        yield;
+      }
+      return out;
+    }
+    if (!this.world.collectBoulderCells) return this.collect(kind, b);
+    const rocks: RBox[] = [];
+    for (const cell of this.world.collectBoulderCells(b.minX, b.maxX, b.minZ, b.maxZ)) {
+      if (cell) rocks.push(...cell);
+      yield;
+    }
+    // The old collector generates every boulder before sampling any colors.
+    // Retain that order, including all world-cache writes, across pauses.
+    const out: SceneryData['rocks'] = [];
+    for (const rock of rocks) {
+      out.push({ rock, desert: this.world.column(rock.x, rock.z).desert > .5 });
+      yield;
+    }
+    return out;
   }
 }

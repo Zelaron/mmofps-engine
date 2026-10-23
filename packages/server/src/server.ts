@@ -6,6 +6,8 @@ import { WebSocketServer } from 'ws';
 import { TICK_RATE, DEFAULT_SEED } from '@shared/index';
 import { Game } from './game.js';
 import { Bot, botName } from './bots.js';
+import { AdaptivePopulation } from './adaptive-population.js';
+import { selectAdaptiveRetirements, createAdaptiveRetirementDiagnostics, type AdaptiveRetirementDiagnostics } from './bot-retirement.js';
 import { PlayerConn } from './conn.js';
 import { serveStatic } from './static.js';
 import { advanceTicks, advanceSynchronizedTicks, synchronizedWakeup, SimulationOverload } from './tick-loop.js';
@@ -18,11 +20,14 @@ export interface ServerOptions {
   host?: string;
   seed?: number;
   /**
-   * Target world population. Bots fill the gap between connected humans and
-   * this number, and step aside as real players join - a lone player always
-   * has a fight waiting.
+   * Maximum target world population, including humans. Bots fill available
+   * capacity and step aside as humans join. Sustained server load can lower
+   * the current target while adaptivePopulation is enabled.
    */
   targetPopulation?: number;
+  /** Reduce distant bot reserves under sustained load, restoring them slowly
+   * when headroom returns. Disable for fixed-population benchmarks. */
+  adaptivePopulation?: boolean;
   maxPlayers?: number;
   clientDir?: string;
   dataDir?: string;
@@ -42,7 +47,7 @@ export interface RunningServer {
   close(): Promise<void>;
 }
 
-export const DEFAULT_TARGET_POPULATION = 15;
+export const DEFAULT_TARGET_POPULATION = 192;
 
 export function defaultClientDir(): string {
   // dist layout:  packages/server/dist/server.cjs  ->  ../../client/dist
@@ -59,6 +64,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
   const host = opts.host ?? '0.0.0.0';
   const seed = opts.seed ?? DEFAULT_SEED;
   const targetPop = opts.targetPopulation ?? DEFAULT_TARGET_POPULATION;
+  const population = opts.adaptivePopulation === false ? null : new AdaptivePopulation(targetPop);
   const maxPlayers = opts.maxPlayers ?? 64;
   const clientDir = opts.clientDir ?? defaultClientDir();
   const log = opts.log ?? true;
@@ -78,7 +84,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
   };
   const saveTimer = setInterval(() => { void persist().catch(error => console.error('Persistence failed:', error)); }, 30_000);
   const bots: Bot[] = [];
+  node?.attachBots(bots,targetPop);
+  let botRefill: ReturnType<typeof setTimeout> | undefined;
   let botSerial = 0;
+  let adaptiveRetired = 0;
+  let retirement: (AdaptiveRetirementDiagnostics & { tick: number }) | undefined;
   let ready = !node;
   let failure: Error | null = null;
   const timing = { batches: 0, ticks: 0, workMs: 0, maxBatchMs: 0, maxDebt: 0,
@@ -89,25 +99,58 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
     meanTickWorkMs: timing.workMs / Math.max(1, timing.ticks), maxBatchMs: timing.maxBatchMs, maxDebt: timing.maxDebt,
     timerWakeups: timing.timers, meanTimerOvershootMs: timing.timerOvershootMs / Math.max(1, timing.timers),
     maxTimerOvershootMs: timing.maxTimerOvershootMs, immediateYields: timing.immediateYields,
-    meanImmediateWaitMs: timing.immediateWaitMs / Math.max(1, timing.immediateYields), maxImmediateWaitMs: timing.maxImmediateWaitMs };
+    meanImmediateWaitMs: timing.immediateWaitMs / Math.max(1, timing.immediateYields), maxImmediateWaitMs: timing.maxImmediateWaitMs,
+    botMovement: game.botSimulation.stats };
   };
 
   const refillBots = (): void => {
     if (!ready) return;
+    clearTimeout(botRefill);botRefill=undefined;
     let humans = 0;
     for (const p of game.players.values()) if (!p.isBot) humans++;
-    const want = Math.max(0, Math.min(targetPop - humans, targetPop));
-    while (bots.length < want) {
+    const ceiling = Math.max(0, targetPop - humans);
+    const want = Math.max(0, (population?.target ?? targetPop) - humans);
+    const retire = (bot: Bot): void => {
+      const index = bots.indexOf(bot);
+      if (index < 0) return;
+      bots.splice(index, 1);
+      node?.retireBot(bot);
+      game.removePlayer(bot.player.id);
+    };
+    // Human admission retains the configured hard ceiling. Adaptive shedding
+    // below it uses the more conservative, visibility-aware policy below.
+    while (bots.length > ceiling) {
+      let index=bots.length-1;
+      while(index>=0 && node?.protectBot(bots[index]))index--;
+      // Human admission retains the population ceiling even if every local
+      // reserve recently arrived. Only unresolved detached ownership is held.
+      if(index<0) {
+        index=bots.length-1;
+        while(index>=0 && node?.frozenBot(bots[index]))index--;
+      }
+      if(index<0)break;
+      retire(bots[index]);
+    }
+    if (bots.length > want) {
+      const diagnostics = createAdaptiveRetirementDiagnostics();
+      const reserves = selectAdaptiveRetirements(game, bots, bots.length - want,
+        bot => (node?.protectBot(bot) ?? false) || (node?.frozenBot(bot) ?? false), diagnostics);
+      for (const bot of reserves) retire(bot);
+      adaptiveRetired += reserves.length;
+      retirement = { ...diagnostics, tick: game.tick };
+    }
+    // Stagger expensive safe-spawn searches while every new soldier joins
+    // the live clock. A large roster must not pause the first world ticks.
+    for (let added=0;bots.length < want && added<12;added++) {
       const p = game.addPlayer(botName(botSerial++), null, true);
       bots.push(new Bot(p, seed));
     }
-    while (bots.length > want) {
-      const b = bots.pop()!;
-      game.removePlayer(b.player.id);
-    }
+    if(bots.length<want)botRefill=setTimeout(refillBots,150);
   };
   refillBots();
-  const botTimer = setInterval(refillBots, 4000);
+  // A protected soldier can become an eligible reserve after dying or leaving
+  // combat. Retry without forcing a visible retirement to meet the target.
+  const botTimer = setInterval(refillBots, 1000);
 
   const startedAt = Date.now();
   const httpServer = http.createServer((req, res) => {
@@ -125,6 +168,8 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
         territories: game.frontier?.territories.length ?? 0,
         players: game.players.size,
         bots: bots.length,
+        population: { ...(population?.status ?? { maximum: targetPop, minimum: targetPop, target: targetPop, reason: 'fixed' }),
+          adaptive: !!population, actual: game.players.size, bots: bots.length, retired: adaptiveRetired, retirement },
         tick: game.tick,
         seed,
         uptimeSec: Math.round((Date.now() - startedAt) / 1000),
@@ -207,8 +252,11 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
   let scheduledAt: number | undefined, scheduledWait: number | null = null;
   const step = (): boolean => {
     if (node && !node.step()) return false;
-    for (const b of bots) game.queueInput(b.player, b.think(game));
-    game.step();
+    for (const b of bots) if(game.players.get(b.player.id)===b.player) {
+      const command=b.think(game);
+      game.queueInput(b.player,node?.botCommand(b,command)??command);
+    }
+    game.step(node ? Math.max(0, node.targetTick() - game.tick - 1) : 0);
     return true;
   };
   const loop = (): void => {
@@ -252,6 +300,22 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
       const workMs = performance.now() - began;
       timing.batches++; timing.ticks += game.tick - before; timing.workMs += workMs;
       timing.maxBatchMs = Math.max(timing.maxBatchMs, workMs);
+      if (population && !stopped && !failure && game.tick > before) {
+        const adjustmentStarted = performance.now();
+        const adjustment = population.observe({ nowMs: adjustmentStarted, workMs: timing.workMs, ticks: timing.ticks,
+          debt: node ? Math.max(0, node.targetTick() - game.tick) : Math.max(0, Math.ceil((adjustmentStarted - nextTickAt) / tickMs)),
+          population: game.players.size });
+        if (adjustment.changed) {
+          refillBots();
+          if (log) console.log(`[population] seed ${seed}: target ${population.target}/${targetPop}, `+
+            `${game.players.size} present (${adjustment.reason})`);
+        }
+        // Charge controller work and any population adjustment to subsequent
+        // observations rather than making their cost invisible to the policy.
+        const adjustmentMs = performance.now() - adjustmentStarted;
+        timing.workMs += adjustmentMs;
+        timing.maxBatchMs = Math.max(timing.maxBatchMs, workMs + adjustmentMs);
+      }
     }
   };
 
@@ -259,7 +323,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
   const close = (): Promise<void> => closing ??= (async () => {
     stopped = true; ready = false;
     clearTimeout(timer); clearImmediate(immediate);
-    clearInterval(heartbeat); clearInterval(botTimer); clearInterval(saveTimer);
+    clearInterval(heartbeat); clearInterval(botTimer); clearInterval(saveTimer);clearTimeout(botRefill);
     for (const conn of conns) conn.disconnect(1013, 'World restarting');
     await node?.close();
     await persist();
@@ -278,7 +342,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<RunningServ
       await node?.start(actualPort);
       ready = true; refillBots();
       if (log) {
-        console.log(`MMOFPS server on http://localhost:${actualPort}  (seed ${seed}, target population ${targetPop}, tick ${TICK_RATE} Hz)`);
+        console.log(`MMOFPS server on http://localhost:${actualPort}  (seed ${seed}, population ${population ? `${population.status.minimum}-${targetPop} adaptive` : targetPop}, tick ${TICK_RATE} Hz)`);
         console.log(`Serving client from: ${clientDir}`);
       }
       loop();

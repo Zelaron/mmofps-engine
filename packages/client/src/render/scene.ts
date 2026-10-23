@@ -15,6 +15,7 @@ import { CityAtmosphere, BASE_SKY_TOP, BASE_SKY_HORIZON } from './city-atmospher
 import { ContactLighting } from './contact-lighting.js';
 import { setCityEnvironmentSites } from './city-environment.js';
 import { ShaderPreparation } from './shader-preparation.js';
+import { ShaderCommandQueue } from './shader-command-queue.js';
 
 // Physical lighting, a procedural reflection environment, and camera-local
 // desktop sun shadows. Resolution adapts under sustained GPU load.
@@ -208,6 +209,7 @@ export class SceneMgr {
   private readonly sun: THREE.DirectionalLight;
   private readonly contactLighting: ContactLighting;
   private readonly shaderPreparation: ShaderPreparation;
+  private readonly shaderCommands: ShaderCommandQueue;
   private reflectionTarget: THREE.WebGLRenderTarget | null = null;
   private contextLost = false;
   private lastPlayable = false;
@@ -262,12 +264,17 @@ export class SceneMgr {
     this.scene.environmentIntensity = .65;
     this.contactLighting = new ContactLighting(this.renderer, isTouchDevice());
     this.contactLighting.enabled = this.qualityMode !== 'low';
-    const gl = this.renderer.getContext();
+    const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    this.shaderCommands = new ShaderCommandQueue(gl);
     let parallel = gl.getExtension('KHR_parallel_shader_compile');
     this.shaderPreparation = new ShaderPreparation(() => this.contactLighting.prepare(this.scene, this.camera), () => {
       if (gl.isContextLost()) return false;
       const extension = parallel;
-      if (!extension) return true;
+      // Without nonblocking shader-status queries, let the browser process
+      // the submitted command queue between frames before ordinary first-use
+      // checks. A fence is a scheduling aid, not proof of successful linking.
+      if (!extension) return this.shaderCommands.poll((this.renderer.info.programs ?? [])
+        .map(program => program.program).filter((program): program is WebGLProgram => !!program));
       // Poll every cached variant, including materials shared by ordinary
       // and instanced meshes; one material may own several linked programs.
       return (this.renderer.info.programs ?? []).every(program => !program.program ||
@@ -275,11 +282,13 @@ export class SceneMgr {
     });
     canvas.addEventListener('webglcontextlost', () => {
       this.contextLost = true; this.worldPresented = false; this.shaderPreparation.invalidate();
+      this.shaderCommands.reset();
       // Release the old renderer's target bookkeeping while its context is
       // lost; deleting those obsolete GL handles after restoration is invalid.
       this.reflectionTarget?.dispose(); this.reflectionTarget = null; this.scene.environment = null;
     });
     canvas.addEventListener('webglcontextrestored', () => {
+      this.shaderCommands.reset();
       parallel = gl.getExtension('KHR_parallel_shader_compile');
       // Render-target pixels have no CPU copy for Three to upload again.
       // Recreate the sky reflections before preparing the restored scene.
@@ -332,12 +341,13 @@ export class SceneMgr {
   }
 
   get renderStats(): { calls: number; triangles: number; pixelRatio: number; geometries: number; textures: number; contactShadowPasses: number;
-    shaderPrograms: number; shadersPending: boolean; worldPresented: boolean } {
+    shaderPrograms: number; shadersPending: boolean; shaderQueueFallbacks: number; worldPresented: boolean } {
     const info = this.renderer.info;
     return { calls: info.render.calls, triangles: info.render.triangles,
       pixelRatio: this.renderer.getPixelRatio(), geometries: info.memory.geometries,
       textures: info.memory.textures, contactShadowPasses: this.contactLighting.active ? 2 : 0,
-      shaderPrograms: info.programs?.length ?? 0, shadersPending: this.shaderPreparation.pending, worldPresented: this.worldPresented };
+      shaderPrograms: info.programs?.length ?? 0, shadersPending: this.shaderPreparation.pending,
+      shaderQueueFallbacks: this.shaderCommands.fallbackCount, worldPresented: this.worldPresented };
   }
 
   setCaveView(belowSurfaceEnvelope: boolean): void {
@@ -361,6 +371,13 @@ export class SceneMgr {
   render(playable = false): void {
     this.renderer.info.reset();
     if (this.contextLost) return;
+    if (playable !== this.lastPlayable) {
+      this.lastPlayable = playable; this.worldPresented = false; this.shaderPreparation.invalidate();
+    }
+    // The DOM loading screen remains visible until the first authoritative
+    // snapshot. Drawing a world at the placeholder camera can synchronously
+    // upload its resources before the client can process that snapshot.
+    if (!playable) return;
     this.cityAtmosphere.update(this.camera.position);
     this.sky.material.uniforms.liquidView.value = this.liquidKind ? 1 : 0;
     // The atmosphere caches biome weights, so liquid effects must never
@@ -379,9 +396,6 @@ export class SceneMgr {
     this.sun.target.position.copy(this.camera.position);
     this.sun.position.copy(this.camera.position).addScaledVector(this.lightDirection, 320);
     this.sun.target.updateMatrixWorld();
-    if (playable !== this.lastPlayable) {
-      this.lastPlayable = playable; this.worldPresented = false; this.shaderPreparation.invalidate();
-    }
     if (!this.shaderPreparation.poll()) return;
     this.contactLighting.render(this.scene, this.camera, !!this.liquidKind);
     this.worldPresented = playable;

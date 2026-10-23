@@ -2,6 +2,35 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rainforestAt, rainforestSites } from '@shared/rainforest';
 import { World } from '@shared/worldgen';
+import { smoothstep } from '@shared/math';
+
+test('rainforest constant-region bounds preserve exact original edge values', () => {
+  const original = (seed: number, x: number, z: number) => {
+    let weight = 0;
+    for (const site of rainforestSites(seed)) {
+      const dx = x - site.x, dz = z - site.z;
+      if (Math.abs(dx) > site.radius + 150 || Math.abs(dz) > site.radius + 150) continue;
+      const angle = Math.atan2(dz, dx);
+      const boundary = site.radius * (.92 + .065 * Math.sin(angle * 3) + .035 * Math.cos(angle * 7));
+      weight = Math.max(weight, smoothstep(boundary + 100, boundary - 160, Math.hypot(dx, dz)));
+    }
+    return weight;
+  };
+  for (const seed of [1, 1337, 7331, 20077, 424242]) {
+    for (const site of rainforestSites(seed)) for (let angle = 0; angle < 64; angle++) {
+      const theta = angle * Math.PI / 32;
+      const edge = site.radius * (.92 + .065 * Math.sin(theta * 3) + .035 * Math.cos(theta * 7));
+      for (const radius of [0, site.radius * .82 - 160, site.radius * 1.02 + 100, edge - 160, edge - 30, edge + 100, site.radius + 150]) {
+        for (const offset of [-1e-6, -1e-10, 0, 1e-10, 1e-6]) {
+          const x = site.x + Math.cos(theta) * (radius + offset), z = site.z + Math.sin(theta) * (radius + offset);
+          assert.equal(rainforestAt(seed, x, z), original(seed, x, z), `seed ${seed}, angle ${angle}, radius ${radius}, offset ${offset}`);
+        }
+      }
+    }
+    for (const [x, z] of [[Infinity, 0], [0, -Infinity], [NaN, 0]])
+      assert.equal(rainforestAt(seed, x, z), original(seed, x, z));
+  }
+});
 
 test('rainforests are contiguous deterministic provinces with soft irregular edges', () => {
   for (const seed of [1, 1337, 424242]) {

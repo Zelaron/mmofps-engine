@@ -36,7 +36,8 @@ test('operator armor shares bounded geometry and stays aligned with the player c
   assert.ok(bounds.min.y >= -0.005, `feet penetrate floor: ${bounds.min.y}`);
   assert.ok(bounds.max.y >= 1.75 && bounds.max.y <= 1.90, `operator height ${bounds.max.y}`);
   assert.equal(a.group.scale.y, 1, 'appearance must not scale feet away from their support');
-  assert.equal(bodyMeshes.length, 15, 'equipment details must merge into their articulated body part');
+  assert.equal(bodyMeshes.length, 1, 'all articulated body parts share one draw');
+  assert.equal(bodyMeshes[0].userData.operatorParts.length, 15, 'all original articulated parts are retained');
   assert.equal(new Set(bodyMeshes.map((mesh) => mesh.material)).size, 1, 'one shared body material');
   const variants = new Set<number>();
   for (let id = 0; id < 8; id++) variants.add(buildRig(id).bulk);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { Coordinator, OwnershipError, LEASE_MS } from '../src/coordinator.js';
+import { Coordinator, OwnershipError, LEASE_MS, NODE_TIMEOUT_MS, type NodeRegistration } from '../src/coordinator.js';
 import type { SavedPlayer } from '../src/persistence.js';
 import { PLANETS } from '@shared/universe';
 import { DatabaseSync } from 'node:sqlite';
@@ -131,4 +131,63 @@ test('legacy characters migrate once and region namespaces remain disjoint acros
     c?.close(); assert.equal(path.dirname(path.resolve(root)), path.resolve(tmpdir())); assert.ok(path.basename(root).startsWith('the-mmofps-identity-'));
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('planet ownership follows the newest live heartbeat without retaining mutable caller arrays', () => {
+  let now = 10000; const c = new Coordinator(':memory:', () => now);
+  const ownership: [number, number, number, number] = [.1, .2, .3, .4];
+  const registration: NodeRegistration = { id: 'meridian', planet: 'meridian', url: 'ws://127.0.0.1:1000/ws',
+    capacity: 64, humans: 3, tick: 0, ownership, ownershipPoints: 10 };
+  try {
+    const grant = c.register(registration); ownership[0] = 1;
+    assert.deepEqual(c.status().planets[0].ownership, [.1, .2, .3, .4]);
+    c.route('meridian')!.ownership![0] = 1; c.node('meridian')!.ownership![1] = 1;
+    assert.deepEqual(c.status().planets[0].ownership, [.1, .2, .3, .4], 'status and route consumers cannot mutate the cached report');
+    now += 2000; c.register({ ...registration, ownership: [0, .25, .25, .5], epoch: grant.epoch, tick: 120 });
+    assert.deepEqual(c.status().planets[0].ownership, [0, .25, .25, .5]);
+    c.register({ ...registration, ownership: [1, 0, 0, 0], epoch: grant.epoch, tick: 60 });
+    assert.deepEqual(c.status().planets[0].ownership, [0, .25, .25, .5], 'a delayed heartbeat cannot roll the map back');
+    now += NODE_TIMEOUT_MS + 1;
+    assert.equal(c.status().planets[0].ownership, undefined, 'a lost authority cannot publish stale ownership indefinitely');
+    c.register({ ...registration, id: 'replacement', ownership: [0, 0, 0, 1], tick: 121 });
+    assert.deepEqual(c.status().planets[0].ownership, [0, 0, 0, 1]);
+    assert.equal(c.status().planets[0].players, 3, 'retired workers are not counted again');
+    assert.throws(() => c.register({ ...registration, ownership: [.1, .2, .3, .4], epoch: grant.epoch }), code('fenced'));
+  } finally { c.close(); }
+});
+
+test('ownership registration rejects malformed or unnormalized fractions without changing the authority', () => {
+  const c = new Coordinator(':memory:'), registration: NodeRegistration = { id: 'meridian', planet: 'meridian',
+    url: 'ws://127.0.0.1:1000/ws', capacity: 64, humans: 0, tick: 0, ownership: [1, 0, 0, 0], ownershipPoints: 10 };
+  try {
+    const grant = c.register(registration);
+    for (const invalid of [
+      { ownership: [0, 0, 0] }, { ownership: [0, 0, 0, 0] }, { ownership: [1, 1, 0, 0] },
+      { ownership: [-.1, 1.1, 0, 0] }, { ownership: [NaN, 0, 0, 0] }, { ownership: [Infinity, 0, 0, 0] },
+      { ownership: ['1', 0, 0, 0] }, { ownershipPoints: -1 }, { ownershipPoints: 1.5 }, { ownershipPoints: 100001 },
+      { ownership: undefined, ownershipPoints: 10 },
+    ]) assert.throws(() => c.register({ ...registration, ...invalid, epoch: grant.epoch } as NodeRegistration), code('invalid'));
+    assert.deepEqual(c.status().planets[0].ownership, [1, 0, 0, 0]);
+  } finally { c.close(); }
+});
+
+test('regional ownership is weighted by control point counts and incomplete reports remain unknown', () => {
+  let now = 10000; const c = new Coordinator(':memory:', () => now);
+  c.configureRegions('meridian', { version: 2, xCuts: [0], zCuts: [], entry: { x: -1, z: 0 } });
+  const registration = (id: string, region: string): NodeRegistration => ({ id, planet: 'meridian', region,
+    url: 'ws://127.0.0.1:1000/ws', capacity: 10, humans: 1, tick: 0 });
+  try {
+    const west = c.register({ ...registration('west', 'r0:0'), ownership: [.5, .5, 0, 0], ownershipPoints: 6 });
+    assert.equal(c.status().planets[0].ownership, undefined, 'the missing half of the world is not labeled neutral');
+    c.register({ ...registration('east', 'r1:0'), ownership: [0, 0, .25, .75], ownershipPoints: 2 });
+    assert.deepEqual(c.status().planets[0].ownership, [.375, .375, .0625, .1875]);
+    assert.throws(() => c.register({ ...registration('duplicate', 'r1:0'), ownership: [0, 1, 0, 0], ownershipPoints: 999 }), code('busy'));
+    assert.deepEqual(c.status().planets[0].ownership, [.375, .375, .0625, .1875]);
+    now += 4000; c.register({ ...registration('west', 'r0:0'), epoch: west.epoch, ownership: [.5, .5, 0, 0], ownershipPoints: 6 });
+    now += 4100;
+    assert.equal(c.status().planets[0].ownership, undefined, 'one stale region invalidates the whole-planet percentage');
+    c.register({ ...registration('east-new', 'r1:0'), ownership: [0, 0, 0, 1], ownershipPoints: 2 });
+    assert.deepEqual(c.status().planets[0].ownership, [.375, .375, 0, .25]);
+    assert.equal(c.status().planets[0].capacity, 20);
+  } finally { c.close(); }
 });

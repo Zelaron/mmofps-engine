@@ -13,10 +13,17 @@ import { MAX_CHARACTER_ID, MAX_ENTITY_NAMESPACES } from '@shared/entity-id';
 import { RegionGrid, type RegionLayout, type RegionBounds } from '@shared/regions';
 import { RegionTransfers, type RegionalHandoffRequest, type AuthorityToken } from './region-transfers.js';
 import { sameOutpostScope, type OutpostCursor, type RegionalOutposts, type OutpostCellUpdate } from './outpost-replica.js';
+import { CampaignLedger, type CampaignDeparture, type CampaignExchangeRequest } from './campaign-ledger.js';
 
 import { LEASE_MS, NODE_TIMEOUT_MS } from './ownership-constants.js';
 export { LEASE_MS, NODE_TIMEOUT_MS } from './ownership-constants.js';
-export interface NodeRegistration { id: string; planet: PlanetId; region?: string; url: string; capacity: number; humans: number; tick: number; epoch?: number }
+export type PlanetOwnership = NonNullable<UniverseStatus['planets'][number]['ownership']>;
+export interface NodeRegistration {
+  id: string; planet: PlanetId; region?: string; url: string; capacity: number; humans: number; tick: number; epoch?: number;
+  /** Fractions and denominator include only control points owned by this region's simulation. */
+  ownership?: PlanetOwnership;
+  ownershipPoints?: number;
+}
 export interface NodeRecord extends NodeRegistration { region: string; epoch: number; leaseUntil: number }
 export interface AuthorityGrant { epoch: number; ttl: number; clockTick: number }
 export interface Ownership {
@@ -40,6 +47,7 @@ export class Coordinator {
   private readonly grids = new Map<PlanetId, RegionGrid>();
   private regional!: RegionTransfers;
   private entities!: EntityLedger;
+  private campaign!: CampaignLedger;
   private readonly now: () => number;
   private readonly clocks: PlanetClocks;
   constructor(file: string, wall: () => number = Date.now,
@@ -113,6 +121,8 @@ export class Coordinator {
         if (invalid.n) throw new Error('Character database contains invalid entity IDs');
       });
       this.entities = this.transaction(() => new EntityLedger(this.db, id => this.node(id)));
+      this.campaign = this.transaction(() => new CampaignLedger(this.db, { now: this.now, node: id => this.node(id),
+        route: (planet, region) => this.route(planet, region), entityOrigin: (id, source) => this.entities.originated(id, source) }));
       this.regional = this.transaction(() => new RegionTransfers(this.db, {
         now: this.now, tick: planet => this.clocks.sample(planet), node: id => this.node(id), locate: key => this.locate(key),
         layout: planet => this.layout(planet), region: (planet, position) => this.region(planet, position),
@@ -122,6 +132,10 @@ export class Coordinator {
     } catch (error) { this.db.close(); throw error; }
   }
   close(): void { this.db.close(); }
+  campaignExchange(request: CampaignExchangeRequest) { return this.transaction(() => this.campaign.exchange(request)); }
+  departCampaign(request: CampaignDeparture) { return this.transaction(() => this.campaign.depart(request)); }
+  cancelCampaign(request: CampaignDeparture) { return this.transaction(() => this.campaign.cancel(request)); }
+  inspectCampaign(id: string, authority: AuthorityToken) { return this.transaction(() => this.campaign.inspect(id, authority)); }
   reserveEntities(request: EntityReservation) {
     if (!request || !planetById(request.planet) || typeof request.region !== 'string' || !this.grids.get(request.planet)!.get(request.region)) {
       throw new OwnershipError('invalid', 'Invalid entity reservation region');
@@ -199,6 +213,16 @@ export class Coordinator {
       !Number.isSafeInteger(node.humans) || node.humans < 0 || node.humans > node.capacity ||
       !Number.isSafeInteger(node.tick) || node.tick < 0 ||
       node.epoch !== undefined && (!Number.isSafeInteger(node.epoch) || node.epoch < 1)) throw new OwnershipError('invalid', 'Invalid world registration');
+    let ownership: PlanetOwnership | undefined;
+    if (node.ownership !== undefined) {
+      if (!Array.isArray(node.ownership) || node.ownership.length !== 4 ||
+          node.ownership.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1) ||
+          Math.abs(node.ownership.reduce((sum, value) => sum + value, 0) - 1) > .000001 ||
+          node.ownershipPoints !== undefined && (!Number.isSafeInteger(node.ownershipPoints) || node.ownershipPoints < 0 || node.ownershipPoints > 100000))
+        throw new OwnershipError('invalid', 'Invalid territory ownership summary');
+      const total = node.ownership.reduce((sum, value) => sum + value, 0);
+      ownership = node.ownership.map(value => value / total) as PlanetOwnership;
+    } else if (node.ownershipPoints !== undefined) throw new OwnershipError('invalid', 'Territory count requires an ownership summary');
     let url: URL;
     try { url = new URL(node.url); } catch { throw new OwnershipError('invalid', 'Invalid world endpoint'); }
     if (!['ws:', 'wss:'].includes(url.protocol)) throw new OwnershipError('invalid', 'Invalid world endpoint');
@@ -215,11 +239,16 @@ export class Coordinator {
       const known = this.db.prepare('SELECT planet FROM world_incarnations WHERE id=?').get(node.id);
       if (known && previous?.id !== node.id) throw new OwnershipError('fenced', 'World process ID was already retired');
       const epoch = previous?.id === node.id && previous.leaseUntil > now ? previous.epoch : (previous?.epoch ?? 0) + 1;
-      const record: NodeRecord = { ...node, region, epoch, leaseUntil: now + NODE_TIMEOUT_MS };
+      const record: NodeRecord = { ...node, ownership, region, epoch, leaseUntil: now + NODE_TIMEOUT_MS };
+      // A delayed retry can renew a live process without rolling a newer
+      // territorial report back to an older simulation tick.
+      if (previous?.id === node.id && previous.epoch === epoch && node.tick < previous.tick) {
+        record.tick = previous.tick; record.ownership = previous.ownership; record.ownershipPoints = previous.ownershipPoints;
+      }
       this.db.prepare(`INSERT INTO world_authorities(planet,region,id,epoch,lease_until,url,capacity,humans,tick) VALUES(?,?,?,?,?,?,?,?,?)
         ON CONFLICT(planet,region) DO UPDATE SET id=excluded.id,epoch=excluded.epoch,lease_until=excluded.lease_until,
         url=excluded.url,capacity=excluded.capacity,humans=excluded.humans,tick=excluded.tick`)
-        .run(node.planet, region, node.id, epoch, record.leaseUntil, node.url, node.capacity, node.humans, node.tick);
+        .run(node.planet, region, node.id, epoch, record.leaseUntil, node.url, node.capacity, node.humans, record.tick);
       this.db.prepare('INSERT OR IGNORE INTO world_incarnations(id,planet,region) VALUES(?,?,?)').run(node.id, node.planet, region);
       return { record, clockTick: this.clocks.reserve(node.planet) };
     });
@@ -237,11 +266,11 @@ export class Coordinator {
   }
   node(id: string): NodeRecord | null {
     const node = this.nodes.get(id);
-    return node && node.leaseUntil > this.now() ? { ...node } : null;
+    return node && node.leaseUntil > this.now() ? { ...node, ...(node.ownership ? { ownership: [...node.ownership] as PlanetOwnership } : {}) } : null;
   }
   route(planet: PlanetId, region: string = this.region(planet).id): NodeRecord | null {
     const node = this.authorities.get(`${planet}/${region}`);
-    return node && node.leaseUntil > this.now() ? { ...node } : null;
+    return node && node.leaseUntil > this.now() ? { ...node, ...(node.ownership ? { ownership: [...node.ownership] as PlanetOwnership } : {}) } : null;
   }
   routeCharacter(key: string): NodeRecord | null {
     const owner = this.locate(key), planet = owner?.planet ?? 'meridian';
@@ -250,8 +279,21 @@ export class Coordinator {
   status(): UniverseStatus {
     return { system: 'Helios', stars: ['Helios A', 'Helios B'], planets: PLANETS.map(p => {
       const node = this.route(p.id);
-      const live = [...this.nodes.values()].filter(n => n.planet === p.id && n.leaseUntil > this.now());
-      return { id: p.id, available: !!node, players: live.reduce((n, v) => n + v.humans, 0), capacity: live.reduce((n, v) => n + v.capacity, 0) };
+      // One current authority per configured region. Retired process records
+      // cannot double-count a replacement's population or control points.
+      const live = [...this.authorities.values()].filter(n => n.planet === p.id && n.leaseUntil > this.now());
+      const reported = live.filter(n => n.ownership !== undefined), layout = this.grids.get(p.id)!.layout;
+      const complete = reported.length === (layout.xCuts.length + 1) * (layout.zCuts.length + 1);
+      const points = reported.reduce((sum, n) => sum + (n.ownershipPoints ?? 1), 0);
+      let ownership: PlanetOwnership | undefined;
+      if (complete && points > 0) {
+        ownership = [0, 0, 0, 0];
+        for (const report of reported) for (let faction = 0; faction < 4; faction++)
+          ownership[faction] += report.ownership![faction] * (report.ownershipPoints ?? 1) / points;
+      }
+      const campaign = this.campaign.summary(p.id);
+      return { id: p.id, available: !!node, players: live.reduce((n, v) => n + v.humans, 0),
+        capacity: live.reduce((n, v) => n + v.capacity, 0), ...(ownership ? { ownership } : {}), ...(campaign ? { campaign } : {}) };
     }) };
   }
   private ownsWorld(owner: Ownership): boolean {

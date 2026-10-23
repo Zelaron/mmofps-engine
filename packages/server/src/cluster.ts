@@ -7,7 +7,7 @@ import { Coordinator, NODE_TIMEOUT_MS } from './coordinator.js';
 import { startControlPlane } from './control-plane.js';
 import { startGateway } from './gateway.js';
 import { WorldStore } from './persistence.js';
-import { defaultClientDir } from './server.js';
+import { DEFAULT_TARGET_POPULATION, defaultClientDir } from './server.js';
 
 interface ClusterOptions {
   port?: number; host?: string; dataDir?: string; clientDir?: string;
@@ -52,13 +52,13 @@ export async function startCluster(options: ClusterOptions = {}) {
   const launch = async (planet: typeof PLANETS[number]): Promise<Worker> => {
     if (stopping) throw new Error('Cluster is stopping');
     const child = fork(entry, [], {
-      execArgv: ['--experimental-sqlite', ...(entry.endsWith('.ts') ? ['--import', 'tsx'] : [])],
+      execArgv: ['--experimental-sqlite', '--max-semi-space-size=64', ...(entry.endsWith('.ts') ? ['--import', 'tsx'] : [])],
       stdio: ['ignore', options.log === false ? 'ignore' : 'inherit', 'pipe', 'ipc'],
       env: { ...process.env, MMOFPS_ROLE: 'world', PLANET_ID: planet.id,
         WORLD_NODE_ID: `${planet.id}:${randomUUID()}`, COORDINATOR_URL: `http://${localControlHost}:${control.port}`,
         COORDINATOR_SECRET: secret, NODE_ADVERTISE: '', PORT: '0', HOST: '127.0.0.1',
         DATA_DIR: path.join(dataDir, planet.id), CLIENT_DIR: options.clientDir ?? defaultClientDir(),
-        MAX_PLAYERS: String(options.maxPlayers ?? 64), BOTS: String(options.targetPopulation ?? 15), NODE_LOG: options.log === false ? '0' : '1' },
+        MAX_PLAYERS: String(options.maxPlayers ?? 64), BOTS: String(options.targetPopulation ?? DEFAULT_TARGET_POPULATION), NODE_LOG: options.log === false ? '0' : '1' },
     });
     children.add(child);
     child.once('exit', () => children.delete(child));

@@ -1,11 +1,55 @@
 import { PLAYER } from './constants.js';
 import { capsuleClearance, type KinState } from './physics.js';
 import type { CityLiftSite } from './cities.js';
-import type { World } from './worldgen.js';
+import { World } from './worldgen.js';
 
 export const LIFT_SPEED = 4;
 export const LIFT_DWELL = 6;
 const SKIN = .006;
+const LIFT_CELL = 64;
+const NO_LIFTS: readonly CityLiftSite[] = [];
+type LiftGrid = Map<number, Map<number, CityLiftSite[]>>;
+const liftGrids = new WeakMap<readonly CityLiftSite[], LiftGrid | null>();
+
+/** Generated lift sites are static. Keep their original order within every
+ * cell so overlapping decks still resolve exactly as in the full scan.
+ * Custom collectors can return mutable fixtures and retain that full scan. */
+function liftSitesAt(world: World, x: number, z: number): readonly CityLiftSite[] {
+  const sites = world.collectCityLifts();
+  if (sites.length <= 8 || world.collectCityLifts !== World.prototype.collectCityLifts ||
+      !Number.isFinite(x) || !Number.isFinite(z)) return sites;
+  let grid = liftGrids.get(sites);
+  if (grid === undefined) {
+    grid = buildLiftGrid(sites);
+    liftGrids.set(sites, grid);
+  }
+  return grid === null ? sites : grid.get(Math.floor(x / LIFT_CELL))?.get(Math.floor(z / LIFT_CELL)) ?? NO_LIFTS;
+}
+
+function buildLiftGrid(sites: readonly CityLiftSite[]): LiftGrid | null {
+  const grid: LiftGrid = new Map();
+  const margin = PLAYER.RADIUS * .5 + 1e-7;
+  for (const site of sites) {
+    const minX = Math.floor((site.x - site.hx - margin) / LIFT_CELL);
+    const maxX = Math.floor((site.x + site.hx + margin) / LIFT_CELL);
+    const minZ = Math.floor((site.z - site.hz - margin) / LIFT_CELL);
+    const maxZ = Math.floor((site.z + site.hz + margin) / LIFT_CELL);
+    // Keep unusual custom world data conservative without allocating an
+    // unbounded grid or changing how the existing contact test treats it.
+    if (![minX, maxX, minZ, maxZ].every(Number.isSafeInteger) ||
+        minX > maxX || minZ > maxZ || (maxX - minX + 1) * (maxZ - minZ + 1) > 1024) return null;
+    for (let cx = minX; cx <= maxX; cx++) {
+      let column = grid.get(cx);
+      if (!column) { column = new Map(); grid.set(cx, column); }
+      for (let cz = minZ; cz <= maxZ; cz++) {
+        let bucket = column.get(cz);
+        if (!bucket) { bucket = []; column.set(cz, bucket); }
+        bucket.push(site);
+      }
+    }
+  }
+  return grid;
+}
 
 export interface LiftPose { y: number; velocity: number; waiting: boolean; untilDeparture: number }
 
@@ -38,7 +82,7 @@ export interface LiftApproach { x: number; z: number; grounded: boolean; velocit
  * blocked shaft releases the rider instead of forcing them into a ceiling. */
 export function carryCityLift(world: World, state: KinState, before: number, now: number): LiftContact | null {
   if (!state.grounded || state.vy > .1 || !world.collectCityLifts) return null;
-  for (const site of world.collectCityLifts()) {
+  for (const site of liftSitesAt(world, state.px, state.pz)) {
     if (!insideLift(site, state.px, state.pz)) continue;
     const from = cityLiftPose(site, before);
     if (Math.abs(state.py - from.y - SKIN) > .08) continue;
@@ -56,7 +100,7 @@ export function landOnCityLift(world: World, state: KinState, previousFeet: numb
   before: number, now: number, carried: LiftContact | null, jumped: boolean, approach?: LiftApproach): number {
   let impact = 0;
   if (!world.collectCityLifts) return impact;
-  for (const site of world.collectCityLifts()) {
+  for (const site of liftSitesAt(world, state.px, state.pz)) {
     if (!insideLift(site, state.px, state.pz)) continue;
     const to = cityLiftPose(site, now);
     const from = carried?.site.id === site.id ? carried.from : cityLiftPose(site, before);

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { installOperatorBody, disposeOperatorBody } from './operator-body.js';
 import { FACTIONS, type Faction } from '@shared/frontier';
 import { PLAYER, VEHICLE, mulberry32, vehicleQuaternion, aircraftCrewMuzzle, type Rotation } from '@shared/index';
 import type { PlayerView } from '../interp.js';
@@ -108,6 +109,9 @@ class Part {
     }
     const mesh = new THREE.Mesh(geometry, BODY_MATERIAL);
     mesh.name = key.slice(key.indexOf(':') + 1);
+    // Authored offsets are baked into geometry; animation moves the parent
+    // joints. Cache only this local matrix, retaining moving world transforms.
+    mesh.updateMatrix(); mesh.matrixAutoUpdate = false;
     return mesh;
   }
 }
@@ -321,8 +325,11 @@ export function buildRig(id: number): Rig {
   swapGun(rig, 1);
   poseLeg(rig.legL, rig.kneeL, rig.footL, 0, ANKLE_HEIGHT - HIP_HEIGHT, 0, 0);
   poseLeg(rig.legR, rig.kneeR, rig.footR, 0, ANKLE_HEIGHT - HIP_HEIGHT, 0, 0);
+  installOperatorBody(group, rig.gunMount, variant);
   return rig;
 }
+
+export function disposeRig(rig: Rig): void { disposeOperatorBody(rig.group); }
 
 const DOWN = new THREE.Vector3(0, -1, 0);
 const AIM_POSE = new THREE.Quaternion();
@@ -491,6 +498,26 @@ export class PlayerModels {
   setFactions(rows: { id: number; faction: Faction }[]): void {
     this.factions.clear(); for (const row of rows) this.factions.set(row.id, row.faction);
   }
+
+  /** Name tags are unique to an actor; body, weapon and hull assets are shared. */
+  remove(id: number): void {
+    const model = this.models.get(id);
+    if (!model) return;
+    if (model.hull) disposeVehicleHull(model.hull);
+    if (model.crew) disposeVehicleHull(model.crew);
+    disposeRig(model.rig);
+    model.tag.material.map?.dispose();
+    model.tag.material.dispose();
+    this.group.remove(model.root);
+    this.models.delete(id);
+  }
+
+  /** A welcome replaces the remote population, including reused actor IDs. */
+  clear(): void {
+    for (const id of this.models.keys()) this.remove(id);
+    this.factions.clear();
+  }
+
   private ensure(id: number, name: string): Model {
     let m = this.models.get(id);
     if (m) return m;
@@ -619,14 +646,7 @@ export class PlayerModels {
       m.crew.quaternion.premultiply(HULL_PARENT_ROTATION.set(0,Math.sin(-v.yaw/2),0,Math.cos(-v.yaw/2)));
       aimVehicleWeapon(m.crew,v.yaw,v.pitch);updateVehicleHull(m.crew,{dt,speed:0});
     }
-    for (const [id, m] of this.models) {
-      if (!present.has(id)) {
-        if (m.hull) disposeVehicleHull(m.hull);
-        if (m.crew) disposeVehicleHull(m.crew);
-        this.group.remove(m.root);
-        this.models.delete(id);
-      }
-    }
+    for (const id of this.models.keys()) if (!present.has(id)) this.remove(id);
   }
 
   /** Approximate muzzle position for a remote player's tracer. */

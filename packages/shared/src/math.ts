@@ -17,6 +17,21 @@ export function len3(x: number, y: number, z: number): number {
   return Math.sqrt(x * x + y * y + z * z);
 }
 
+/** Two numeric arguments only: scaled, ordered Math.hypot arithmetic without
+ * the temporary argument array used by Node 22's generic builtin. The first
+ * Kahan compensation is zero and the final compensation is unused for two
+ * terms. Keep Infinity before NaN and return positive zero for either sign.
+ * This is not a replacement for Math.hypot's variadic/coercion contract. */
+export function hypot2(x: number, y: number): number {
+  const a = Math.abs(x), b = Math.abs(y);
+  if (a === Infinity || b === Infinity) return Infinity;
+  if (a !== a || b !== b) return NaN;
+  const max = a > b ? a : b;
+  if (max === 0) return 0;
+  const an = a / max, bn = b / max;
+  return Math.sqrt(an * an + bn * bn) * max;
+}
+
 /** Wrap an angle to [-PI, PI). */
 export function wrapAngle(a: number): number {
   a = a % TAU;

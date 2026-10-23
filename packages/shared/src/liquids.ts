@@ -27,7 +27,16 @@ export function islandCoastDistance(seed: number, x: number, z: number): number 
   const radius = islandRadius(x, z), angle = Math.atan2(z, x);
   return radius - 80 * Math.sin(angle * 7 + seed * .01) - 45 * Math.sin(angle * 13);
 }
-const volumes: readonly LiquidVolume[] = [
+// Keep optional fields in the same layout for each hot query input. Creating
+// the river with an extra property caused repeated V8 wrong-map bailouts.
+function uniformVolumes(definitions: readonly LiquidVolume[]): readonly LiquidVolume[] {
+  return definitions.map(volume => ({
+    id: volume.id, name: volume.name, kind: volume.kind, shape: volume.shape,
+    x: volume.x, z: volume.z, rx: volume.rx, rz: volume.rz, level: volume.level, depth: volume.depth,
+    points: volume.points, underground: volume.underground,
+  }));
+}
+const volumes: readonly LiquidVolume[] = uniformVolumes([
   { id: 1, name: 'Outer Ocean', kind: 'water', shape: 'ocean', x: 0, z: 0, rx: 11264, rz: 11264, level: 0, depth: 62 },
   { id: 2, name: 'Lake Halcyon', kind: 'water', shape: 'ellipse', x: 4900, z: 1200, rx: 700, rz: 500, level: 6, depth: 22 },
   { id: 3, name: 'Halcyon River', kind: 'water', shape: 'river', x: 7500, z: 1250, rx: 2800, rz: 400, level: 6, depth: 16,
@@ -35,7 +44,7 @@ const volumes: readonly LiquidVolume[] = [
       { x: 8300, z: 1100, level: 1.5 }, { x: 9800, z: 1100, level: 0 }] },
   { id: 4, name: 'Emerald Lagoon', kind: 'water', shape: 'ellipse', x: 450, z: 1250, rx: 190, rz: 140, level: 12, depth: 14 },
   { id: 5, name: 'Highland Tarn', kind: 'water', shape: 'ellipse', x: -2800, z: -1200, rx: 270, rz: 185, level: 62, depth: 18 },
-];
+]);
 export function surfaceLiquidVolumes(): readonly LiquidVolume[] { return volumes; }
 
 /** Horizontal footprint and local level. Depth is bounded independently of the surface. */

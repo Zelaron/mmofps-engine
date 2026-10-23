@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { World } from '../src/worldgen.js';
+import { World, type ColumnData } from '../src/worldgen.js';
 import { cavePathPoint } from '../src/caves.js';
 import { transportPose } from '../src/transport.js';
 import { transitWorld } from '../src/transit-motion.js';
@@ -33,19 +33,116 @@ test('vertical collision probes reuse exact columns without changing public colu
   assert.equal(world.column(x, z).h, fresh.h, 'public column calls remain fresh');
 });
 
-test('the 512-entry FIFO evicts one column without dropping the other hot columns', () => {
+const analyticColumn = (x: number, z: number): ColumnData => ({ h: x * 1.125 + z * 2.375,
+  temp: .5, moist: .5, desert: 0, entr: 0, entrRaw: 0, volc: 0, lavaY: -1000 });
+
+// Probe the cache directly: public simulation helpers deliberately bypass it
+// for these injected generators because custom terrain can change in place.
+function cachedHeight(world: World, x: number, z: number): number {
+  return (world as unknown as { cachedColumn(x: number, z: number): ColumnData }).cachedColumn(x, z).h;
+}
+
+function cacheConflicts(): { a: number; b: number; c: number; other: number; z: number } {
+  const world = new World(1337), z = 23.75;
+  const slots = (world as unknown as { sdfColumns: (ColumnData | undefined)[] }).sdfColumns;
+  assert.equal(slots.length, 32768);
+  let generated: ColumnData;
+  world.column = (x, z) => generated = analyticColumn(x, z);
+  const buckets = new Map<number, number[]>();
+  // Discover actual conflicts through stored object identity, rather than
+  // duplicating the hash under test or relying on lucky natural samples.
+  for (let i = 0; i <= slots.length; i++) {
+    const x = i * .25 + .125;
+    cachedHeight(world, x, z);
+    const slot = slots.findIndex(entry => entry === generated!);
+    assert.ok(slot >= 0);
+    const bucket = slot >> 1, points = buckets.get(bucket) ?? [];
+    points.push(x); buckets.set(bucket, points);
+    if (points.length === 3 && buckets.size > 1) {
+      const other = [...buckets].find(([key]) => key !== bucket)![1][0];
+      return { a: points[0], b: points[1], c: points[2], other, z };
+    }
+  }
+  throw new Error('Fixture did not find three competing coordinates');
+}
+
+test('two-way column buckets evict only a competing coordinate and preserve exact recomputed values', () => {
+  const { a, b, c, other, z } = cacheConflicts(), world = new World(1337);
+  let calls = 0;
+  world.column = (x, z) => { calls++; return analyticColumn(x, z); };
+  const check = (x: number) => assert.equal(cachedHeight(world, x, z), analyticColumn(x, z).h);
+  check(a); check(b); check(other);
+  assert.equal(calls, 3);
+  check(a); check(b); check(other);
+  assert.equal(calls, 3, 'both ways and unrelated buckets are reusable');
+  check(c);
+  assert.equal(calls, 4);
+  check(b); check(other);
+  assert.equal(calls, 4, 'one conflict cannot flush the other way or another bucket');
+  check(a);
+  assert.equal(calls, 5, 'the displaced coordinate is regenerated with identical values');
+  check(c); check(other);
+  assert.equal(calls, 5);
+});
+
+test('column storage remains bounded after more distinct queries than its full capacity',()=>{
+  const world=new World(1337),slots=(world as unknown as {sdfColumns:(ColumnData|undefined)[]}).sdfColumns;
+  let calls=0;world.column=(x,z)=>{calls++;return analyticColumn(x,z);};
+  const count=slots.length+257;
+  for(let pass=0;pass<2;pass++)for(let i=0;i<count;i++){
+    const x=i*.123+.125,z=-i*.457-.375;
+    assert.equal(cachedHeight(world,x,z),analyticColumn(x,z).h);
+  }
+  assert.ok(calls>count,'overflow must evict and recompute some exact coordinates');
+  assert.equal(slots.length,32768);assert.ok(slots.filter(Boolean).length<=32768);
+});
+
+test('nested column generation cannot overwrite the outer hash key or another cached coordinate', () => {
+  const { a, b, c, other, z } = cacheConflicts(), world = new World(1337);
+  let calls = 0;
+  world.column = (x, z) => {
+    calls++;
+    if (x === a) for (const nested of [b, c, other]) {
+      assert.equal(cachedHeight(world, nested, z), analyticColumn(nested, z).h);
+    }
+    return analyticColumn(x, z);
+  };
+  assert.equal(cachedHeight(world, a, z), analyticColumn(a, z).h);
+  assert.equal(calls, 4);
+  for (const x of [a, c, other]) assert.equal(cachedHeight(world, x, z), analyticColumn(x, z).h);
+  assert.equal(calls, 4, 'outer and surviving nested records remain in their own slots');
+  assert.equal(cachedHeight(world, b, z), analyticColumn(b, z).h);
+  assert.equal(calls, 5, 'outer insertion replaced only one conflicting nested record');
+});
+
+test('exact column keys retain distinct fractional coordinates, signed-zero aliases and invalid-query isolation', () => {
   const world = new World(1337);
-  world.regionAt(.125, 23.75); world.regionAt(999.125, 23.75);
-  const calls = countColumns(world);
-  for (let i = 0; i < 512; i++) world.sdf(i * .01 + .125, 200, 23.75);
-  assert.equal(calls(), 512);
-  world.sdf(.125, 201, 23.75); // Hits do not change FIFO insertion order.
-  world.sdf(999.125, 201, 23.75);
-  assert.equal(calls(), 513);
-  for (let i = 1; i < 512; i++) world.sdf(i * .01 + .125, 202, 23.75);
-  assert.equal(calls(), 513, 'capacity pressure must not clear the whole cache');
-  world.sdf(.125, 203, 23.75);
-  assert.equal(calls(), 514, 'only the oldest coordinate should have been evicted');
+  let calls = 0;
+  world.column = (x, z) => { calls++; return { ...analyticColumn(x, z), h: x }; };
+  assert.equal(cachedHeight(world, -0, 0), -0);
+  assert.equal(cachedHeight(world, 0, -0), -0, 'zero aliases retain the first generated value, like numeric Map keys');
+  assert.equal(calls, 1);
+  for (const [x, z] of [[Number.MIN_VALUE, 0], [-Number.MIN_VALUE, 0], [Number.EPSILON, 0],
+    [1.25, 2.5], [1.25 + Number.EPSILON, 2.5], [1.25, 2.5 + Number.EPSILON * 2],
+    [2 ** 53, 0], [2 ** 53 + 2, 0], [NaN, 0], [Infinity, 0], [-Infinity, 0]]) {
+    assert.equal(cachedHeight(world, x, z), x);
+    assert.equal(cachedHeight(world, .375, -.625), .375, 'invalid or colliding keys cannot poison a finite sample');
+  }
+});
+
+test('reusing a cache slot never mutates a previously returned column', () => {
+  const { a, b, c, z } = cacheConflicts(), world = new World(1337);
+  world.column = analyticColumn;
+  const query = (x: number) => (world as unknown as { cachedColumn(x: number, z: number): ColumnData }).cachedColumn(x, z);
+  const first = query(a), other = query(b), saved = structuredClone(first);
+  query(c); // Reuses the first way's private storage.
+  assert.deepEqual(first, saved);
+  assert.equal(query(b), other);
+  const regenerated = query(a);
+  assert.notEqual(regenerated, first);
+  assert.deepEqual(regenerated, first);
+  query(c);
+  assert.deepEqual(first, saved);
 });
 
 test('cached columns preserve the exact canonical field across cave, coast and capital heights', () => {

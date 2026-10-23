@@ -1,6 +1,7 @@
 import { allocateEntityId, isEntityId, namespaceRange, LOCAL_ENTITY_RANGE, type EntityIdRange, type EntityAllocator } from '@shared/entity-id';
 import {
   World, mulberry32, hash2i, clamp, viewDir, aircraftCrewAim, aircraftCrewMuzzle, crewGunMuzzle,
+  unquantYaw, lockedHullDamageFactor,
   TICK_RATE, TICK_DT, SNAPSHOT_EVERY, PLAYER, WORLD, NET, SWIMMING,
   createMoveState, stepMove, fallDamage,
   type MoveState, type InputCmd, BTN,
@@ -15,8 +16,8 @@ import {
   VEHICLE, VEHICLE_DEFS, VEHICLE_VARIANT, bastionGunMuzzle, gunboatGunMuzzle, vehicleDefinition, vehicleArmament, weaponDefById, vehicleEyeHeight, vehicleLocalOffset, jetBombBay, jetGunMuzzle,
   JEEP_MG, TANK_CANNON, TANK_CLUSTER, CLUSTER_BOMBLET, CLUSTER_COUNT, RUN_OVER,
   JET_MG, JET_BOMB, NOCTURNE_LANCE, CARPET_BOMB_COUNT,
-  LOCK_CONE_COS, LOCK_RANGE, LOCK_TICKS, LOCKED_HULL_DAMAGE_FACTOR,
-  HOMING_SPEED_FACTOR, HOMING_RANGE_FACTOR, HOMING_TURN_RATE, HOMING_BREAK_COS,
+  LOCK_CONE_COS, LOCK_RANGE, LOCK_TICKS,
+  HOMING_SPEED_FACTOR, HOMING_RANGE_FACTOR, HOMING_TURN_RATE, HOMING_AIR_TURN_RATE, HOMING_BREAK_COS,
   LOCK_NONE, LOCK_ACQUIRING, LOCK_LOCKED,
   STRUCTURE_KIND, type StructureKind, type VehicleType,
   ByteWriter, encodeSnapshot, encodeJoin, encodeLeave, encodeSpawn, encodeDeath,
@@ -32,21 +33,31 @@ import { cityRewardSites } from '@shared/cities';
 import { cityLifeRewards } from '@shared/city-life';
 import { buildJungleTemplePlan, templeTrapTouches } from '@shared/jungle-temples';
 import { cityVehicleSites } from '@shared/cities';
+import { vesperRoutes } from '@shared/vesper-city';
 import { carryTransit, placeTrainArtillery, transitImpactDamage } from '@shared/transit-motion';
 import { carryCityLift } from '@shared/lifts';
 import { GUNBOAT_DRAFT, trainArtilleryMuzzle, vehicleEyeOffset, artilleryPitch, MAX_OWNED_ARTILLERY_SHELLS } from '@shared/vehicles';
 import { harborBoatSite } from '@shared/transport';
 import { airliftPose, airliftDuration, AIRLIFT_CHARGE_SECONDS } from '@shared/airlift';
+import { setVehicleColliders, updateVehicleCollider, withVehicleColliders, type VehicleColliderPose } from '@shared/vehicle-collision';
 import { Wildlife, type Creature } from './wildlife.js';
 import { Frontier } from './frontier.js';
 import { OutpostSystem } from './outposts.js';
 import { SpatialIndex } from './spatial-index.js';
-import type { Faction } from '@shared/frontier';
+import { FACTIONS, type Faction, type SpawnOption } from '@shared/frontier';
+import { botCampaignRole, botRoleId } from './bots.js';
+import { aircraftThreatFor } from './aircraft-threat.js';
+import { BotSimulation } from './bot-simulation.js';
+import { stepBotGroundVehicle } from './bot-vehicle-simulation.js';
 import { captureActors, prepareArrival, validateHandoff, type RuntimeHandoff, type DetachedHandoff } from './runtime-handoff.js';
 
 // The authoritative simulation. Runs at a fixed 60 Hz; consumes queued client
 // inputs, resolves combat with lag compensation, and emits snapshots+events.
 // It knows nothing about WebSockets - connections implement PlayerSink.
+
+const NATIVE_WEAPON_TRACE = World.prototype.trace;
+// These thin weapons have no gameplay effect on a terrain-only impact.
+const DISTANT_MISS_WEAPONS: readonly number[] = [0, 1, 2, 7, 8, 200, 204, 214];
 
 export interface PlayerSink {
   send(bytes: Uint8Array): void;
@@ -63,12 +74,18 @@ export class ServerPlayer {
   ammo: WeaponAmmo[] = createFullAmmoLoadout();
   regenBlockUntil = 0;
   respawnAtTick = -1;
+  preferredSpawnId = '';
+  spawnProtectedUntil = -1;
+  botRosterIndex?: number;
+  lastDeath?: { x: number; y: number; z: number };
   faction: Faction = 0;
   factionChangeAt = 0;
   salvage = 30;
   salvageSpent = 0;
   salvageEarned = 0;
   discoveries = new Set<string>();
+  /** Planet seeds whose one-time conquest contract has been earned. */
+  campaignRewards: number[] = [];
   lastInputAtTick = 0;
   frags = 0;
   deaths = 0;
@@ -156,6 +173,9 @@ export interface ServerVehicle {
   transportRoute?: number;
   motionState?: MoveState;
   respawnAtTick: number;
+  campaignFaction?: Faction;
+  campaignBaseId?: string;
+  campaignHome?: { x: number; y: number; z: number; heading: number };
 }
 
 interface VehicleSite {
@@ -222,6 +242,10 @@ export const PICKUP_GRACE_TICKS = Math.round(0.25 * TICK_RATE);
 export const MAX_LIVE_PICKUPS = 48;
 export const HEALTH_PICKUP_AMOUNT = 35;
 export const BOT_AMMO_REGEN_TICKS = 8 * TICK_RATE;
+export const BOSS_REWARD_LIFETIME_TICKS = 5 * 60 * TICK_RATE;
+export const BOSS_REWARD_RESERVATION_TICKS = 90 * TICK_RATE;
+export const BOSS_CONTRIBUTION_WINDOW_TICKS = 2 * 60 * TICK_RATE;
+export const BOSS_MIN_DAMAGE_FRACTION = .01;
 const PICKUP_COLLECT_RADIUS = 1.25;
 const PICKUP_CONTACT_RELEASE_RADIUS = 1.55;
 const PICKUP_PLAYER_CELL_SIZE = 4;
@@ -234,6 +258,9 @@ export interface ServerPickup extends SnapshotPickup {
   expiresAtTick: number;
   /** Cave loot: never expires and never evicted by the live-pickup cap. */
   permanent?: boolean;
+  /** Shared boss cache: participants get time to return before it becomes public. */
+  rewardFor?: ReadonlySet<number>;
+  reservedUntilTick?: number;
 }
 
 /** A fixed cave-loot spot that respawns its pickup after collection. */
@@ -271,11 +298,14 @@ export class Game {
   readonly pickups = new Map<number, ServerPickup>();
   readonly vehicles = new Map<number, ServerVehicle>();
   readonly stats = { shotsFired: 0, kills: 0 };
+  readonly botSimulation = new BotSimulation();
   readonly frontier: Frontier | null;
   readonly camps = new OutpostSystem(this);
   private readonly playerIndex = new SpatialIndex<ServerPlayer>(256);
   private readonly projectileIndex = new SpatialIndex<Projectile>(256);
   private readonly ownedArtillery = new Map<number, Projectile[]>();
+  private readonly homingObstructions = new WeakMap<ServerPlayer, Map<number, { fraction: number; tick: number }>>();
+  private readonly rewardedBosses = new WeakSet<Creature>();
 
   teleporterPads: TeleporterPad[] = [];
   private caveLoot: CaveLootSpot[] = [];
@@ -291,6 +321,7 @@ export class Game {
   private vehicleRegionJob: { key: string; iterator: Generator<void> } | null = null;
   private nextVehicleId = 1;
   private nextPlayerId = 1;
+  private nextBotRosterIndex = 0;
   private nextProjectileId = 1;
   private nextPickupId = 1;
   private events: QueuedEvent[] = [];
@@ -308,11 +339,20 @@ export class Game {
     this.idRange = options.entityNamespace === undefined ? LOCAL_ENTITY_RANGE : namespaceRange(options.entityNamespace);
     this.world = new World(seed);
     this.frontier = options.frontier ? new Frontier(this.world) : null;
+    if (this.frontier) {
+      this.frontier.mobileSpawns = p => this.mobileSpawnOptions(p);
+      this.frontier.spawnActors = () => this.players.values();
+    }
     this.wildlifeEnabled = options.wildlife ?? false;
     this.wildlife = new Wildlife(this.world, (id, amount) => {
       const player = this.players.get(id);
-      if (player) this.damage(player, amount, player, 255, 0, 0, 0);
-    }, (creature, attacker) => this.dropCreatureLoot(creature, attacker), this.idRange, this.entityAllocator);
+      if (!player || this.tick < player.spawnProtectedUntil) return;
+      const hull = this.vehicles.get(player.vehicleId);
+      if (hull) this.damageVehicle(hull, amount, null, 255);
+      else this.damage(player, amount, player, 255, 0, 0, 0);
+    }, (creature, attacker) => this.dropCreatureLoot(creature, attacker), this.idRange, this.entityAllocator,
+    { protectedAreas: () => this.frontier?.bases.filter(b => b.owner !== 0).map(b => ({ x: b.x, z: b.z, radius: 80 })) ?? [] });
+    if (this.frontier) this.frontier.threatReports = p => this.wildlife.threatReports(p.state.px, p.state.pz);
     this.rng = mulberry32(seed ^ 0x51ce7);
     this.lootRng = mulberry32(seed ^ 0x10_07_5eed);
     // Bounded districts and filtered runway candidates keep vehicle setup
@@ -585,6 +625,107 @@ export class Game {
         y: state.py - .05, z: state.pz, heading: state.heading });
       v.transportRoute = route.id;
     }
+    this.initCampaignVehicles();
+  }
+
+  private initCampaignVehicles(): void {
+    if (!this.frontier) return;
+    for (const base of this.frontier.bases) {
+      const roads = this.world.collectRoadSegments(base.x - 240, base.x + 240, base.z - 240, base.z + 240).filter(r => !r.trail);
+      const city = base.kind === 'city' ? this.world.collectCities().find(c => base.id === `base-city-${c.id}`) : undefined;
+      // Capitals have walkable decks below their skyline. Parking on the
+      // highest groundY hit places transports on roofs instead of avenues.
+      const lanes = city?.theme === 'vesper'
+        ? vesperRoutes(city).filter(r => Math.abs(r.y - (city.y + .06)) < .1).map(r => ({
+          a: { x: r.ax, y: r.y, z: r.az }, b: { x: r.bx, y: r.y, z: r.bz } }))
+        : city?.theme === 'aurelia' ? [
+          { a: { x: city.x - 200, y: city.y + .06, z: city.z }, b: { x: city.x + 200, y: city.y + .06, z: city.z } },
+          { a: { x: city.x, y: city.y + .06, z: city.z }, b: { x: city.x, y: city.y + .06, z: city.z + 200 } },
+        ]
+        : roads;
+      const points = lanes.flatMap(r => {
+        const dx = r.b.x - r.a.x, dz = r.b.z - r.a.z, length = Math.hypot(dx, dz);
+        const nearest = length ? Math.max(0, Math.min(1, ((base.x - r.a.x) * dx + (base.z - r.a.z) * dz) / (length * length))) : 0;
+        return [-64, -40, -16, 16, 40, 64].map(offset => {
+          const t = Math.max(0, Math.min(1, nearest + offset / Math.max(1, length)));
+          return { x: r.a.x + dx * t, y: city ? city.y + .06 : r.a.y + (r.b.y - r.a.y) * t,
+            z: r.a.z + dz * t, heading: Math.atan2(-dx, -dz) };
+        });
+      }).sort((a, b) => Math.hypot(a.x - base.x, a.z - base.z) - Math.hypot(b.x - base.x, b.z - base.z));
+      const types = base.kind === 'outpost' ? [VEHICLE.JEEP, VEHICLE.JEEP, VEHICLE.TANK, VEHICLE.JEEP, VEHICLE.TANK, VEHICLE.JEEP] as const
+        : base.kind === 'city' ? [VEHICLE.JEEP, VEHICLE.JEEP, VEHICLE.TANK, VEHICLE.JEEP] as const : [VEHICLE.JEEP] as const;
+      let index = 0;
+      for (const point of points) {
+        if (index >= types.length) break;
+        if (Math.hypot(point.x - base.x, point.z - base.z) > 220 || [...this.vehicles.values()].some(v => Math.hypot(v.x - point.x, v.z - point.z) < 16)) continue;
+        const type = types[index], def = vehicleDefinition(type)!, y = city ? point.y : this.world.groundY(point.x, point.z);
+        if (this.world.liquidAt(point.x, y + .1, point.z) || Math.abs(y - point.y) > 2) continue;
+        if ([[0, 0], [def.radius, 0], [-def.radius, 0], [0, def.radius], [0, -def.radius]].some(([dx, dz]) => {
+          const floor = this.world.trace(point.x + dx, y + .8, point.z + dz, 0, -1, 0, 1.6);
+          return !floor.hit || Math.abs(floor.dist - .8) > .3;
+        })) continue;
+        if (this.world.sdf(point.x, y + def.radius, point.z) < def.radius - .15) continue;
+        const site = { type, x: point.x, y, z: point.z, heading: point.heading };
+        this.vehicleSites.push(site);
+        const v = this.spawnVehicleAt(site);
+        v.campaignFaction = base.owner; v.campaignBaseId = base.id;
+        v.campaignHome = { x: site.x, y: site.y, z: site.z, heading: site.heading };
+        index++;
+      }
+    }
+  }
+
+  /** Deploy specialist crews beside real, unoccupied hulls. Boarding and
+   * flight still use their ordinary inputs and authoritative collision. */
+  private stageVehicleCrew(player: ServerPlayer): void {
+    const role = botCampaignRole(botRoleId(player));
+    const type = role === 'pilot' || role === 'aircrew' ? VEHICLE.JET : role === 'sailor' || role === 'navalcrew' ? VEHICLE.GUNBOAT : 0;
+    if (!type) return;
+    const crew = role === 'aircrew' || role === 'navalcrew';
+    const candidates = [...this.vehicles.values()].filter(v => v.type === type &&
+      (crew ? v.campaignFaction === player.faction && (v.gunner ?? -1) < 0 :
+        v.occupant < 0 && (v.campaignFaction === undefined || v.campaignFaction === player.faction)));
+    candidates.sort((a, b) => Math.hypot(a.x - player.state.px, a.z - player.state.pz) - Math.hypot(b.x - player.state.px, b.z - player.state.pz));
+    const hull = candidates[0]; if (!hull) return;
+    const def = vehicleDefinition(type, hull.variant)!;
+    const anchor = hull.respawnAtTick >= 0 ? hull.campaignHome : hull;
+    if (!anchor) return;
+    for (let k = 0; k < 16; k++) {
+      const angle = k * Math.PI / 8, radius = type === VEHICLE.GUNBOAT ? 8 : def.radius + 1.5;
+      const x = anchor.x + Math.cos(angle) * radius, z = anchor.z + Math.sin(angle) * radius, y = this.world.groundY(x, z) + .08;
+      if (this.world.liquidAt(x, y, z) || Math.abs(y - anchor.y) > 5 || capsuleClearance(this.world, x, y, z) < -.02) continue;
+      if ([...this.players.values()].some(p => p.id !== player.id && p.state.alive && this.areEnemies(player, p) &&
+        Math.abs(p.state.py - y) < 60 && Math.hypot(p.state.px - x, p.state.pz - z) < 180)) continue;
+      Object.assign(player.state, { px: x, py: y, pz: z }); hull.campaignFaction = player.faction;
+      hull.campaignHome ??= { x: hull.x, y: hull.y - .05, z: hull.z, heading: hull.heading };
+      return;
+    }
+  }
+
+  private mobileSpawnOptions(player: ServerPlayer): SpawnOption[] {
+    if (!player.faction) return [];
+    const result: SpawnOption[] = [];
+    for (const v of this.vehicles.values()) {
+      if (v.type !== VEHICLE.JEEP || v.respawnAtTick >= 0 || v.campaignFaction !== player.faction || v.health < vehicleDefinition(v.type, v.variant)!.maxHealth * .4) continue;
+      const driver = this.players.get(v.occupant), motion = driver?.state ?? v.motionState;
+      if (motion && (motion.airlift || Math.hypot(motion.vx, motion.vy, motion.vz) > 1.5)) continue;
+      if (this.frontier!.bases.some(b => b.owner === player.faction && Math.hypot(b.x - v.x, b.z - v.z) < 150)) continue;
+      if ([...this.players.values()].some(q => q.state.alive && this.areEnemies(player, q) && Math.hypot(q.state.px - v.x, q.state.pz - v.z) < 100)) continue;
+      const radius = vehicleDefinition(v.type, v.variant)!.radius + 3;
+      for (let k = 0; k < 8; k++) {
+        const x = v.x + Math.cos(k * Math.PI / 4) * radius, z = v.z + Math.sin(k * Math.PI / 4) * radius, y = this.world.groundY(x, z) + .08;
+        if (Math.abs(y - v.y) > 2 || this.world.liquidAt(x, y, z) || capsuleClearance(this.world, x, y, z) < -.02) continue;
+        result.push({ id: `mobile-${v.id}`, name: 'Mobile rally jeep', x, y, z, kind: 'mobile' }); break;
+      }
+    }
+    return result.slice(0, 12);
+  }
+
+  requestRespawn(player: ServerPlayer, id: string): boolean {
+    if (!this.frontier || id.length > 80) return false;
+    if (id && !this.frontier.spawnOptions(player, this.tick).some(option => option.id === id)) return false;
+    player.preferredSpawnId = id;
+    this.frontier.send(player, this.players.values(), this.tick); return true;
   }
 
   private spawnVehicleAt(site: VehicleSite): ServerVehicle {
@@ -608,12 +749,16 @@ export class Game {
 
   /** Active districts carry their own transport and loot density. Bounded
    * candidate steps keep exploration from launching a whole-map rescan. */
-  private updateEncounters(): void {
+  private updateEncounters(backlog = 0): void {
     const field = this.encounterField;
     if (!field) return;
     const humans = [...this.players.values()].filter(p => !p.isBot && p.state.alive);
     const points = humans.length ? humans.map(p => ({ x: p.state.px, z: p.state.pz })) : [{ x: 0, z: 0 }];
-    field.update(points, 1, 8);
+    // Selection/revisions stay current even while new procedural discovery
+    // waits for simulation headroom. One candidate can still overrun; under
+    // debt, a six-tick heartbeat bounds starvation without batching a scan.
+    const behind = backlog >= 2;
+    field.update(points, behind ? 0 : 1, behind ? (this.tick % 6 === 0 ? 1 : 0) : 8);
     if (field.revision !== this.encounterRevision) {
       this.encounterRevision = field.revision;
       if (this.regionalTeleporters) this.teleporterPads = field.pads.slice();
@@ -682,7 +827,7 @@ export class Game {
           if ([...this.vehicles.values()].some(v => Math.hypot(v.x - x, v.z - z) < 12)) continue;
           if (this.vehicles.size >= 160) {
             const players = [...this.players.values()].filter(p => p.state.alive);
-            const removable = [...this.vehicles.values()].filter(v => !v.variant && v.occupant < 0 &&
+            const removable = [...this.vehicles.values()].filter(v => !v.variant && !v.campaignBaseId && !v.campaignHome && v.occupant < 0 &&
               players.every(p => Math.hypot(p.state.px - v.x, p.state.pz - v.z) > 2400));
             removable.sort((a, b) => Math.hypot(b.x - x, b.z - z) - Math.hypot(a.x - x, a.z - z));
             if (!removable[0]) return;
@@ -717,7 +862,9 @@ export class Game {
       if (d2 <= range * range && d2 < bestD2) { best = v; bestD2 = d2; }
     }
     if (!best) return;
+    p.spawnProtectedUntil = -1;
     const driver = this.players.get(best.occupant);
+    if (this.frontier) best.campaignFaction = p.faction;
     if (driver) best.gunner = p.id;
     else best.occupant = p.id;
     p.vehicleId = best.id;
@@ -823,7 +970,10 @@ export class Game {
         const floor = this.world.trace(ex, s.py + (type === VEHICLE.GUNBOAT ? 4.5 : 2), ez, 0, -1, 0, type === VEHICLE.GUNBOAT ? 6 : 8);
         if (!floor.hit) continue;
         const gy = floor.y;
-        if (capsuleClearance(this.world, ex, gy + 0.1, ez) > 0.02) {
+        const exitPose = { ...s, px: ex, py: gy + .1, pz: ez, simulationTick: this.tick };
+        const clear = withVehicleColliders(this.world, exitPose, 0,
+          () => capsuleClearance(this.world, ex, gy + .1, ez));
+        if (clear > 0.02) {
           s.px = ex; s.py = gy + 0.1; s.pz = ez;
           placed = true;
           break outer;
@@ -832,7 +982,7 @@ export class Game {
     }
     if (!placed) {
       // Bail out upward (mid-air jet exits land here) and let physics sort
-      // out the fall; the hull below is not solid to players.
+      // out the fall onto the hull or surrounding terrain.
       s.py += def ? def.radius + 1.2 : 2;
     }
     s.vx = 0; s.vy = 0; s.vz = 0;
@@ -859,7 +1009,7 @@ export class Game {
    * speed, survivable (with a shove) only at a crawl. Occupants of other
    * vehicles are immune - hull-vs-hull stays a weapons matter.
    */
-  private sweepRunOver(driver: ServerPlayer): void {
+  private sweepRunOver(driver: ServerPlayer, from?: {x:number;y:number;z:number}): void {
     const s = driver.state;
     const def = vehicleDefinition(s.vehicle, s.vehicleVariant);
     if (!def) return;
@@ -870,11 +1020,19 @@ export class Game {
       if (q.id === driver.id || !q.state.alive) continue;
       if (q.state.vehicle !== VEHICLE.NONE) continue;
       if (this.tick < q.ranOverUntilTick) continue;
-      const dx = q.state.px - s.px;
-      const dz = q.state.pz - s.pz;
+      // Batched remote ground motion is short, but its whole segment must
+      // still meet pedestrians; crew and damage continue on every tick.
+      let x=s.px,y=s.py,z=s.pz;
+      if(from){
+        const vx=s.px-from.x,vz=s.pz-from.z,length=vx*vx+vz*vz;
+        const t=length?clamp(((q.state.px-from.x)*vx+(q.state.pz-from.z)*vz)/length,0,1):1;
+        x=from.x+vx*t;y=from.y+(s.py-from.y)*t;z=from.z+vz*t;
+      }
+      const dx = q.state.px - x;
+      const dz = q.state.pz - z;
       if (dx * dx + dz * dz > rr * rr) continue;
-      if (q.state.py > s.py + def.radius * 2 + 0.5 ||
-          q.state.py + PLAYER.HEIGHT < s.py - 0.5) continue;
+      if (q.state.py > y + def.radius * 2 + 0.5 ||
+          q.state.py + PLAYER.HEIGHT < y - 0.5) continue;
       q.ranOverUntilTick = this.tick + 45;
       const dmg = (speed - RUN_OVER_MIN_SPEED + 4) * 22;
       this.damage(q, dmg, driver, RUN_OVER.id, s.vx * 0.5, 6, s.vz * 0.5);
@@ -894,6 +1052,10 @@ export class Game {
       if (attacker.faction === 0 && !occupants.some(p => p.id === attacker.id)) return;
     }
     v.health -= amount;
+    if (this.frontier && attacker) {
+      const victim = this.players.get(v.occupant) ?? this.players.get(v.gunner ?? -1);
+      if (victim && this.areEnemies(attacker, victim)) this.frontier.recordCombat(v.x, v.z, [attacker.faction, victim.faction], this.tick);
+    }
     if (v.health <= 0) this.destroyVehicle(v, attacker, weaponId);
   }
 
@@ -905,6 +1067,7 @@ export class Game {
     const def = vehicleDefinition(v.type, v.variant)!;
     v.health = 0;
     v.respawnAtTick = this.tick + Math.round(def.respawnSeconds * TICK_RATE);
+    updateVehicleCollider(this.world, this.tick, this.vehicleCollider(v));
     const occupants = [this.players.get(v.occupant), this.players.get(v.gunner ?? -1)];
     v.occupant = -1; v.gunner = -1;
     for (const occupant of occupants) if (occupant && occupant.vehicleId === v.id) {
@@ -926,6 +1089,13 @@ export class Game {
 
   private updateVehicles(): void {
     for (const v of this.vehicles.values()) {
+      // Unmanned depot stock follows the base when it changes hands. A crew
+      // or a transport already on the road keeps its allegiance until lost.
+      if (v.campaignBaseId && v.campaignHome && v.occupant < 0 && (v.gunner ?? -1) < 0 &&
+          (v.respawnAtTick >= 0 || (this.tick % TICK_RATE === 0 && Math.hypot(v.x - v.campaignHome.x, v.z - v.campaignHome.z) < 8))) {
+        const base = this.frontier?.bases.find(b => b.id === v.campaignBaseId);
+        if (base) v.campaignFaction = base.owner;
+      }
       if (v.transportRoute) {
         const pose = createMoveState(v.x, v.y, v.z); placeTrainArtillery(this.world, pose, v.transportRoute, this.tick / TICK_RATE);
         v.x = pose.px; v.y = pose.py; v.z = pose.pz; v.heading = pose.heading;
@@ -945,7 +1115,8 @@ export class Game {
       if (this.vehicleSites.length === 0) { v.respawnAtTick = -1; continue; }
       // Respawn elsewhere: pick a random matching site clear of players.
       let site: VehicleSite | null = null;
-      const candidates = v.variant ? this.vehicleSites.filter(s => s.type === v.type && s.variant === v.variant) : this.vehicleSites;
+      const candidates = v.campaignHome ? [{ ...v.campaignHome, type: v.type, variant: v.variant }]
+        : this.vehicleSites.filter(s => s.type === v.type && (s.variant ?? 0) === (v.variant ?? 0));
       for (let attempt = 0; attempt < 8 && candidates.length; attempt++) {
         const candidate = candidates[
           Math.min(
@@ -958,7 +1129,8 @@ export class Game {
         for (const q of this.players.values()) {
           const dx = q.state.px - candidate.x;
           const dz = q.state.pz - candidate.z;
-          if (q.state.alive && dx * dx + dz * dz < 50 * 50) { blocked = true; break; }
+          const clearance = v.campaignHome ? vehicleDefinition(v.type, v.variant)!.radius + 1 : 50;
+          if (q.state.alive && dx * dx + dz * dz < clearance * clearance) { blocked = true; break; }
         }
         if (!blocked) { site = candidate; break; }
       }
@@ -977,26 +1149,34 @@ export class Game {
 
   // ---- Player lifecycle --------------------------------------------------
 
-  /**
-   * Spawns anchor to a random living player when one exists: no matter how
-   * far the population roams from the origin, fresh spawns (and respawns)
-   * land a short run away from someone, so there is always nearby action.
-   * Falls back to the origin region when nobody is alive or the anchor's
-   * neighborhood has no safe ground (cliffs, caves, border).
-   */
-  private pickSpawn(excludeId: number): { x: number; y: number; z: number } {
+  /** Campaign reinforcements use held bases; arena fixtures retain their
+   * existing nearby-player spawn policy. Selection is revalidated at spawn. */
+  private pickSpawn(excludeId: number): { x: number; y: number; z: number } | null {
     if (this.frontier) {
       const player = this.players.get(excludeId);
-      const city = this.world.collectCities()[0];
-      const owned = player?.faction ? this.frontier.territories.filter(t => t.owner === player.faction) : [];
-      const anchor = owned.sort((a, b) => Math.hypot(a.x - player!.state.px, a.z - player!.state.pz) - Math.hypot(b.x - player!.state.px, b.z - player!.state.pz))[0];
-      const x = anchor?.x ?? city.x, z = anchor?.z ?? city.z + 192;
-      for (let attempt = 0; attempt < 12; attempt++) {
-        const dx = (this.rng() - .5) * 8, dz = (this.rng() - .5) * 8;
-        const y = this.world.groundY(x + dx, z + dz) + .08;
-        if (capsuleClearance(this.world, x + dx, y, z + dz) >= -.02) return { x: x + dx, y, z: z + dz };
+      if (!player) return null;
+      const options = this.frontier.spawnOptions(player, this.tick);
+      const order = player.isBot ? this.frontier.order(player) : undefined;
+      options.sort((a, b) => Number(b.id === player.preferredSpawnId) - Number(a.id === player.preferredSpawnId) ||
+        (order ? Math.hypot(a.x - order.x, a.z - order.z) - Math.hypot(b.x - order.x, b.z - order.z) : 0));
+      const actors = [...this.players.values()], policy = this.frontier.reinforcementPlanner;
+      for (const anchor of options) {
+        for (let attempt = 0; attempt < 24; attempt++) {
+          const angle = this.rng() * Math.PI * 2, radius = 3 + this.rng() * 14;
+          const x = anchor.x + Math.cos(angle) * radius, z = anchor.z + Math.sin(angle) * radius;
+          // Preserve the rally's pedestrian floor below towers and bridges.
+          const y = anchor.y;
+          if (!policy.supported({ x, y, z }) ||
+            !policy.safe(player, { x, y, z }, actors, this.tick)) continue;
+          if (actors.some(q => q.id !== player.id && q.state.alive && Math.abs(q.state.py - y) < 3 && Math.hypot(q.state.px - x, q.state.pz - z) < 2)) continue;
+          return { x, y, z };
+        }
+        if (policy.safe(player, anchor, actors, this.tick) && policy.supported(anchor))
+          return { x: anchor.x, y: anchor.y, z: anchor.z };
       }
-      return this.world.findSpawnNear(x, z, this.rng) ?? this.world.findSpawn(this.rng);
+      // Stay in the deployment window until a vetted approach is available.
+      // Falling back to an occupied flag recreates an endless defender pileup.
+      return null;
     }
     const alive: ServerPlayer[] = [];
     for (const q of this.players.values()) {
@@ -1022,21 +1202,40 @@ export class Game {
     return allocation.id;
   }
 
+  /** Reserve one intact faction squad for an arriving expedition without
+   * colliding with the ordinals allocated to future local reinforcements. */
+  reserveBotRoster(faction: Faction, count: number): number[] {
+    if (!faction || !Number.isInteger(count) || count < 1 || count > 6) throw new Error('Invalid arriving squad');
+    let start = Math.ceil(this.nextBotRosterIndex / 18) * 18;
+    // Orbital infantry must not turn into runway/naval specialists simply
+    // because the next local ordinal happens to start a flight-crew block.
+    if (Math.floor(start / 3) % 24 === 0) start += 18;
+    this.nextBotRosterIndex = start + 18;
+    return Array.from({ length: count }, (_, i) => start + faction - 1 + i * 3);
+  }
+
   addPlayer(name: string, sink: PlayerSink | null, isBot = false, entityId?: number): ServerPlayer {
     if (entityId !== undefined && (!isEntityId(entityId) || this.players.has(entityId))) throw new Error('Invalid or occupied player ID');
     const id = entityId ?? this.allocateEntity('nextPlayerId', this.players);
-    const spawn = this.pickSpawn(-1);
-    const p = new ServerPlayer(id, name, sink, isBot, spawn);
-    if (!isBot && this.frontier) p.weapon = 1;
-    if (isBot && this.frontier) {
-      p.faction = id % 2 ? 1 : 2;
-      const city = this.world.collectCities()[0];
-      const x = city.x + (p.faction === 1 ? -110 : 110), z = city.z + (id % 5 - 2) * 4;
-      p.state.px = x; p.state.py = city.y + .14; p.state.pz = z;
-    }
+    const initial = this.frontier?.bases[0] ?? this.pickSpawn(-1) ?? this.world.findSpawn(this.rng);
+    const p = new ServerPlayer(id, name, sink, isBot, initial);
+    if (this.frontier && isBot) p.botRosterIndex = this.nextBotRosterIndex++;
+    if (this.frontier) { p.faction = (isBot ? p.botRosterIndex! % 3 + 1 : Math.floor(this.rng() * 3) + 1) as Faction; p.weapon = 1; }
+    // An unplaced bot belongs to its squad but has no battlefield position.
+    // Do not let the temporary first-base coordinates bias its initial order.
+    if (this.frontier && isBot) p.state.alive = false;
     this.players.set(id, p);
+    this.botSimulation.invalidateRoster();
+    const spawn = this.frontier ? this.pickSpawn(id) : initial;
+    if (spawn) {
+      Object.assign(p.state, { px: spawn.x, py: spawn.y, pz: spawn.z });
+      if (this.frontier && isBot) p.state.alive = true;
+    }
+    else { p.state.alive = false; p.health = 0; p.respawnAtTick = this.tick + TICK_RATE; }
+    if (spawn && this.frontier && isBot) this.stageVehicleCrew(p);
+    if (this.frontier) p.spawnProtectedUntil = this.tick + 3 * TICK_RATE;
     this.events.push({ bytes: encodeJoin(id, name) });
-    this.events.push({ bytes: encodeSpawn(id, spawn.x, spawn.y, spawn.z) });
+    this.events.push({ bytes: encodeSpawn(id, p.state.px, p.state.py, p.state.pz) });
     return p;
   }
 
@@ -1046,6 +1245,7 @@ export class Game {
     player.inputQueue.length = 0; player.lastCmd = null;
     player.state.vx = player.state.vy = player.state.vz = 0;
     this.players.set(player.id, player);
+    this.botSimulation.invalidateRoster();
     this.events.push({ bytes: encodeJoin(player.id, player.name) });
     this.events.push({ bytes: encodeSpawn(player.id, player.state.px, player.state.py, player.state.pz) });
   }
@@ -1065,6 +1265,7 @@ export class Game {
       this.events.push({ bytes: encodeLeave(id) });
       for (const frame of this.history) frame?.byId.delete(id);
     }
+    this.botSimulation.invalidateRoster();
     for (const v of detached.record.vehicles) this.vehicles.delete(v.id);
     for (const p of detached.record.projectiles) this.projectiles.delete(p.id);
     return detached;
@@ -1084,6 +1285,7 @@ export class Game {
       this.players.set(p.id, p);
       this.events.push({ bytes: encodeJoin(p.id, p.name) });
     }
+    this.botSimulation.invalidateRoster();
     for (const v of arrival.record.vehicles) this.vehicles.set(v.id, v);
     for (const p of arrival.projectiles) this.projectiles.set(p.id, p);
     for (const frame of arrival.record.history) {
@@ -1103,7 +1305,10 @@ export class Game {
       if (q.id !== p.id) p.sink.send(encodeJoin(q.id, q.name));
     }
     p.sink.send(this.buildScores());
-    p.sink.send(encodeServerMessage('Welcome to THE MMOFPS. Explore freely or join a faction.'));
+    const allegiance = !this.frontier ? '' : p.faction
+      ? ` ${FACTIONS[p.faction].name}. Capture control points to secure bases. G: atlas and allegiance.`
+      : '';
+    p.sink.send(encodeServerMessage(`Welcome to THE MMOFPS.${allegiance}`));
   }
 
   removePlayer(id: number): void {
@@ -1111,6 +1316,7 @@ export class Game {
     const leaving = this.players.get(id);
     if (leaving?.vehicleId !== undefined && leaving.vehicleId >= 0) this.exitVehicle(leaving);
     if (this.players.delete(id)) {
+      this.botSimulation.invalidateRoster();
       // Do not leave ownerless explosives that would later attribute damage
       // to their victims as suicides.
       for (const [projectileId, projectile] of this.projectiles) {
@@ -1122,7 +1328,8 @@ export class Game {
 
   queueInput(p: ServerPlayer, cmd: InputCmd): void {
     if (p.hasQueuedSeq && !seqNewer(cmd.seq, p.lastQueuedSeq)) return;
-    if (this.frontier) cmd = { ...cmd, buttons: cmd.buttons & ~BTN.HYPER };
+    // H is a human playtest shortcut; bots keep normal movement and damage.
+    if (p.isBot) cmd = { ...cmd, buttons: cmd.buttons & ~BTN.HYPER };
     p.lastInputAtTick = this.tick;
     p.lastQueuedSeq = cmd.seq >>> 0;
     p.hasQueuedSeq = true;
@@ -1132,12 +1339,23 @@ export class Game {
 
   // ---- Tick --------------------------------------------------------------
 
-  step(): void {
+  private vehicleCollider(v: ServerVehicle): VehicleColliderPose {
+    const driver = this.players.get(v.occupant);
+    const motion = driver?.state.vehicle ? driver.state : v.motionState;
+    return { id: v.id, type: v.type, variant: v.variant, x: v.x, y: v.y, z: v.z,
+      heading: v.heading, health: v.health, respawnAtTick: v.respawnAtTick, transportRoute: v.transportRoute,
+      pitch: motion?.vehiclePitch, roll: motion?.vehicleRoll, rotation: motion?.vehicleRotation,
+      vx: motion?.vx ?? 0, vy: motion?.vy ?? 0, vz: motion?.vz ?? 0 };
+  }
+
+  step(backlog = 0): void {
     this.tick++;
+    this.botSimulation.prepare(this.tick,this.players.values(),this.vehicles.values(),this.players.size);
     this.world.motionTime = this.tick / TICK_RATE;
     this.updateVehicles();
+    setVehicleColliders(this.world, this.tick, [...this.vehicles.values()].map(v => this.vehicleCollider(v)));
     for (const p of [...this.players.values()].sort((a, b) => (a.state.seat ?? 0) - (b.state.seat ?? 0))) this.processPlayer(p);
-    this.updateEncounters();
+    this.updateEncounters(backlog);
     this.updateTeleporters();
     this.updateCaveRecall();
     this.updateAirlifts();
@@ -1145,14 +1363,28 @@ export class Game {
     this.updatePickups();
     this.updateCaveLoot();
     if (this.wildlifeEnabled && this.tick % 6 === 0) this.wildlife.update(this.tick,
-      [...this.players.values()].filter(p => !p.isBot).map(p => ({ id: p.id,
-        x: p.state.px, y: p.state.py, z: p.state.pz, alive: p.state.alive, vehicle: p.state.vehicle })),
+      [...this.players.values()].map(p => ({ id: p.id, isBot: p.isBot,
+        x: p.state.px, y: p.state.py, z: p.state.pz, alive: p.state.alive, vehicle: p.state.vehicle,
+        vehicleId: p.vehicleId, vehicleVariant: p.state.vehicleVariant })),
       this.encounterField?.regions.flatMap(region => region.loot.filter(spot => spot.cave)) ?? []);
     this.updateRespawnsAndRegen();
     this.recordHistory();
     if (this.frontier && this.tick % 12 === 0) this.frontier.step(this.players.values(), this.tick, 12 / TICK_RATE);
     if (this.tick % SNAPSHOT_EVERY === 0) this.broadcast();
     if (this.tick % 60 === 0) { this.camps.step(); this.broadcastScores(); }
+  }
+
+  shouldThinkBot(p:ServerPlayer):boolean {
+    this.botSimulation.prepare(this.tick,this.players.values(),this.vehicles.values(),this.players.size);
+    return !this.frontier||this.botSimulation.shouldThink(p);
+  }
+
+  remoteGroundPerception(p:ServerPlayer,acquireRange:number):boolean {
+    if(!this.frontier||!p.isBot||(p.state.vehicle!==VEHICLE.JEEP&&p.state.vehicle!==VEHICLE.TANK))return false;
+    const hull=this.vehicles.get(p.vehicleId);
+    if(!hull||hull.respawnAtTick>=0||!(hull.health>0)||hull.type!==p.state.vehicle)return false;
+    this.botSimulation.prepare(this.tick,this.players.values(),this.vehicles.values(),this.players.size);
+    return this.botSimulation.remoteGroundPerception(this.world,p,acquireRange);
   }
 
   private processPlayer(p: ServerPlayer): void {
@@ -1173,7 +1405,9 @@ export class Game {
   }
 
   private applyCmd(p: ServerPlayer, cmd: InputCmd, dt = TICK_DT, movementTick = this.tick): void {
+    if (cmd.buttons & (BTN.FIRE | BTN.ALTFIRE)) p.spawnProtectedUntil = -1;
     if (p.state.airlift) {
+      this.botSimulation.resetMovement(p);
       stepMove(this.world,p.state,cmd,dt,movementTick);
       p.useHeld=(cmd.buttons & BTN.USE)!==0;
       return;
@@ -1182,10 +1416,34 @@ export class Game {
     // in and out across consecutive commands.
     const usePressed = (cmd.buttons & BTN.USE) !== 0 && !p.useHeld;
     p.useHeld = (cmd.buttons & BTN.USE) !== 0;
-    if (usePressed && p.state.alive) this.toggleVehicle(p);
+    if (usePressed && p.state.alive) {
+      this.botSimulation.resetMovement(p);
+      this.toggleVehicle(p);
+    }
 
     const drivingBefore = p.state.vehicle !== VEHICLE.NONE && p.state.seat !== 1;
-    const res = p.state.seat === 1 ? { impact: 0, transitImpact: 0 } : stepMove(this.world, p.state, cmd, dt, movementTick);
+    const remoteGround = !!this.frontier && this.botSimulation.move(this.world,p,cmd,dt,movementTick);
+    const movementDt = p.state.seat === 1 || remoteGround ? 0 : this.frontier
+      ? this.botSimulation.physicsDt(this.world,p,cmd,dt,movementTick) : dt;
+    // Deferred movement must not defer breathing or apply its elapsed time
+    // twice. Resolve this authority tick's air timer from the current pose;
+    // the shared movement controller still handles swimming and collision.
+    let breath: {air:number;submerged:boolean}|undefined;
+    if(p.state.alive&&movementDt!==dt&&!remoteGround&&p.state.seat!==1){
+      const eye=vehicleEyeOffset(p.state);
+      breath={air:p.state.airSeconds??SWIMMING.AIR_SECONDS,
+        submerged:!!this.world.liquidAt(p.state.px+eye.x,p.state.py+eye.y,p.state.pz+eye.z)};
+    }
+    const batchedGround=p.isBot&&movementDt>dt+.000001&&(p.state.vehicle===VEHICLE.JEEP||p.state.vehicle===VEHICLE.TANK);
+    const groundFrom=batchedGround?{x:p.state.px,y:p.state.py,z:p.state.pz}:undefined;
+    const res = movementDt === 0 ? { impact: 0, transitImpact: 0 }
+      : batchedGround
+        ? stepBotGroundVehicle(this.world,p.state,cmd,movementDt,movementTick)
+        : stepMove(this.world, p.state, cmd, movementDt, movementTick);
+    if(breath){
+      p.state.submerged=breath.submerged;
+      p.state.airSeconds=clamp(breath.air+dt*(breath.submerged?-1:5),0,SWIMMING.AIR_SECONDS);
+    }
     if (p.state.seat === 1) {
       const hull = this.vehicles.get(p.vehicleId), driver = this.players.get(hull?.occupant ?? -1);
       if (driver) this.copyCrewPose(p, driver);
@@ -1204,6 +1462,7 @@ export class Game {
       if (v) {
         v.x = p.state.px; v.y = p.state.py; v.z = p.state.pz;
         v.heading = p.state.heading;
+        updateVehicleCollider(this.world, movementTick, this.vehicleCollider(v));
         if (res.impact > VEHICLE_CRASH_MIN_IMPACT) {
           // The jeep is the crash-happiest hull, so its wall hits count
           // half - boost slaloms should be survivable, not one-strike.
@@ -1216,7 +1475,7 @@ export class Game {
           );
         }
       }
-      this.sweepRunOver(p);
+      this.sweepRunOver(p,groundFrom);
     } else if (res.impact > 0 && p.state.alive) {
       const dmg = fallDamage(res.impact);
       if (dmg > 0) {
@@ -1251,8 +1510,8 @@ export class Game {
     }
 
     // Both liquids and traps use canonical shared volumes/clock positions.
-    if (p.state.alive) {
-      const col = this.world.column(p.state.px, p.state.pz);
+    if (p.state.alive && (!remoteGround || p.state.swimming || p.state.submerged)) {
+      const col = this.world.sampleColumn(p.state.px, p.state.pz);
       const fluid = this.world.liquidAt(p.state.px, p.state.py + .25, p.state.pz);
       if (fluid?.kind === 'lava') {
         if (p.state.vehicle !== VEHICLE.NONE) {
@@ -1370,15 +1629,17 @@ export class Game {
    */
   private updateHomingLock(p: ServerPlayer, cmd: InputCmd): void {
     if (p.weapon !== 3) {
+      this.homingObstructions.delete(p);
       p.lockTargetId = -1; p.lockVehicleId = -1; p.lockTicks = 0; p.lockState = LOCK_NONE;
       return;
     }
     const ex = p.state.px, ey = p.state.py + PLAYER.EYE_HEIGHT, ez = p.state.pz;
     const aim = viewDir(cmd.yaw, cmd.pitch);
     let best: ServerPlayer | null = null;
-    let bestCos = LOCK_CONE_COS;
+    const candidates: { player: ServerPlayer; cos: number; tx: number; ty: number; tz: number;
+      dist: number; radius: number; order: number }[] = [];
     for (const q of this.players.values()) {
-      if (q.id === p.id || !q.state.alive || q.state.vehicle === VEHICLE.NONE || q.state.seat === 1) continue;
+      if (!this.areEnemies(p, q) || !q.state.alive || q.state.vehicle === VEHICLE.NONE || q.state.seat === 1) continue;
       if (p.vehicleId >= 0 && q.vehicleId === p.vehicleId) continue;
       const hull = this.vehicles.get(q.vehicleId);
       if (!hull || hull.occupant !== q.id || hull.health <= 0 || hull.respawnAtTick >= 0) continue;
@@ -1386,14 +1647,51 @@ export class Game {
       const tx = q.state.px - ex;
       const ty = q.state.py + (def?.radius ?? 1) - ey;
       const tz = q.state.pz - ez;
+      // Reject distant/off-axis hulls before a square root. Keep a small
+      // boundary margin so the original normalized comparison decides ties.
+      const distance2 = tx * tx + ty * ty + tz * tz;
+      if (distance2 > (LOCK_RANGE + 1e-7) ** 2 || distance2 < (6 - 1e-7) ** 2) continue;
+      const along = tx * aim.x + ty * aim.y + tz * aim.z;
+      if (along < 0 || along * along < (LOCK_CONE_COS * LOCK_CONE_COS - 1e-12) * distance2) continue;
       const dist = Math.hypot(tx, ty, tz);
       if (dist < 6 || dist > LOCK_RANGE) continue;
-      const cos = (tx * aim.x + ty * aim.y + tz * aim.z) / dist;
-      if (cos < bestCos) continue;
-      const th = this.world.trace(ex, ey, ez, tx / dist, ty / dist, tz / dist, dist);
-      if (th.hit && th.dist < dist - (def?.radius ?? 1) - 0.5) continue;
-      best = q;
-      bestCos = cos;
+      const cos = along / dist;
+      if (cos < LOCK_CONE_COS) continue;
+      candidates.push({ player: q, cos, tx, ty, tz, dist, radius: def?.radius ?? 1, order: candidates.length });
+    }
+    // The previous scan ultimately chose the visible hull nearest the aim
+    // center, with later Map entries winning equal angles. Test that winner
+    // first so weaker candidates never spend a terrain trace unnecessarily.
+    candidates.sort((a, b) => b.cos - a.cos || b.order - a.order);
+    let obstructions = this.homingObstructions.get(p);
+    if (!candidates.length) this.homingObstructions.delete(p);
+    for (const candidate of candidates) {
+      const { tx, ty, tz, dist, radius } = candidate;
+      const dx = tx / dist, dy = ty / dist, dz = tz / dist, hullId = candidate.player.vehicleId;
+      const limit = dist - radius - .5, witness = obstructions?.get(hullId);
+      if (witness && this.tick >= witness.tick && this.tick - witness.tick <= 120) {
+        const along = dist * witness.fraction;
+        // This is a new geometric proof on the CURRENT ray, not cached LOS.
+        // Moving cover, either actor moving, or a closer hull can invalidate
+        // it; in those cases the full authoritative trace still runs below.
+        if (along >= 0 && along < limit && this.world.sdf(ex + dx * along, ey + dy * along, ez + dz * along) <= 0) {
+          witness.tick = this.tick; continue;
+        }
+      }
+      const th = this.world.trace(ex, ey, ez, dx, dy, dz, dist, false);
+      if (th.hit && th.dist < limit) {
+        // Prefer a verified interior point to a fragile surface endpoint.
+        // Thin obstacles retain the trace's known-solid endpoint instead.
+        const inside = Math.min(th.dist + .5, (th.dist + limit) * .5);
+        const fraction = inside > th.dist && this.world.sdf(ex + dx * inside, ey + dy * inside, ez + dz * inside) <= 0
+          ? inside / dist : th.dist / dist;
+        if (!obstructions) { obstructions = new Map(); this.homingObstructions.set(p, obstructions); }
+        if (!obstructions.has(hullId) && obstructions.size >= 8) obstructions.delete(obstructions.keys().next().value!);
+        obstructions.set(hullId, { fraction, tick: this.tick });
+        continue;
+      }
+      obstructions?.delete(hullId);
+      best = candidate.player; break;
     }
     if (best && best.vehicleId === p.lockVehicleId) {
       p.lockTicks = Math.min(p.lockTicks + 1, LOCK_TICKS + 30);
@@ -1426,6 +1724,7 @@ export class Game {
 
   private fire(p: ServerPlayer, cmd: InputCmd, weapon: number): void {
     const def = WEAPONS[weapon];
+    p.spawnProtectedUntil = -1;
     this.stats.shotsFired++;
     if (weapon === NUKE_LAUNCHER_ID) this.fireNukeDesignator(p, cmd, def);
     else if (def.kind === 'hitscan') this.fireHitscan(p, cmd, def);
@@ -1517,6 +1816,39 @@ export class Game {
     return { x: q.state.px, y: q.state.py, z: q.state.pz, alive: true };
   }
 
+  /** Fire-time cosmetic policy; custom bot observers always retain events. */
+  private distantMissObserversAllow(x: number, y: number, z: number): boolean {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return false;
+    for (const q of this.players.values()) {
+      if (q.isBot) { if (q.sink) return false; continue; }
+      const s = q.state;
+      if (q.airlift || s.airlift || !Number.isFinite(s.px) || !Number.isFinite(s.py) || !Number.isFinite(s.pz) ||
+        !Number.isFinite(s.vx) || !Number.isFinite(s.vy) || !Number.isFinite(s.vz) ||
+        s.vx*s.vx+s.vy*s.vy+s.vz*s.vz > 256*256) return false;
+      const dx = x-s.px, dz = z-s.pz, d2 = dx*dx+dz*dz;
+      if (!Number.isFinite(d2) || !(d2 > NET.INTEREST_RADIUS*NET.INTEREST_RADIUS)) return false;
+    }
+    return true;
+  }
+
+  /** A miss proof only. Possible hits retain the original trace/selection path. */
+  private unobservedShotHasTarget(p: ServerPlayer, target: number,
+    x: number, y: number, z: number, dir: { x: number; y: number; z: number }, range: number): boolean {
+    for (const q of this.players.values()) {
+      if (!this.areEnemies(p, q) || q.state.vehicle !== VEHICLE.NONE) continue;
+      const hp = this.rewindPos(q.id, target);
+      if (hp && rayCapsule(x, y, z, dir.x, dir.y, dir.z, range,
+        hp.x, hp.y + PLAYER.RADIUS, hp.y + PLAYER.HEIGHT - PLAYER.RADIUS, hp.z, PLAYER.RADIUS) >= 0) return true;
+    }
+    for (const v of this.vehicles.values()) {
+      if (v.respawnAtTick >= 0 || v.id === p.vehicleId) continue;
+      const radius = vehicleDefinition(v.type, v.variant)!.radius, cy = v.y + radius;
+      if (rayCapsule(x, y, z, dir.x, dir.y, dir.z, range,
+        v.x, cy, cy, v.z, radius) >= 0) return true;
+    }
+    return this.wildlife.hitRay(x, y, z, dir.x, dir.y, dir.z, range) !== null;
+  }
+
   private fireHitscan(p: ServerPlayer, cmd: InputCmd, def: WeaponDef, attachment?: {x:number;y:number;z:number}): void {
     const eye = p.state.vehicle !== VEHICLE.NONE
       ? vehicleEyeHeight(p.state.vehicle as VehicleType, p.state.vehicleVariant)
@@ -1528,6 +1860,22 @@ export class Game {
     const ex = p.state.px + (jetMuzzle?.x ?? 0), ey = p.state.py + (jetMuzzle?.y ?? eye),
       ez = p.state.pz + (jetMuzzle?.z ?? 0);
     const target = this.rewindTarget(cmd);
+    // Omit a whole certified-miss cosmetic shot only outside all human
+    // interest at fire time. Teleports, respawns and new arrivals afterward
+    // may miss that already-fired cosmetic; damage and nearby shots stay live.
+    const unobserved = this.world.trace === NATIVE_WEAPON_TRACE && p.isBot && (def.beamRadius ?? 0) === 0 &&
+      Number.isFinite(def.range) && def.range >= 0 &&
+      Number.isInteger(def.pellets) && def.pellets > 0 &&
+      DISTANT_MISS_WEAPONS.includes(def.id) && this.distantMissObserversAllow(ex, ey, ez);
+    if (unobserved) {
+      let misses = true;
+      for (let i = 0; i < def.pellets; i++) {
+        const dir = pelletDir(this.seed, p.id, cmd.seq, i, cmd.yaw, cmd.pitch, def.spread);
+        if (!Number.isFinite(dir.x + dir.y + dir.z) ||
+          this.unobservedShotHasTarget(p, target, ex, ey, ez, dir, def.range)) { misses = false; break; }
+      }
+      if (misses) return;
+    }
     const ends: FireEnd[] = [];
     let totalDmg = 0;
     let killed = false;
@@ -1660,6 +2008,7 @@ export class Game {
     // A fully locked rocket flies hot and steers; see advanceProjectile.
     const homing = def.id === 3 && p.lockState === LOCK_LOCKED && p.lockTargetId >= 0;
     if (homing) speed *= HOMING_SPEED_FACTOR;
+    const lockedType = this.vehicles.get(p.lockVehicleId)?.type ?? this.players.get(p.lockTargetId)?.state.vehicle ?? VEHICLE.NONE;
     this.projectiles.set(id, {
       id, owner: p.id, weapon: def.id,
       x: ex + dir.x * launchOffset, y: ey + dir.y * launchOffset, z: ez + dir.z * launchOffset,
@@ -1670,7 +2019,7 @@ export class Game {
       sleeping: false,
       homingTarget: homing ? p.lockTargetId : -1,
       homingVehicleId: homing ? p.lockVehicleId : -1,
-      hullDamageScale: homing ? LOCKED_HULL_DAMAGE_FACTOR : 1,
+      hullDamageScale: homing ? lockedHullDamageFactor(lockedType) : 1,
     });
     if (report) this.events.push({
       bytes: encodeFire({ shooter: p.id, weapon: def.id, seq: cmd.seq, ox: ex, oy: ey, oz: ez, ends: [] }),
@@ -1707,7 +2056,7 @@ export class Game {
       return;
     }
     const angle = Math.acos(clamp(cos, -1, 1));
-    const maxTurn = HOMING_TURN_RATE * dt;
+    const maxTurn = (t.state.vehicle === VEHICLE.JET ? HOMING_AIR_TURN_RATE : HOMING_TURN_RATE) * dt;
     if (angle < 1e-4) return;
     const k = Math.min(1, maxTurn / angle);
     // Rotate the unit velocity toward the target direction by k of the gap.
@@ -1894,10 +2243,20 @@ export class Game {
       let bestT = Infinity;
       let victim: ServerPlayer | null = null;
       let vehicleVictim: ServerVehicle | null = null;
+      const owner = this.players.get(r.owner);
+      // A short projectile chord can only touch bodies whose expanded bounds
+      // overlap it. Preserve the canonical capsule sweep and Map tie order
+      // for every possible hit, including starts inside an expanded body.
+      const minX = Math.min(r.x, r.x + sx) - 1e-7, maxX = Math.max(r.x, r.x + sx) + 1e-7;
+      const minY = Math.min(r.y, r.y + sy) - 1e-7, maxY = Math.max(r.y, r.y + sy) + 1e-7;
+      const minZ = Math.min(r.z, r.z + sz) - 1e-7, maxZ = Math.max(r.z, r.z + sz) + 1e-7;
+      const bodyRadius = PLAYER.RADIUS + projR;
       for (const q of this.players.values()) {
         // Occupants are protected by the hull, swept as a sphere below.
         if (!q.state.alive || q.id === r.owner || q.state.vehicle !== VEHICLE.NONE) continue;
-        const owner = this.players.get(r.owner);
+        if (q.state.px + bodyRadius < minX || q.state.px - bodyRadius > maxX ||
+            q.state.pz + bodyRadius < minZ || q.state.pz - bodyRadius > maxZ ||
+            q.state.py + PLAYER.HEIGHT + projR < minY || q.state.py - projR > maxY) continue;
         if (owner && !this.areEnemies(owner, q)) continue;
         const t = rayCapsule(
           r.x, r.y, r.z, dx, dy, dz, stepLen,
@@ -1906,11 +2265,13 @@ export class Game {
         );
         if (t >= 0 && t < bestT) { bestT = t; victim = q; }
       }
-      const ownerVehicleId = this.players.get(r.owner)?.vehicleId ?? -1;
+      const ownerVehicleId = owner?.vehicleId ?? -1;
       for (const v of this.vehicles.values()) {
         if (v.respawnAtTick >= 0 || v.id === ownerVehicleId) continue;
-        const vr = vehicleDefinition(v.type, v.variant)!.radius + projR;
-        const cy = v.y + vehicleDefinition(v.type, v.variant)!.radius;
+        const radius = vehicleDefinition(v.type, v.variant)!.radius;
+        const vr = radius + projR, cy = v.y + radius;
+        if (v.x + vr < minX || v.x - vr > maxX || v.z + vr < minZ || v.z - vr > maxZ ||
+            cy + vr < minY || cy - vr > maxY) continue;
         const t = rayCapsule(
           r.x, r.y, r.z, dx, dy, dz, stepLen,
           v.x, cy, cy, v.z, vr,
@@ -2204,6 +2565,8 @@ export class Game {
     // here); only the kill floor below the world stays lethal. Bots never
     // send BTN.HYPER.
     if (victim.lastCmd && (victim.lastCmd.buttons & BTN.HYPER) !== 0) return;
+    if (attacker.id !== victim.id && this.tick < victim.spawnProtectedUntil) return;
+    if (amount > 0 && attacker.id !== victim.id) this.frontier?.recordCombat(victim.state.px, victim.state.pz, [victim.faction, attacker.faction], this.tick);
     if (amount > 0) victim.recallSince = -1;
     victim.health -= amount;
     victim.regenBlockUntil = this.tick + PLAYER.REGEN_DELAY * TICK_RATE;
@@ -2213,6 +2576,10 @@ export class Game {
   }
 
   private kill(victim: ServerPlayer, attacker: ServerPlayer, weaponId: number): void {
+    const motion = { x: victim.state.px, y: victim.state.py, z: victim.state.pz,
+      vx: clamp(victim.state.vx, -100, 100), vy: clamp(victim.state.vy, -60, 65), vz: clamp(victim.state.vz, -100, 100),
+      yaw: victim.lastCmd ? unquantYaw(victim.lastCmd.yaw) : victim.state.heading };
+    victim.lastDeath = { x: motion.x, y: motion.y, z: motion.z };
     // Dying at the wheel frees the hull in place (vehicle destruction paths
     // clear possession before calling kill, so this only covers oddballs
     // like the kill floor or admin kills).
@@ -2225,12 +2592,14 @@ export class Game {
     victim.state.vx = 0; victim.state.vy = 0; victim.state.vz = 0;
     victim.deaths++;
     victim.respawnAtTick = this.tick + PLAYER.RESPAWN_SECONDS * 60;
+    victim.spawnProtectedUntil = -1;
+    this.frontier?.send(victim, this.players.values(), this.tick);
     cancelReload(victim);
     this.clearFallDamageCredit(victim);
     if (attacker.id !== victim.id) attacker.frags++;
     else attacker.frags--;
     this.stats.kills++;
-    this.events.push({ bytes: encodeDeath(victim.id, attacker.id, weaponId) });
+    this.events.push({ bytes: encodeDeath(victim.id, attacker.id, weaponId, motion) });
     if (attacker.id !== victim.id) this.dropPickups(victim);
 
     // UT-style spree announcements.
@@ -2261,6 +2630,7 @@ export class Game {
       if (!p.state.alive) {
         if (p.respawnAtTick >= 0 && this.tick >= p.respawnAtTick) {
           const spawn = this.pickSpawn(p.id);
+          if (!spawn) { p.respawnAtTick = this.tick + TICK_RATE; continue; }
           const s = p.state;
           s.px = spawn.x; s.py = spawn.y; s.pz = spawn.z;
           s.vx = 0; s.vy = 0; s.vz = 0;
@@ -2274,9 +2644,11 @@ export class Game {
           if (WEAPONS[p.weapon]?.spawnEmpty) p.weapon = 0;
           this.clearFallDamageCredit(p);
           p.respawnAtTick = -1;
+          if (this.frontier) p.spawnProtectedUntil = this.tick + 3 * TICK_RATE;
+          if (this.frontier && p.isBot) this.stageVehicleCrew(p);
           p.inputQueue.length = 0;
           p.lastCmd = null;
-          this.events.push({ bytes: encodeSpawn(p.id, spawn.x, spawn.y, spawn.z) });
+          this.events.push({ bytes: encodeSpawn(p.id, p.state.px, p.state.py, p.state.pz) });
         }
       } else if (p.health < PLAYER.MAX_HEALTH && this.tick >= p.regenBlockUntil) {
         p.health = Math.min(PLAYER.MAX_HEALTH, p.health + PLAYER.REGEN_RATE * TICK_DT);
@@ -2350,6 +2722,10 @@ export class Game {
   }
 
   private dropCreatureLoot(creature: Creature, attacker: number): void {
+    if (CREATURE_DEFS[creature.species].boss) {
+      this.rewardBoss(creature, attacker);
+      return;
+    }
     const player = this.players.get(attacker);
     if (!player) return;
     // Reuse the authoritative bounded pickup placement/cap without changing
@@ -2363,15 +2739,62 @@ export class Game {
     }
   }
 
+  private rewardBoss(creature: Creature, attacker: number): void {
+    if (creature.health > 0 || this.rewardedBosses.has(creature)) return;
+    this.rewardedBosses.add(creature);
+    const def = CREATURE_DEFS[creature.species];
+    const reward = def.bossReward ?? { salvage: 500, weapon: NUKE_LAUNCHER_ID, ammoCrates: 2 };
+    const participants = [...creature.damageContributors]
+      .filter(([, hit]) => hit.damage >= def.health * BOSS_MIN_DAMAGE_FRACTION &&
+        hit.lastHitTick <= this.tick && this.tick - hit.lastHitTick <= BOSS_CONTRIBUTION_WINDOW_TICKS)
+      .map(([id, hit]) => ({ player: this.players.get(id), damage: hit.damage }))
+      .filter((entry): entry is { player: ServerPlayer; damage: number } => !!entry.player && !entry.player.isBot)
+      .sort((a, b) => b.damage - a.damage || a.player.id - b.player.id);
+    const eligible = new Set(participants.map(({ player }) => player.id));
+    const salvage = Math.max(0, Math.min(1_000_000, Math.floor(reward.salvage)));
+    const weapon = WEAPONS[reward.weapon]?.spawnEmpty ? reward.weapon : NUKE_LAUNCHER_ID;
+    const ammoCrates = Math.max(0, Math.min(8, Math.floor(reward.ammoCrates)));
+    for (const { player } of participants) {
+      const gained = Math.min(salvage, Math.max(0, 1_000_000 - player.salvage));
+      // Like discovery rewards, this is part of the ordinary character
+      // checkpoint. salvageEarned is a coordinator extraction watermark and
+      // must never be changed by a local simulation reward.
+      player.salvage += gained;
+      player.sink?.send(encodeServerMessage(`${def.name} bounty: +${gained} salvage.`));
+    }
+
+    // One shared cache per kill, regardless of party size. Dead contributors
+    // keep their salvage and their reservation; respawning cannot mint loot.
+    const victim = { state: { px: creature.x, py: creature.y, pz: creature.z } } as ServerPlayer;
+    const drops: [PickupKind, number][] = [[PICKUP_HEALTH, -1], [PICKUP_WEAPON, weapon],
+      ...Array.from({ length: ammoCrates }, (): [PickupKind, number] => [PICKUP_AMMO, weapon])];
+    let cached = false;
+    for (const [kind, carried] of drops) {
+      const pickup = this.spawnPickup(kind, carried, victim);
+      if (!pickup) continue;
+      pickup.expiresAtTick = this.tick + BOSS_REWARD_LIFETIME_TICKS;
+      if (eligible.size) {
+        pickup.rewardFor = eligible;
+        pickup.reservedUntilTick = this.tick + BOSS_REWARD_RESERVATION_TICKS;
+      }
+      if (kind === PICKUP_WEAPON) cached = true;
+    }
+    const leader = participants[0]?.player ?? this.players.get(attacker);
+    const credit = leader ? `${leader.name}${participants.length > 1 ? ` and ${participants.length - 1} fellow hunter${participants.length > 2 ? 's' : ''}` : ''}` : 'planetary forces';
+    this.events.push({ bytes: encodeServerMessage(
+      `PLANET BOUNTY: ${def.name} defeated by ${credit}! ${participants.length} hunter${participants.length === 1 ? '' : 's'} rewarded.${cached ? ` ${WEAPONS[weapon].name} cache at the kill site${eligible.size ? ', reserved for participants for 90 seconds' : ''}.` : ''}`) });
+  }
+
   private spawnPickup(
-    kind: typeof PICKUP_HEALTH | typeof PICKUP_AMMO,
+    kind: PickupKind,
     weapon: number,
     victim: ServerPlayer,
   ): ServerPickup | null {
     const position = this.pickupPlacement(victim);
     if (!position) return null;
 
-    // Map insertion order gives deterministic oldest-first retirement.
+    // Retire ordinary drops oldest-first, then reserved rewards only if the
+    // entire cap is occupied by them.
     // The cap governs TRANSIENT drops only: permanent cave loot neither
     // counts against it nor gets evicted (there are more cave-loot spots
     // than MAX_LIVE_PICKUPS, so counting them would purge every drop).
@@ -2382,6 +2805,10 @@ export class Game {
     while (transient >= MAX_LIVE_PICKUPS) {
       let oldest: number | undefined;
       for (const [pid, pk] of this.pickups) {
+        if (!pk.permanent && this.tick >= (pk.reservedUntilTick ?? 0)) { oldest = pid; break; }
+      }
+      // Still a hard cap if every live drop is a recent boss reward.
+      if (oldest === undefined) for (const [pid, pk] of this.pickups) {
         if (!pk.permanent) { oldest = pid; break; }
       }
       if (oldest === undefined) break;
@@ -2460,8 +2887,10 @@ export class Game {
       if (this.tick < pickup.availableAtTick) continue;
       let collector: ServerPlayer | null = null;
       let collectorDistSq = Infinity;
-      const retainedFullContacts: ServerPlayer[] = [];
-      const enteredFullContacts: ServerPlayer[] = [];
+      // Most available crates have no touching player. Allocate contact lists
+      // only when needed, retaining the same candidate and notice order.
+      let retainedFullContacts: ServerPlayer[] | undefined;
+      let enteredFullContacts: ServerPlayer[] | undefined;
 
       const minCellX = Math.floor(
         (pickup.x - PICKUP_CONTACT_RELEASE_RADIUS) / PICKUP_PLAYER_CELL_SIZE,
@@ -2480,18 +2909,19 @@ export class Game {
           const candidates = playerBuckets.get(pickupPlayerCellKey(cellX, cellZ));
           if (!candidates) continue;
           for (const p of candidates) {
+            if (pickup.rewardFor && this.tick < (pickup.reservedUntilTick ?? 0) && !pickup.rewardFor.has(p.id)) continue;
             const missing = this.pickupMissingResource(p, pickup);
             if (missing === null) continue;
             const d2 = this.pickupCapsuleDistanceSq(p, pickup);
             const wasFullContact = p.fullPickupContacts.has(id);
             if (wasFullContact && d2 <= releaseRadiusSq) {
-              retainedFullContacts.push(p);
+              (retainedFullContacts ??= []).push(p);
             }
             if (d2 > collectRadiusSq) continue;
             if (missing <= 0) {
               if (!wasFullContact) {
-                retainedFullContacts.push(p);
-                enteredFullContacts.push(p);
+                (retainedFullContacts ??= []).push(p);
+                (enteredFullContacts ??= []).push(p);
               }
               continue;
             }
@@ -2523,7 +2953,7 @@ export class Game {
 
       // Keep reported contacts latched until the player genuinely leaves a
       // slightly larger radius. This avoids enter/exit spam at the boundary.
-      for (const p of retainedFullContacts) {
+      if (retainedFullContacts) for (const p of retainedFullContacts) {
         let contacts = nextFullContacts.get(p);
         if (!contacts) {
           contacts = new Set<number>();
@@ -2533,7 +2963,7 @@ export class Game {
       }
       // A full notice is meaningful only while the crate remains available;
       // an eligible collector winning this tick suppresses these notices.
-      for (const p of enteredFullContacts) {
+      if (enteredFullContacts) for (const p of enteredFullContacts) {
         p.sink?.send(encodePickupResult({
           pickupId: pickup.id,
           kind: pickup.kind,
@@ -2578,7 +3008,8 @@ export class Game {
       const def = WEAPONS[pickup.weapon];
       const ammo = p.ammo[pickup.weapon];
       if (!def || def.id !== pickup.weapon || !def.spawnEmpty || !ammo) return null;
-      return Math.max(0, def.magazineSize - ammo.magazine);
+      return Math.max(0, Math.min(def.magazineSize - ammo.magazine,
+        def.magazineSize + def.reserveSize - ammo.magazine - ammo.reserve));
     }
     if (pickup.kind !== PICKUP_AMMO) return null;
     const def = WEAPONS[pickup.weapon];
@@ -2756,6 +3187,7 @@ export class Game {
           ? Math.max(0, myVehicle.health)
           : 0,
         lockState: p.lockState,
+        aircraftThreat: aircraftThreatFor(p, this.players, this.projectiles, this.vehicles, (a, b) => this.areEnemies(a, b)),
       },
       ents,
       pickups: pickupDist.slice(0, 64).map((entry) => entry.p),

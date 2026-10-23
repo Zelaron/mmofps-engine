@@ -4,11 +4,13 @@ import {
   createFullAmmoLoadout, stepWeaponState, idleWeaponStep,
   type MoveState, type InputCmd, type Snapshot, type StepResult,
   type WeaponState, type WeaponStepResult,
+  ENT_PLAYER,
 } from '@shared/index';
 import { transitSupport, transitLocal, transitWorld } from '@shared/transit-motion';
 import { transportPose } from '@shared/transport';
 import { airliftPose } from '@shared/airlift';
 import { carryCityLift } from '@shared/lifts';
+import { setVehicleColliders, clearVehicleColliders, type VehicleColliderPose } from '@shared/vehicle-collision';
 
 // Client-side prediction + server reconciliation.
 //
@@ -48,6 +50,7 @@ export class Prediction {
   private errX = 0;
   private errY = 0;
   private errZ = 0;
+  private hullSamples = new Map<number, { pose: VehicleColliderPose; tick: number; occupied: boolean }>();
 
   constructor(private readonly world: World) {}
 
@@ -70,6 +73,7 @@ export class Prediction {
   }
 
   onSnapshot(snap: Snapshot): void {
+    this.syncVehicleColliders(snap);
     const you = snap.you;
     const wasAlive = this.alive;
     let oldX = this.state.px, oldY = this.state.py, oldZ = this.state.pz;
@@ -224,5 +228,35 @@ export class Prediction {
     this.initialized = false;
     this.clockReady = false;
     this.errX = 0; this.errY = 0; this.errZ = 0;
+    this.hullSamples.clear();
+    clearVehicleColliders(this.world);
+  }
+
+  /** Full snapshot replacement also removes wrecks, departed hulls and stale
+   * driver/parked duplicates before pending movement inputs are replayed. */
+  private syncVehicleColliders(snap: Snapshot): void {
+    const next = new Map<number, { pose: VehicleColliderPose; tick: number; occupied: boolean }>();
+    const add = (pose: VehicleColliderPose, occupied: boolean) => {
+      const previous = this.hullSamples.get(pose.id), ticks = snap.tick - (previous?.tick ?? snap.tick);
+      if (previous && ticks > 0 && ticks <= 12 && previous.occupied === occupied &&
+          previous.pose.type === pose.type && (previous.pose.variant ?? 0) === (pose.variant ?? 0)) {
+        const dt = ticks * TICK_DT, dx = pose.x - previous.pose.x, dy = pose.y - previous.pose.y, dz = pose.z - previous.pose.z;
+        // Reject transfers/teleports instead of inventing an extreme velocity.
+        // Ordinary snapshot quantization and even the fastest jet fit this bound.
+        if (Math.hypot(dx, dy, dz) <= 300 * dt) {
+          pose.vx = dx / dt; pose.vy = dy / dt; pose.vz = dz / dt;
+        }
+      }
+      next.set(pose.id, { pose, tick: snap.tick, occupied });
+    };
+    for (const v of snap.vehicles ?? []) if (v.health > 0) add({ ...v }, false);
+    for (const e of snap.ents) {
+      if (e.kind !== ENT_PLAYER || e.dead || !e.vehicle || e.seat === 1 || e.vehicleId === undefined) continue;
+      add({ id: e.vehicleId, type: e.vehicle, variant: e.vehicleVariant, x: e.x, y: e.y, z: e.z,
+        heading: e.heading, pitch: e.vehiclePitch, roll: e.vehicleRoll, rotation: e.vehicleRotation,
+        transportRoute: e.transportRoute, health: 1 }, true);
+    }
+    this.hullSamples = next;
+    setVehicleColliders(this.world, snap.tick, [...next.values()].map(sample => sample.pose));
   }
 }

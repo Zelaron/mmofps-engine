@@ -11,6 +11,55 @@ import { mulberry32 } from '@shared/rng';
 import { wrapAngle } from '@shared/math';
 
 const command = (buttons = 0, yaw = 0): InputCmd => ({ seq: 0, buttons, yaw, pitch: 0, weapon: 0, renderTick: 0, renderFrac: 0 });
+
+test('mixed ordinary and deferred actors reuse exact transport frames without stale poses', () => {
+  const world = new World(1337), plan = world.collectTransportPlan();
+  const route = plan.routes.find(r => r.kind === 'train')!;
+  let builds = 0;
+  world.collectTransportPlan = () => { builds++; return plan; };
+  const times = [10, 10-1/60, 10-3/60, 10-2/60, 10-1/120, 10-1/180, 10-4/60, 10-1/240];
+  for (let pass = 0; pass < 4; pass++) for (const time of pass % 2 ? [...times].reverse() : times) {
+    const pose = transportPose(route,time,route.carOffsets[0]);
+    const point = transitWorld(pose,0,1.5,0);
+    let expected = 32;
+    for (const r of plan.routes) for (let car=0;car<r.carOffsets.length;car++) {
+      const local = transitLocal(transportPose(r,time,r.carOffsets[car]),point.x,point.y,point.z);
+      expected = solidBoxDistance(transportBoxes(r,car),local.x,local.y,local.z,expected);
+    }
+    assert.equal(transitDistance(world,time,point.x,point.y,point.z,32),expected);
+  }
+  assert.equal(builds,times.length,'alternating exact time pairs do not regenerate route frames');
+  transitDistance(world,20,0,0,0,32);
+  assert.equal(builds,9,'the ninth distinct frame is generated');
+  transitDistance(world,times[1],0,0,0,32);
+  transitDistance(world,times[7],0,0,0,32);
+  assert.equal(builds,9,'the other seven original frames remain cached');
+  transitDistance(world,times[0],0,0,0,32);
+  assert.equal(builds,10,'the oldest insertion is evicted even when it was the most recent hit');
+  transitDistance(world,times[1],0,0,0,32);
+  assert.equal(builds,11,'cache hits do not reorder the next eviction');
+});
+
+test('transport frame keys retain strict equality for signed zero, NaN and infinities', () => {
+  let builds = 0;
+  const world = { collectTransportPlan: () => { builds++; return { routes: [] }; } } as unknown as World;
+  const query = (seconds: number) => assert.equal(transitDistance(world,seconds,0,0,0,32),32);
+  query(-0);
+  query(+0);
+  query(-0);
+  assert.equal(builds,1,'positive and negative zero share the same frame');
+  query(NaN);
+  query(NaN);
+  assert.equal(builds,3,'NaN does not match an existing NaN frame');
+  query(Infinity);
+  query(-Infinity);
+  query(Infinity);
+  query(-Infinity);
+  assert.equal(builds,5,'each infinity matches itself but not the other sign');
+  query(+0);
+  assert.equal(builds,5,'nonfinite keys do not disturb an older exact-time hit');
+});
+
 function fixture(kind: 'ferry' | 'train', seconds = 0, car = 0, local = { x: 0, y: 2, z: 0 }) {
   seconds = Math.round(seconds * TICK_RATE) / TICK_RATE;
   const world = new World(1337), plan = world.collectTransportPlan();

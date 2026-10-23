@@ -9,7 +9,7 @@ export class TeleporterRenderer {
   private readonly capacity = renderProfile().touch ? 32 : 48;
   private readonly ringMaterial = new THREE.MeshLambertMaterial({ color: 0x66747b });
   private readonly discMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.65,
-    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, forceSinglePass: true, fog: false });
   private readonly beamMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.22,
     blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false });
   private readonly rings = new THREE.InstancedMesh(new THREE.TorusGeometry(2.1, 0.22, 8, 24), this.ringMaterial, this.capacity);

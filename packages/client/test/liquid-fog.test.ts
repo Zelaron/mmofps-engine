@@ -27,7 +27,7 @@ function fixture() {
     } },
   });
   const frame = (liquid: 'water' | 'lava' | null, x = 0, y = 20, z = 0) => {
-    camera.position.set(x, y, z); manager.liquidKind = liquid; manager.render();
+    camera.position.set(x, y, z); manager.liquidKind = liquid; manager.render(true);
     return rendered.at(-1)!;
   };
   const dispose = () => {

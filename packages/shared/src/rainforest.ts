@@ -21,6 +21,13 @@ export function rainforestAt(seed: number, x: number, z: number): number {
   for (const site of rainforestSites(seed)) {
     const dx = x - site.x, dz = z - site.z;
     if (Math.abs(dx) > site.radius + 150 || Math.abs(dz) > site.radius + 150) continue;
+    // The angular boundary lies within [.82r, 1.02r]. Outside its entire
+    // transition band the weight is constant; retain the original formula
+    // near either bound, including a small squared-distance roundoff margin.
+    const distance2 = dx * dx + dz * dz;
+    const inner = site.radius * .82 - 160, outer = site.radius * 1.02 + 100;
+    if (distance2 > outer * outer + 1e-7) continue;
+    if (distance2 < inner * inner - 1e-7) return 1;
     const a = Math.atan2(dz, dx);
     const boundary = site.radius * (.92 + .065 * Math.sin(a * 3) + .035 * Math.cos(a * 7));
     weight = Math.max(weight, smoothstep(boundary + 100, boundary - 160, Math.hypot(dx, dz)));

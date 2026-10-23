@@ -6,6 +6,8 @@ import type { World } from './worldgen.js';
 import { PLAYER } from './constants.js';
 import { multiplyRotations, normalizeRotation, rotateVector, rotationFromEuler, rotationToEuler,
   vehicleQuaternion, type VehicleOrientation } from './rotation.js';
+import { VEHICLE, VEHICLE_VARIANT, validVehicleVariant, NOCTURNE_SCALE } from './vehicle-identity.js';
+export { VEHICLE, VEHICLE_VARIANT, validVehicleVariant, NOCTURNE_SCALE } from './vehicle-identity.js';
 
 // Vehicles use a "possession" model: while a player drives, their MoveState
 // IS the vehicle (stepMove dispatches here), so the existing client
@@ -19,23 +21,7 @@ import { multiplyRotations, normalizeRotation, rotateVector, rotationFromEuler, 
 // steers. Jets pitch/roll with W/S and A/D; mouse movement is free look. No transcendental
 // randomness, no wall-clock - a pure function of (world, state, input, dt).
 
-export const VEHICLE = {
-  NONE: 0,
-  JEEP: 1,
-  TANK: 2,
-  JET: 3,
-  GUNBOAT: 4,
-} as const;
-
-/** Rare city hulls retain their base controls and collision/prediction dispatch. */
-export const VEHICLE_VARIANT = { COMMON: 0, NOCTURNE: 1, BASTION: 2, RAIL: 3 } as const;
-export function validVehicleVariant(type: number, variant = 0): number {
-  return type === VEHICLE.JET && variant === VEHICLE_VARIANT.NOCTURNE ? variant
-    : type === VEHICLE.TANK && (variant === VEHICLE_VARIANT.BASTION || variant === VEHICLE_VARIANT.RAIL) ? variant : 0;
-}
-
 export const JET_GUN_MUZZLE = { x: 0, y: 0.99, z: -3.29 } as const;
-export const NOCTURNE_SCALE = 2.2;
 export const BASTION_GUN_PIVOT = { x: 0, y: 2.99, z: .26 } as const;
 export const BASTION_BARREL_LENGTH = 6.149;
 export const GUNBOAT_DRAFT = .65;
@@ -126,7 +112,7 @@ export const VEHICLE_DEFS: Record<Exclude<VehicleType, 0>, VehicleDef> = {
   [VEHICLE.JET]: {
     name: 'Jet',
     radius: 1.55,
-    maxHealth: 420,
+    maxHealth: 600,
     accel: 40,
     maxSpeed: 132,
     reverseSpeed: 0,
@@ -145,7 +131,7 @@ export const VEHICLE_DEFS: Record<Exclude<VehicleType, 0>, VehicleDef> = {
 
 const NOCTURNE_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.JET], name: 'Nocturne',
   radius: VEHICLE_DEFS[VEHICLE.JET].radius * NOCTURNE_SCALE, enterRange: 8,
-  maxHealth: 720, accel: 64, maxSpeed: VEHICLE_DEFS[VEHICLE.JET].maxSpeed * 1.75,
+  maxHealth: 1000, accel: 64, maxSpeed: VEHICLE_DEFS[VEHICLE.JET].maxSpeed * 1.75,
   turnRate: 1.2, respawnSeconds: 100 };
 const BASTION_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.TANK], name: 'Bastion Siege Tank',
   radius: 2.95, maxHealth: 11000, accel: 32, maxSpeed: 24, reverseSpeed: 10,
@@ -236,6 +222,7 @@ export function stepVehicle(
   s: MoveState,
   cmd: InputCmd,
   dt: number,
+  allowCrestLaunch = true,
 ): VehicleStepResult {
   const def = vehicleDefinition(s.vehicle, s.vehicleVariant);
   const out: VehicleStepResult = { impact: 0, boosting: false };
@@ -338,7 +325,7 @@ export function stepVehicle(
   // a ramp. Stateless (terrain + state only), so client prediction and
   // the server agree bit-for-bit.
   const hspeed = Math.hypot(s.vx, s.vz);
-  if (grounded && hspeed > 6) {
+  if (allowCrestLaunch && grounded && hspeed > 6) {
     const ux = s.vx / hspeed, uz = s.vz / hspeed;
     const gHere = world.groundY(s.px, s.pz);
     // Only when actually riding the heightfield (not a cave floor under
@@ -666,9 +653,20 @@ export const LOCK_RANGE = 900;
 /** Ticks of continuous aim required for a full lock (2s at 60Hz). */
 export const LOCK_TICKS = 120;
 export const LOCKED_HULL_DAMAGE_FACTOR = 12;
+/** Ground anti-armor amplification would kill a fighter several times over.
+ * Aircraft instead survive a first hit and usually require three missiles,
+ * counting the ordinary blast damage that accompanies a direct impact. */
+export const LOCKED_AIR_DAMAGE_FACTOR = 2;
+export function lockedHullDamageFactor(targetVehicle: number): number {
+  return targetVehicle === VEHICLE.JET ? LOCKED_AIR_DAMAGE_FACTOR : LOCKED_HULL_DAMAGE_FACTOR;
+}
+/** Shared per-target bot launch spacing, including rival AA squads. */
+export const BOT_AA_LAUNCH_INTERVAL = 7 * 60;
 /** Homing rockets fly faster but turn on a leash - outmaneuverable. */
 export const HOMING_SPEED_FACTOR = 6.25;
 export const HOMING_RANGE_FACTOR = 2.5;
-export const HOMING_TURN_RATE = 3.4; // rad/s; sufficient turn authority at 300m/s
+export const HOMING_TURN_RATE = 3.4; // ground armor remains vulnerable to close-range locked shots
+/** Aircraft have room to perform a deliberate break turn before impact. */
+export const HOMING_AIR_TURN_RATE = 1.65; // rad/s; ~182m radius at300m/s
 /** The rocket drops its lock beyond this off-axis angle. */
 export const HOMING_BREAK_COS = 0.5; // 60 degrees

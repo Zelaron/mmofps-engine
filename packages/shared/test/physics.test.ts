@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { World, cavePathPoint } from '@shared/worldgen';
 import {
-  capsuleClearance, capsuleHasGroundSupport, collideCapsule, type KinState,
+  capsuleClearance, capsuleHasGroundSupport, collideCapsule, sphereFieldContact, type KinState,
 } from '@shared/physics';
 import { createMoveState, stepMove, BTN, type InputCmd } from '@shared/movement';
 import { PLAYER, WORLD, TICK_DT } from '@shared/constants';
@@ -363,6 +363,25 @@ test('a grazing gradient branch cannot mask a deeper shell contact', () => {
   collideCapsule(world, s, 0, false);
   assert.ok(s.pz > 0.1, `masked -Z contact did not push the capsule: z=${s.pz}`);
   assert.ok(capsuleClearance(world, s.px, s.py, s.pz) >= 0);
+});
+
+test('shell contact computes only the final winning surface normal', () => {
+  let gradients=0;
+  const world={
+    sdf:(x:number,y:number,_z:number)=>Math.min(x+.4,y+.2),
+    gradient(x:number,y:number,z:number,out:{x:number;y:number;z:number}){
+      gradients++;
+      // A CSG crease can point the initial gradient away from the shell's
+      // overlapping faces; its fallback finds the side, then a nearer floor.
+      if(x===0&&y===0&&z===0)Object.assign(out,{x:0,y:0,z:1});
+      else Object.assign(out,x+.4<y+.2?{x:1,y:0,z:0}:{x:0,y:1,z:0});
+    },
+  } as World;
+  const contact=sphereFieldContact(world,0,0,0,.5);
+  assert.ok(contact);
+  assert.equal(contact.depth,.506-.2001953125,'unchanged sign bisection selects the same floor contact');
+  assert.deepEqual([contact.nx,contact.ny,contact.nz],[0,1,0]);
+  assert.equal(gradients,2,'only the initial search direction and final winner need a gradient');
 });
 
 test('compound sign-surface contacts converge within one collision call', () => {

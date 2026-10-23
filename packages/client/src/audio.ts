@@ -14,6 +14,18 @@ export class AudioFX {
   private liftVoice:CityLiftVoice|null=null;
   private readonly combustionBuffers = new Map<number, AudioBuffer>();
 
+  /** Cockpit radar warning; never creates or resumes an audio context. */
+  aircraftWarning(stage: 1 | 2 | 3, pan = 0): void {
+    if (this.ctx?.state !== 'running') return;
+    if (stage === 3) {
+      this.tone(1450, 900, .115, 'square', pan, .16);
+      this.tone(900, 1450, .10, 'square', pan, .14, .13);
+    } else if (stage === 2) {
+      this.tone(1050, 1050, .12, 'triangle', pan, .23);
+      this.tone(1300, 1300, .09, 'triangle', pan, .2, .15);
+    } else this.tone(750, 920, .10, 'sine', pan, .22);
+  }
+
   /** Brief alert calls; callers trigger once on an alert transition. */
   creatureAlert(species: number, pan = 0, gain = 1): void {
     if (species === 3) {

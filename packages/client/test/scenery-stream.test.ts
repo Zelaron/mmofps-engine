@@ -18,13 +18,73 @@ class Endpoint implements SceneryEndpoint {
   postMessage(message: SceneryRequest) { this.messages.push(message); }
   terminate() { this.terminated = true; }
   get last() { return this.messages.at(-1) as SceneryQuery; }
-  reply(query = this.last) {
+  reply(query = this.last, workMs?: number, paced?: boolean) {
     this.onmessage?.(new MessageEvent<SceneryResponse>('message', {
-      data: { type: 'result', id: query.id, kind: query.kind, data: [] },
+      data: { type: 'result', id: query.id, kind: query.kind, data: [], workMs, paced },
     }));
   }
 }
 const bounds = (x: number) => ({ minX: x, maxX: x + 64, minZ: 0, maxZ: 64 });
+
+test('deferred scenery retains latest queries until terrain releases startup, then completes all pools', () => {
+  let creations = 0;
+  const endpoint = new Endpoint(), stream = new SceneryStream(1337, () => { creations++; return endpoint; }, true);
+  try {
+    stream.read('vegetation', bounds(0)); stream.read('vegetation', bounds(640));
+    stream.read('structures', bounds(640)); stream.read('rocks', bounds(640));
+    assert.equal(creations, 0, 'even worker compilation waits for terrain');
+    assert.equal(stream.failed, false, 'deferred work must never trigger foreground fallback');
+    assert.equal(stream.stats.pending, 3);
+    assert.equal(stream.initialReady, false);
+    stream.start(); stream.start();
+    assert.equal(creations, 1);
+    assert.deepEqual(endpoint.last.bounds, bounds(640));
+    endpoint.reply(); endpoint.reply();
+    assert.equal(stream.initialReady, false);
+    endpoint.reply();
+    assert.equal(stream.initialReady, true);
+    assert.equal(stream.stats.ready, 3);
+  } finally { stream.dispose(); }
+  const discarded = new SceneryStream(1337, () => { throw new Error('must not start disposed stream'); }, true);
+  discarded.dispose(); discarded.start();
+  assert.equal(discarded.failed, false);
+});
+
+test('local scenery rest gates reads and callbacks, dispatches latest travel, and cancels on disposal', (t) => {
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { hostname: 'localhost' } });
+  t.after(() => {
+    if (previousLocation) Object.defineProperty(globalThis, 'location', previousLocation);
+    else Reflect.deleteProperty(globalThis, 'location');
+  });
+  let now = 1000;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const endpoint = new Endpoint(), stream = new SceneryStream(1337, () => endpoint);
+  try {
+    stream.read('rocks', bounds(0));
+    stream.read('vegetation', bounds(0));
+    now = 1100; endpoint.reply(endpoint.last, 100);
+    assert.equal(endpoint.messages.length, 2, 'completion cannot bypass the rest');
+    for (let x = 64; x <= 640; x += 64) stream.read('vegetation', bounds(x));
+    assert.equal(endpoint.messages.length, 2, 'frame reads cannot bypass the rest');
+    now = 1399; t.mock.timers.tick(299);
+    assert.equal(endpoint.messages.length, 2);
+    now = 1400; t.mock.timers.tick(1);
+    assert.equal(endpoint.messages.length, 3);
+    assert.deepEqual(endpoint.last.bounds, bounds(640), 'the latest request is selected after waiting');
+    stream.read('structures', bounds(0));
+    endpoint.reply(endpoint.last, 1000);
+    now = 2149; t.mock.timers.tick(749);
+    assert.equal(endpoint.messages.length, 3);
+    now = 2150; t.mock.timers.tick(1);
+    assert.equal(endpoint.messages.length, 4, 'even a cold expensive job rests at most750ms');
+    stream.read('rocks', bounds(64)); endpoint.reply(endpoint.last, 100);
+    stream.dispose(); now = 3000; t.mock.timers.tick(850);
+    assert.equal(endpoint.messages.length, 4, 'disposing cancels a pending wake');
+    assert.ok(endpoint.terminated);
+  } finally { stream.dispose(); }
+});
 
 test('scenery coalesces travel, ignores stale replies and services other pools fairly', () => {
   const endpoint = new Endpoint(), stream = new SceneryStream(1337, () => endpoint);
@@ -47,6 +107,28 @@ test('scenery coalesces travel, ignores stale replies and services other pools f
   } finally { stream.dispose(); }
   assert.ok(endpoint.terminated);
   endpoint.reply(); assert.equal(stream.read('vegetation', bounds(6400)), null);
+});
+
+test('local scenery enables cooperative work and accepts already-paced completion without a second rest', (t) => {
+  const previousLocation = Object.getOwnPropertyDescriptor(globalThis, 'location');
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { hostname: 'localhost' } });
+  t.after(() => {
+    if (previousLocation) Object.defineProperty(globalThis, 'location', previousLocation);
+    else Reflect.deleteProperty(globalThis, 'location');
+  });
+  const endpoint = new Endpoint(), stream = new SceneryStream(1337, () => endpoint);
+  try {
+    assert.deepEqual(endpoint.messages[0], { type: 'init', seed: 1337, cooperative: true });
+    stream.read('vegetation', bounds(0)); const old = endpoint.last;
+    stream.read('vegetation', bounds(640)); stream.read('rocks', bounds(640));
+    endpoint.reply(old, 100, true);
+    assert.equal(endpoint.messages.length, 3, 'a worker-paid rest must not be repeated by the queue');
+    assert.equal(endpoint.last.kind, 'vegetation'); assert.deepEqual(endpoint.last.bounds, bounds(640));
+    endpoint.reply(old, 100, true);
+    assert.equal(endpoint.messages.length, 3, 'old paced results still cannot release a newer request');
+    endpoint.reply(endpoint.last, 100, true);
+    assert.equal(endpoint.last.kind, 'rocks');
+  } finally { stream.dispose(); }
 });
 
 test('returning to a loaded footprint cancels its pending replacement', () => {

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
+import type { ScenerySource } from '../src/render/scenery-stream.js';
 import {
   WEAPONS,
   VEGETATION_KIND,
@@ -65,6 +66,48 @@ function instance(
   assert.ok(mesh instanceof THREE.InstancedMesh, `missing pool ${name}`);
   return mesh;
 }
+
+test('far vegetation waits for full terrain footprints and refreshes stationary cached placements', () => {
+  const plants = [
+    placement(VEGETATION_KIND.CONIFER, 200, 32, { y: 7.25, height: 8, canopyRadius: 9 }),
+    placement(VEGETATION_KIND.CONIFER, 350, 32, { y: 23.125, height: 8, canopyRadius: 5 }),
+  ];
+  const world = new StubWorld(plants);
+  let reads = 0, checks = 0, ready = false, pending = false;
+  const scenery = { failed: false, read: () => { reads++; return pending ? null : plants; } } as unknown as ScenerySource;
+  const terrain = { sceneryCoverageRevision: 0,
+    sceneryGroundReady(x: number, z: number, hx: number, hz: number) {
+      checks++; assert.deepEqual([x, z, hx, hz], [350, 32, 5, 5]); return ready;
+    } };
+  const renderer = new VegetationRenderer(source(world), { nearDistance: 0 }, scenery, terrain);
+  try {
+    assert.equal(renderer.update(0, 32), true);
+    assert.equal(renderer.count, 1, 'canopy footprint conservatively protects a nearby tree beyond128 m center distance');
+    const stems = instance(renderer, 'vegetation-far-stems'), version = stems.instanceMatrix.version;
+    assert.equal(renderer.update(63.9, 32), false);
+    assert.equal(checks, 1);
+    terrain.sceneryCoverageRevision++;
+    assert.equal(renderer.update(63.9, 32), false);
+    assert.equal(stems.instanceMatrix.version, version);
+    ready = true; terrain.sceneryCoverageRevision++;
+    assert.equal(renderer.update(63.9, 32), true);
+    assert.equal(renderer.count, 2);
+    assert.equal(reads, 1); assert.equal(world.calls.length, 0);
+    const matrix = new THREE.Matrix4();
+    for (let i = 0; i < stems.count; i++) {
+      stems.getMatrixAt(i, matrix);
+      const plant = plants.find(plant => plant.x === matrix.elements[12])!;
+      assert.equal(matrix.elements[13] - matrix.elements[5] * .5, plant.y, 'the stem retains its canonical bottom Y');
+    }
+    ready = false; terrain.sceneryCoverageRevision++;
+    assert.equal(renderer.update(63.9, 32), true); assert.equal(renderer.count, 1);
+    pending = true;
+    assert.equal(renderer.update(256, 32), true); assert.equal(renderer.count, 2, 'cached colliders remain protected during a delayed replacement');
+    const settledChecks = checks;
+    for (let i = 0; i < 100; i++) assert.equal(renderer.update(256, 32), false);
+    assert.equal(checks, settledChecks);
+  } finally { renderer.dispose(); }
+});
 
 test('default vegetation coverage exceeds every authoritative weapon range', () => {
   const maxRange = Math.max(...WEAPONS.map((weapon) => weapon.range));

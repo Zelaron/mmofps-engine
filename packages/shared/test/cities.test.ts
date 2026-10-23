@@ -150,7 +150,7 @@ test('city roof stairs connect the ground to a supported playable rooftop', () =
   const first = blocks.solids.find(box => box.hx === 1.3 && box.hy === .19)!;
   assert.ok(first, 'missing accessible low rooftop');
   const state = createMoveState(first.x, city.y + .08, first.z + 3);
-  const targets = [[first.x, first.z - 8.25], [first.x - 6, first.z - 8.25]];
+  const targets = [[first.x, first.z - 8.4], [first.x - 6, first.z - 8.4]];
   let waypoint = 0;
   for (let tick = 0; tick < 600 && waypoint < targets.length; tick++) {
     const [x, z] = targets[waypoint];
@@ -159,7 +159,7 @@ test('city roof stairs connect the ground to a supported playable rooftop', () =
       pitch: 0, weapon: 0, renderTick: 0, renderFrac: 0 }, TICK_DT);
   }
   assert.equal(waypoint, targets.length, 'roof stair or landing is obstructed');
-  assert.ok(Math.abs(state.py - city.y - 4.26) < .12);
+  assert.ok(Math.abs(state.py - city.y - 5.26) < .12);
   assert.ok(capsuleClearance(world, state.px, state.py, state.pz) > -.02);
 });
 

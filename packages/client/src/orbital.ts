@@ -1,6 +1,8 @@
 import { PLANETS, planetBySeed, nearestSpaceport, type JourneyState, type UniverseStatus } from '@shared/universe';
 import { Noise } from '@shared/noise';
 import type { World } from '@shared/worldgen';
+import { PLANET_CAMPAIGN_REWARD, type FrontierState } from '@shared/frontier';
+import { ownershipShares, renderOwnership } from './territory-map.js';
 
 /** The star chart is a navigation instrument, available after instant arrival.
  * Its small procedural globe portraits require no image or model downloads. */
@@ -13,6 +15,8 @@ export class OrbitalUI {
   private current = 0;
   private selected = 1;
   private status: UniverseStatus | null = null;
+  private localOwnership: number[] | null = null;
+  private campaignRewards: readonly number[] = [];
   private readonly chart: HTMLCanvasElement;
   private readonly globes = new Map<number, HTMLCanvasElement>();
   private planetTargets: { x: number; y: number; radius: number; index: number }[] = [];
@@ -30,8 +34,11 @@ export class OrbitalUI {
     this.element.setAttribute('role', 'dialog'); this.element.setAttribute('aria-modal', 'true'); this.element.setAttribute('aria-label', 'Helios star system');
     this.element.innerHTML = `<header><div><small>THE MMOFPS / ORBITAL NAVIGATION</small><h1>Beyond the next horizon.</h1></div><button class="orbit-close" aria-label="Close star system">BACK TO WORLD <span>×</span></button></header>
       <div class="orbit-layout"><div class="orbit-chart"><canvas aria-hidden="true"></canvas><div class="orbit-chart-title"><small>BINARY STAR SYSTEM</small><b>Helios</b><span>Three frontiers. One shared war.</span></div>
-      <nav class="orbit-planets" aria-label="Planets">${PLANETS.map((p, i) => `<button data-planet="${i}" style="--planet:${p.color}"><span>0${i + 1}</span><b>${p.name}</b><small></small></button>`).join('')}</nav><div class="orbit-scale">ORBITAL PROJECTION <span>HELIOS A + B</span></div></div>
+      <nav class="orbit-planets" aria-label="Planets">${PLANETS.map((p, i) => `<button data-planet="${i}" style="--planet:${p.color}"><span>0${i + 1}</span><b>${p.name}</b><small></small><div class="planet-ownership"></div></button>`).join('')}</nav><div class="orbit-scale">ORBITAL PROJECTION <span>HELIOS A + B</span></div></div>
       <aside class="orbit-detail"><div class="orbit-survey"><small class="orbit-number"></small><span class="orbit-availability"></span></div><h2></h2><p class="orbit-description"></p>
+      <section class="orbit-control"><small>CONTROL POINTS</small><div class="orbit-ownership"></div></section>
+      <section class="orbit-contract"><small>PLANETARY CAMPAIGN CONTRACT</small><b></b><p></p></section>
+      <section class="orbit-campaign"><small>CAMPAIGN DISPATCH</small><p></p></section>
       <div class="orbit-facts"><div><b>04</b><span>CITIES TO DISCOVER</span></div><div><b>22.5 km</b><span>SURVEYED REGION WIDTH</span></div></div>
       <div class="orbit-places"></div><div class="orbit-departure"><small>YOUR DEPARTURE</small><b></b><span></span></div>
       <button class="orbit-launch"></button><button class="orbit-guide">MARK NEAREST TRANSIT POD ↗</button><button class="orbit-atlas">EXPLORE THIS WORLD'S ATLAS →</button>
@@ -69,6 +76,7 @@ export class OrbitalUI {
   }
   setWorld(world: World): void {
     this.world = world; this.current = PLANETS.findIndex(p => p.id === planetBySeed(world.seed).id);
+    this.localOwnership = null;
     this.selected = (this.current + 1) % PLANETS.length; this.phase = null; this.journey.hidden = true;
     void this.loadStatus();
   }
@@ -81,6 +89,11 @@ export class OrbitalUI {
     this.phase = state; this.refresh();
     this.journey.hidden = state.phase !== 'charging' || this.open;
     this.journey.textContent = `ORBITAL LAUNCH · ${state.remaining.toFixed(1)}s · HOLD POSITION`;
+  }
+  receiveFrontier(state: FrontierState): void {
+    this.localOwnership = ownershipShares(state.territories);
+    this.campaignRewards = state.you.campaignRewards ?? [];
+    if (this.open) this.refresh();
   }
   private async loadStatus(): Promise<void> {
     try {
@@ -111,6 +124,21 @@ export class OrbitalUI {
     this.element.querySelector('.orbit-availability')!.textContent = route?.available ? `${route.players} EXPLORERS · OPEN` : 'TRANSIT OFFLINE';
     this.element.querySelector('h2')!.textContent = planet.name;
     this.element.querySelector('.orbit-description')!.textContent = planet.description;
+    const earned = this.campaignRewards.includes(planet.seed);
+    this.element.querySelector('.orbit-contract b')!.textContent = earned ? 'CONTRACT COMPLETE' : `+${PLANET_CAMPAIGN_REWARD} SALVAGE`;
+    this.element.querySelector('.orbit-contract p')!.textContent = earned
+      ? `Your first conquest on ${planet.name} is recorded. Each other planet has its own contract.`
+      : `Help capture a control point on ${planet.name}. Stay on foot inside its ring when your faction claims it. Reward once per planet.`;
+    const selectedOwnership = current && this.localOwnership ? this.localOwnership : route?.ownership;
+    const campaign = route?.campaign;
+    this.element.querySelector('.orbit-campaign p')!.textContent = campaign
+      ? `${campaign.threatenedBases ? `${campaign.threatenedBases} ${campaign.threatenedBases === 1 ? 'base is' : 'bases are'} under attack. Reinforcements needed. ` : 'No active distress calls. Capture outlying controls to open another front. '}` +
+        `${campaign.botPopulation.reduce((sum, count) => sum + count, 0)} soldiers deployed` +
+        `${campaign.inboundSquads ? ` · ${campaign.inboundSquads} incoming ${campaign.inboundSquads === 1 ? 'squad' : 'squads'}` : ''}.`
+      : 'Waiting for the latest planetary dispatch.';
+    const ownership = this.element.querySelector<HTMLElement>('.orbit-ownership')!;
+    if (selectedOwnership) renderOwnership(ownership, selectedOwnership);
+    else ownership.textContent = 'Control data unavailable';
     this.element.querySelector('.orbit-places')!.textContent = planet.cities.join(' · ');
     const near = this.world && nearestSpaceport(this.world, this.position);
     this.element.querySelector('.orbit-departure b')!.textContent = near?.port.name ?? 'Locating transit';
@@ -122,7 +150,12 @@ export class OrbitalUI {
     for (const button of this.element.querySelectorAll<HTMLButtonElement>('[data-planet]')) {
       const index = Number(button.dataset.planet);
       button.setAttribute('aria-pressed', String(index === this.selected));
-      button.querySelector('small')!.textContent = index === this.current ? 'YOU ARE HERE' : this.status?.planets.find(p => p.id === PLANETS[index].id)?.available ? 'TRANSIT OPEN' : 'OFFLINE';
+      const destination = this.status?.planets.find(p => p.id === PLANETS[index].id);
+      button.querySelector('small')!.textContent = destination?.campaign?.threatenedBases
+        ? `${destination.campaign.threatenedBases} UNDER ATTACK` : index === this.current ? 'YOU ARE HERE' : destination?.available ? 'TRANSIT OPEN' : 'OFFLINE';
+      const shares = index === this.current && this.localOwnership ? this.localOwnership : this.status?.planets.find(p => p.id === PLANETS[index].id)?.ownership;
+      const meter = button.querySelector<HTMLElement>('.planet-ownership')!;
+      if (shares) renderOwnership(meter, shares, false); else meter.textContent = 'NO CONTROL DATA';
     }
   }
   private globe(index: number): HTMLCanvasElement {

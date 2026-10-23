@@ -17,7 +17,9 @@ try {
   const state = () => page.evaluate(() => window.__mmofps.state);
   const initial = await state(); assert.equal(initial.initialized, true);
   assert.equal(await page.locator('#center-wrap').evaluate(e => e.classList.contains('hide')), true);
-  assert.ok((await page.locator('#frontier-status').innerText()).includes('INDEPENDENT'));
+  const initialFaction = Number(await page.locator('body').getAttribute('data-allegiance'));
+  assert.ok(initialFaction >= 1 && initialFaction <= 3, 'fresh players automatically join a combat faction');
+  assert.equal(await page.locator('#frontier-atlas').isVisible(), false, 'no faction menu blocks arrival');
   await page.locator('#c').click({ position: { x: 700, y: 450 } });
   await page.waitForFunction(() => !!document.pointerLockElement);
   const before = await state();
@@ -34,18 +36,20 @@ try {
   const fired = await state(); assert.ok(fired.ammo[1].magazine < initial.ammo[1].magazine);
   await page.keyboard.press('KeyR'); await page.waitForTimeout(2600);
   assert.ok((await state()).ammo[1].magazine > fired.ammo[1].magazine, 'Reload restores magazine');
-  await page.keyboard.press('KeyG'); await page.locator('button[data-faction="1"]').click();
+  const chosenFaction = initialFaction === 1 ? 2 : 1;
+  await page.keyboard.press('KeyG'); await page.locator(`button[data-faction="${chosenFaction}"]`).click();
   try {
-    await page.waitForFunction(() => document.querySelector('button[data-faction="1"]')?.getAttribute('aria-pressed') === 'true');
+    await page.waitForFunction(faction => document.querySelector(`button[data-faction="${faction}"]`)?.getAttribute('aria-pressed') === 'true', chosenFaction);
   } catch (error) {
     await page.screenshot({ path: 'artifacts/browser-failure.png' });
     await writeFile('artifacts/browser-failure.json', JSON.stringify({ game: await state(), hud: await page.locator('#announce').innerText(), atlas: await page.locator('.atlas-inventory').innerText(), errors }, null, 2));
     throw error;
   }
   await page.reload(); await page.waitForFunction(() => window.__mmofps?.state.initialized && (window.__mmofps.state.rendering.worldPresented ?? true));
-  await page.waitForFunction(() => document.querySelector('#frontier-status')?.textContent.includes('TERRAN ACCORD'));
+  await page.waitForFunction(faction => Number(document.body.dataset.allegiance) === faction, chosenFaction);
+  assert.equal(await page.locator('#frontier-atlas').isVisible(), false);
   assert.deepEqual(errors, []);
-  results.push({ device: 'desktop', automaticJoinMs: Math.round(joinMs), runMetresIn1_2s: metres, jump: true, fire: true, reload: true, allegianceRestored: true, errors });
+  results.push({ device: 'desktop', automaticJoinMs: Math.round(joinMs), automaticFaction: initialFaction, chosenFaction, runMetresIn1_2s: metres, jump: true, fire: true, reload: true, allegianceRestored: true, errors });
   await context.close();
 
   const mobile = await browser.newContext({ viewport: { width: 844, height: 390 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
@@ -56,6 +60,9 @@ try {
   await touch.waitForFunction(() => window.__mmofps?.state.initialized && (window.__mmofps.state.rendering.worldPresented ?? true));
   await touch.waitForTimeout(8000);
   assert.equal(await touch.locator('#touch-controls').evaluate(e => e.classList.contains('active')), true);
+  const mobileFaction = Number(await touch.locator('body').getAttribute('data-allegiance'));
+  assert.ok(mobileFaction >= 1 && mobileFaction <= 3, 'touch players also join a combat faction automatically');
+  assert.equal(await touch.locator('#frontier-atlas').isVisible(), false);
   const old = await touch.evaluate(() => window.__mmofps.state);
   const stick = await touch.locator('#touch-stick').boundingBox(), fire = await touch.locator('[data-action="fire"]').boundingBox();
   const cdp = await mobile.newCDPSession(touch);
@@ -73,7 +80,7 @@ try {
   assert.equal(viewport.width, 393); assert.equal(viewport.client, 393); assert.equal(viewport.scale, 1);
   await touch.screenshot({ path: 'artifacts/mobile-portrait.png' });
   assert.deepEqual(touchErrors, []);
-  results.push({ device: 'mobile-emulation', automaticControls: true, simultaneousMoveAndFire: true, distance, portrait: viewport, errors: touchErrors });
+  results.push({ device: 'mobile-emulation', automaticControls: true, automaticFaction: mobileFaction, simultaneousMoveAndFire: true, distance, portrait: viewport, errors: touchErrors });
   await mobile.close();
 } finally { await browser.close(); }
 await writeFile('artifacts/browser-check.json', JSON.stringify(results, null, 2));

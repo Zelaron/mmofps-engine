@@ -6,21 +6,27 @@ import { isFaction } from '@shared/frontier';
 import { capsuleClearance } from '@shared/physics';
 import { WORLD, PLAYER, TICK_RATE } from '@shared/constants';
 import { WEAPONS } from '@shared/weapons';
+import { PLANETS } from '@shared/universe';
 import type { Game, ServerPlayer } from './game.js';
 
 export interface SavedPlayer {
   version: 1; seed: number; savedAt: number; faction: number; salvage: number; discoveries: string[];
+  /** Retained for version-one save compatibility; zero is always migrated. */
+  factionAssigned?: boolean;
+  preferredSpawnId?: string;
+  lastDeath?: { x: number; y: number; z: number };
   arrival?: boolean;
   salvageSpent?: number;
   salvageEarned?: number;
+  campaignRewards?: number[];
   x: number; y: number; z: number; health: number; alive: boolean;
   frags: number; deaths: number; factionWait: number; combatWait: number;
   ammo: { magazine: number; reserve: number }[];
 }
 export function capturePlayer(game: Pick<Game, 'seed' | 'tick'>,
   p: Omit<ServerPlayer, 'sink' | 'discoveries' | 'fullPickupContacts'> & { discoveries: Iterable<string> }): SavedPlayer {
-  return { version: 1, seed: game.seed, savedAt: Date.now(), faction: p.faction, salvage: p.salvage, salvageSpent: p.salvageSpent, salvageEarned: p.salvageEarned,
-    discoveries: [...p.discoveries], x: p.state.px, y: p.state.py, z: p.state.pz,
+  return { version: 1, seed: game.seed, savedAt: Date.now(), faction: p.faction, factionAssigned: true, preferredSpawnId: p.preferredSpawnId, salvage: p.salvage, salvageSpent: p.salvageSpent, salvageEarned: p.salvageEarned,
+    discoveries: [...p.discoveries], campaignRewards: [...p.campaignRewards], lastDeath: p.lastDeath, x: p.state.px, y: p.state.py, z: p.state.pz,
     health: p.health, alive: p.state.alive, frags: p.frags, deaths: p.deaths,
     factionWait: Math.max(0, p.factionChangeAt - game.tick) / TICK_RATE,
     combatWait: Math.max(0, p.regenBlockUntil - game.tick) / TICK_RATE,
@@ -29,12 +35,22 @@ export function capturePlayer(game: Pick<Game, 'seed' | 'tick'>,
 export function restorePlayer(game: Game, p: ServerPlayer, value: unknown): void {
   if (!value || typeof value !== 'object') return;
   const data = value as SavedPlayer;
-  if (data.version !== 1 || data.seed !== game.seed || !isFaction(data.faction)) return;
-  p.faction = data.faction;
+  if (data.version !== 1 || data.seed !== game.seed || (data.faction !== 0 && !isFaction(data.faction))) return;
+  // Every old Independent save joins the combat faction assigned at login,
+  // including saves that explicitly recorded the retired faction-zero choice.
+  if (data.faction !== 0) p.faction = data.faction;
+  else if (!p.faction) p.faction = (1 + p.id % 3) as ServerPlayer['faction'];
+  p.preferredSpawnId = !data.arrival && typeof data.preferredSpawnId === 'string' &&
+    /^[a-z0-9][a-z0-9:-]{0,95}$/.test(data.preferredSpawnId) ? data.preferredSpawnId : '';
+  p.lastDeath = !data.arrival && data.lastDeath && [data.lastDeath.x, data.lastDeath.y, data.lastDeath.z].every(Number.isFinite)
+    && Math.abs(data.lastDeath.x) < WORLD.BORDER && Math.abs(data.lastDeath.z) < WORLD.BORDER
+    ? { ...data.lastDeath } : undefined;
   const bounded = (n: unknown, max: number, fallback = 0): number => typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.min(max, n)) : fallback;
   p.salvage = bounded(data.salvage, 1_000_000, 30);
   p.salvageSpent = Math.floor(bounded(data.salvageSpent, Number.MAX_SAFE_INTEGER));
   p.salvageEarned = Math.floor(bounded(data.salvageEarned, Number.MAX_SAFE_INTEGER));
+  p.campaignRewards = Array.isArray(data.campaignRewards)
+    ? [...new Set(data.campaignRewards.filter(seed => PLANETS.some(planet => planet.seed === seed)))] : [];
   p.discoveries = new Set(Array.isArray(data.discoveries) ? data.discoveries.filter(d => typeof d === 'string' && /^(?:\d{1,10}:)?city-[0-3]$/.test(d)).map(d => d.includes(':') ? d : `${data.seed}:${d}`) : []);
   p.frags = bounded(data.frags, 32767); p.deaths = bounded(data.deaths, 32767);
   const elapsed = Math.max(0, (Date.now() - bounded(data.savedAt, Date.now(), Date.now())) / 1000);
@@ -42,7 +58,7 @@ export function restorePlayer(game: Game, p: ServerPlayer, value: unknown): void
   p.regenBlockUntil = game.tick + Math.max(0, bounded(data.combatWait, PLAYER.REGEN_DELAY) - elapsed) * TICK_RATE;
   p.health = bounded(data.health, PLAYER.MAX_HEALTH, PLAYER.MAX_HEALTH);
   p.state.alive = data.alive === true && p.health > 0;
-  if (!p.state.alive) { p.health = 0; p.respawnAtTick = game.tick + 3 * TICK_RATE; }
+  if (!p.state.alive) { p.health = 0; p.respawnAtTick = game.tick + PLAYER.RESPAWN_SECONDS * TICK_RATE; }
   if (data.arrival) {
     const port = game.world.collectTransportPlan().pods[0];
     if (port) { p.state.px = port.x; p.state.py = port.y + .12; p.state.pz = port.z; }

@@ -169,6 +169,9 @@ function pack(g: THREE.Group): void {
     geometry.computeBoundingBox(); geometry.computeBoundingSphere();
     const mesh = new THREE.Mesh(geometry, material);
     mesh.name = material === METAL ? 'metal' : material === LIT ? 'illuminated-inserts' : 'composite';
+    // Packing baked each mesh transform into its vertices. Reload/aim pivots
+    // stay dynamic; cloned decorative leaves retain this fixed local matrix.
+    mesh.updateMatrix(); mesh.matrixAutoUpdate = false;
     g.add(mesh);
   }
 }

@@ -234,3 +234,84 @@ test('centimeter contact offsets and a skipped clock tick retain descending supp
     assert.ok(Math.abs(s.py - cityLiftPose(site, s.simulationTick! / TICK_RATE).y - .006) < 1e-8);
   }
 });
+
+function indexedLiftWorld(sites: CityLiftSite[]): World {
+  const world = flatWorld();
+  world.collectCities = () => [];
+  world.collectTransportPlan = () => ({ lifts: sites }) as ReturnType<World['collectTransportPlan']>;
+  world.collectCityLifts = World.prototype.collectCityLifts;
+  return world;
+}
+
+function distantLifts(): CityLiftSite[] {
+  return Array.from({ length: 120 }, (_, i) => ({ ...site, id: i + 10, x: 1000 + i * 128, z: -1000 }));
+}
+
+test('lift spatial selection preserves collection order when multiple decks overlap', () => {
+  const first = { ...site, id: 900 }, second = { ...site, id: 2, bottom: .025, top: 24.025 };
+  const world = indexedLiftWorld([...distantLifts(), first, second]);
+  const standing = rider(6), contact = carryCityLift(world, standing, 6, 6 + TICK_DT);
+  assert.equal(contact?.site, first, 'the first matching site wins regardless of numeric id');
+  const falling = rider(6); falling.py = 11; falling.vy = -40; falling.grounded = false;
+  landOnCityLift(world, falling, 13, 6, 6 + TICK_DT, null, false);
+  assert.equal(falling.py, cityLiftPose(first, 6 + TICK_DT).y + .006);
+});
+
+test('lift spatial selection matches full scans at signed cell and capsule footprint boundaries', () => {
+  for (const x of [-66.2, -64, -.2, 0, 63.8, 64, 128]) {
+    const local = { ...site, id: 200, x, z: -x, hx: 67, hz: 3 };
+    const sites = [...distantLifts(), local], indexed = indexedLiftWorld(sites), linear = flatWorld();
+    linear.collectCityLifts = () => sites;
+    for (const dx of [-local.hx - PLAYER.RADIUS * .5, -64, 0, 64, local.hx + PLAYER.RADIUS * .5,
+      local.hx + PLAYER.RADIUS * .5 + .0001]) {
+      for (const dz of [-local.hz - PLAYER.RADIUS * .5, 0, local.hz + PLAYER.RADIUS * .5]) {
+        const a = rider(6); a.px = x + dx; a.pz = local.z + dz;
+        const b = { ...a };
+        assert.deepEqual(carryCityLift(indexed, a, 6, 6 + TICK_DT), carryCityLift(linear, b, 6, 6 + TICK_DT));
+        assert.deepEqual(a, b);
+        // The crossing starts in a different grid cell and below-footprint
+        // crossings still obey the original swept one-way contact rule.
+        for (const approachX of [a.px, a.px - 130]) {
+          const left = rider(6); Object.assign(left, { px: a.px, pz: a.pz, py: 11, vy: -40, grounded: false });
+          const right = { ...left }, approach = { x: approachX, z: a.pz, grounded: false, velocityY: -40 };
+          assert.equal(landOnCityLift(indexed, left, 13, 6, 6 + TICK_DT, null, false, approach),
+            landOnCityLift(linear, right, 13, 6, 6 + TICK_DT, null, false, approach));
+          assert.deepEqual(left, right);
+        }
+      }
+    }
+  }
+});
+
+test('lift spatial selection keeps injected mutable collectors live after a generated collection was cached', () => {
+  const original = { ...site }, world = indexedLiftWorld([...distantLifts(), original]);
+  assert.equal(carryCityLift(world, rider(6), 6, 6 + TICK_DT)?.site, original);
+  const injected = { ...site, id: 300, x: 500 }, sites = [...distantLifts(), injected];
+  world.collectCityLifts = () => sites;
+  assert.equal(carryCityLift(world, rider(6), 6, 6 + TICK_DT), null);
+  injected.x = 0;
+  assert.equal(carryCityLift(world, rider(6), 6, 6 + TICK_DT)?.site, injected,
+    'in-place changes in a custom fixture cannot leave stale indexed bounds');
+  sites.splice(sites.indexOf(injected), 1);
+  assert.equal(carryCityLift(world, rider(6), 6, 6 + TICK_DT), null);
+});
+
+test('lift spatial selection avoids reading distant sites again after its initial cache build', () => {
+  let reads = 0;
+  const distant = distantLifts().map(original => ({ ...original, get x() { reads++; return original.x; } }));
+  const world = indexedLiftWorld([...distant, { ...site }]);
+  carryCityLift(world, rider(6), 6, 6 + TICK_DT);
+  assert.ok(reads > 0, 'the initial index includes the whole generated collection');
+  reads = 0;
+  for (let i = 0; i < 20; i++) {
+    const state = rider(6), contact = carryCityLift(world, state, 6, 6 + TICK_DT);
+    landOnCityLift(world, state, 12.006, 6, 6 + TICK_DT, contact, false);
+  }
+  assert.equal(reads, 0, 'repeated carry and landing checks only inspect nearby sites');
+});
+
+test('lift spatial selection conservatively retains oversized decks without an unbounded grid', () => {
+  const oversized = { ...site, hx: 100_000, hz: 100_000 }, world = indexedLiftWorld([...distantLifts(), oversized]);
+  const state = rider(6); state.px = -90_000;
+  assert.equal(carryCityLift(world, state, 6, 6 + TICK_DT)?.site, oversized);
+});

@@ -28,13 +28,16 @@ import { NetClient } from './net.js';
 import { InputTracker } from './input.js';
 import { ChatPanel } from './chat.js';
 import { AirliftMap } from './airlift.js';
-import { NavigationMap } from './world-map.js';
+import { NavigationMap, worldMapOverviewSvg } from './world-map.js';
+import { WorldMapStream } from './world-map-stream.js';
+import { buildMapIntel } from './tactical-intel.js';
+import type { FrontierState } from '@shared/frontier';
 import { AirliftPodView } from './render/airlift-pod.js';
 import { airliftPose } from '@shared/airlift';
 import { TouchControls } from './touch-controls.js';
 import { SceneryScheduler } from './render/scenery-scheduler.js';
 import { SceneryStream } from './render/scenery-stream.js';
-import { isTouchDevice } from './render/device-profile.js';
+import { isTouchDevice, isLocalWorldHost } from './render/device-profile.js';
 import { Prediction } from './prediction.js';
 import { Interp } from './interp.js';
 import { SceneMgr } from './render/scene.js';
@@ -62,6 +65,12 @@ import { TransportRenderer } from './render/transport.js';
 import { ViewModel } from './render/viewmodel.js';
 import { Hud, escapeHtml } from './hud.js';
 import { AudioFX } from './audio.js';
+import { AircraftWarning } from './aircraft-warning.js';
+import { BossWarning } from './boss-warning.js';
+import type { CreatureState } from '@shared/wildlife';
+import { DeathScene } from './render/death-scene.js';
+import { DEATH_CAMERA_SECONDS } from './death-motion.js';
+import type { AircraftThreat, DeathMotion } from '@shared/protocol';
 import { VehicleShotQueue } from './vehicle-shot-queue.js';
 import { ArtilleryFeedback } from './artillery-feedback.js';
 import { nearestMovingLift } from './city-lift-audio.js';
@@ -77,6 +86,8 @@ const requestSession = () => fetch('/api/session', { credentials: 'same-origin',
 let initialSession: Promise<boolean> | null = requestSession();
 const hud = new Hud();
 const audio = new AudioFX();
+const aircraftWarning = new AircraftWarning((stage, pan) => audio.aircraftWarning(stage, pan));
+const bossWarning = new BossWarning(species => audio.creatureAlert(species, 0, .65));
 const input = new InputTracker(canvas);
 input.weapon = 1;
 document.addEventListener('pointerdown', () => audio.unlock(), { once: true });
@@ -95,12 +106,13 @@ const frontierMarkers = new FrontierMarkers();
 sceneMgr.scene.add(frontierMarkers.group);
 const campModels = new OutpostRenderer(); sceneMgr.scene.add(campModels.group);
 const resourceModels = new ResourceModels(); sceneMgr.scene.add(resourceModels.group);
-const airliftPod = new AirliftPodView(sceneMgr.camera);
+const airliftPod = new AirliftPodView(sceneMgr.scene);
 input.onToggleMap = () => navigationMap.toggle();
 const effects = new Effects();
 const pickupModels = new PickupModels();
 const vehicleModels = new VehicleModels();
 const playerModels = new PlayerModels();
+const deathScene = new DeathScene(); sceneMgr.scene.add(deathScene.group);
 const wildlifeModels = new WildlifeModels();
 const viewModel = new ViewModel(sceneMgr.camera);
 sceneMgr.scene.add(effects.group);
@@ -111,6 +123,7 @@ sceneMgr.scene.add(wildlifeModels.group);
 
 // -- identity ---------------------------------------------------------------
 let lockState = 0;
+let aircraftThreat: AircraftThreat | undefined;
 let vehicleHealth = 0;
 let localHull: THREE.Group | null = null;
 let localHullType = 0;
@@ -138,6 +151,7 @@ const pendingVehicleShots = new VehicleShotQueue();
 const artilleryFeedback = new ArtilleryFeedback();
 const artilleryMarkerPoint = new THREE.Vector3(), artilleryViewDirection = new THREE.Vector3();
 let creatureAlerts = new Set<number>();
+let nearbyCreatures: readonly CreatureState[] = [];
 /** Previous-frame vehicle/boost state for audio cues (enter/exit, engine). */
 let lastVehicle: number = VEHICLE.NONE;
 let lastVehicleVariant = 0;
@@ -200,6 +214,10 @@ localStorage.setItem('mmofps-name', myName);
 // -- state ------------------------------------------------------------------
 let myId = -1;
 let world: World | null = null;
+let mapArtwork: WorldMapStream | null = null;
+let latestFrontierState: FrontierState | null = null;
+let nextMapIntelAt = 0;
+let initialTerrainAt: number | null = null;
 let pred: Prediction | null = null;
 let chunks: ChunkManager | null = null;
 let vegetation: VegetationRenderer | null = null;
@@ -237,12 +255,25 @@ let lastHealth: number = PLAYER.MAX_HEALTH;
 let deadSince = -1;
 let killerName = '';
 let disconnected = false;
+
+function beginDeathMoment(motion?: DeathMotion, cause = ''): void {
+  if (!pred) return;
+  deadSince = performance.now();
+  const p = pred.state;
+  deathScene.begin(myId, motion ?? { x: p.px, y: p.py, z: p.pz, vx: p.vx, vy: p.vy, vz: p.vz, yaw: input.yaw },
+    true, sceneMgr.camera, deadSince * .001, cause);
+  camps?.toggle(false, false); chat?.close(false); airlift?.close(false); orbital?.toggle(false, false);
+  frontier?.setAlive(false, DEATH_CAMERA_SECONDS * 1000);
+  input.setSuspended(true); touch?.setActive(false);
+  if (document.pointerLockElement) document.exitPointerLock();
+}
 let reconnectAttempt = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectStopped = false;
 let transferring = false;
 let fps = 60;
 let statTimer = 0;
+let overlayWorldPresented = false;
 
 canvas.addEventListener('click', () => audio.unlock());
 
@@ -255,16 +286,20 @@ function presentWeapon(weapon: number, playSound = true): void {
 
 // -- overlay state machine --------------------------------------------------
 function updateOverlay(): void {
+  // Track the state this overlay actually used. A welcome and first draw can
+  // both happen between frame comparisons during a quick rejoin.
+  overlayWorldPresented = sceneMgr.renderStats.worldPresented;
   if (disconnected) {
     hud.showCenter(reconnectStopped ? 'SESSION CLOSED' : 'RECONNECTING', reconnectStopped ? 'Refresh to rejoin from this tab.' : 'Restoring your place in the world…');
     return;
   }
   if (transferring) { hud.showCenter('IN TRANSIT', 'Your next frontier is waiting…'); return; }
-  if (!pred || !pred.initialized) {
+  if (!pred || !pred.initialized || !overlayWorldPresented) {
     hud.showCenter('THE MMOFPS', 'Entering world…');
     return;
   }
   if (pred && !pred.alive) {
+    if (frontier?.respawning) { hud.hideCenter(); return; }
     const t = Math.max(0, PLAYER.RESPAWN_SECONDS - (performance.now() - deadSince) / 1000);
     hud.showCenter(killerName ? `Fragged by ${killerName}` : 'You died', `Respawning in ${t.toFixed(1)}…`);
     return;
@@ -282,7 +317,10 @@ window.addEventListener('keyup', (e) => {
   if (e.code === 'Tab') hud.showScores(false);
 });
 input.onToggleDebug = () => hud.toggleDebug();
-input.onHyperToggle = (on) => hud.showAnnounce(on ? 'HYPERSPEED ON (invulnerable)' : 'Hyperspeed off');
+input.onHyperToggle = (on) => {
+  document.getElementById('hyperspeed-status')!.hidden = !on;
+  hud.showAnnounce(on ? 'HYPERSPEED ON (invulnerable)' : 'Hyperspeed off');
+};
 
 // -- weapon name for the kill feed -----------------------------------------
 function weaponLabel(w: number): string {
@@ -364,11 +402,19 @@ const net = new NetClient({
   },
   onOutposts(state) { world?.outposts.replace(state.sites); campModels.receive(state.sites); camps?.receive(state); },
   onResources(state) { resourceState = state; resourceModels.receive(state); resourcesUI?.receive(state); },
-  onFrontier(state) { camps?.receiveInventory(state); frontier?.receive(state); frontierMarkers.receive(state); playerModels.setFactions(state.nearby); },
+  onFrontier(state) {
+    latestFrontierState = state;
+    camps?.receiveInventory(state); frontier?.receive(state); navigationMap.receive(state);
+    orbital?.receiveFrontier(state); frontierMarkers.receive(state); playerModels.setFactions(state.nearby);
+  },
   onWelcome(msg: WelcomeMsg): void {
+    nearbyCreatures = [];
+    latestFrontierState = null; nextMapIntelAt = 0;
+    deathScene.clear(); deadSince = -1; aircraftThreat = undefined;
     pendingVehicleShots.clear();
     artilleryFeedback.clear();
     pickupModels.clear();
+    playerModels.clear();
     interp.clearAll(); names.clear(); scores = []; predTick = -1; tickAccum = 0; seq = 1;
     lastStreamX = NaN; lastStreamZ = NaN; creatureAlerts.clear();
     reconnectAttempt = 0; reconnectStopped = false; transferring = false;
@@ -376,12 +422,19 @@ const net = new NetClient({
     if (reconnectTimer) clearTimeout(reconnectTimer); reconnectTimer = null;
     myId = msg.yourId;
     world = new World(msg.seed);
+    const overview = worldMapOverviewSvg(world, world.collectTransportPlan());
+    // Local workers can reuse the plan already generated for immediate UI.
+    // Export once per welcome; postMessage gives each worker its own copy.
+    const transportSnapshot = isLocalWorldHost() ? world.transportSnapshot() : undefined;
+    mapArtwork?.dispose();
+    mapArtwork = new WorldMapStream(msg.seed, overview, undefined, transportSnapshot);
+    initialTerrainAt = null;
     sceneryStream?.dispose();
-    sceneryStream = new SceneryStream(msg.seed);
+    sceneryStream = new SceneryStream(msg.seed, undefined, isLocalWorldHost(), transportSnapshot);
     campModels.receive([]); camps?.setWorld(world);
     resourceState = null; resourceModels.clear(); resourcesUI?.clear();
-    navigationMap.setWorld(world);
-    frontier?.setWorld(world);
+    navigationMap.setWorld(world, mapArtwork);
+    frontier?.setWorld(world, mapArtwork);
     orbital?.setWorld(world);
     disconnected = false;
     sceneMgr.setCities(world.collectCities());
@@ -406,13 +459,13 @@ const net = new NetClient({
       sceneMgr.scene.remove(chunks.group);
       chunks.dispose();
     }
-    chunks = new ChunkManager(msg.seed);
+    chunks = new ChunkManager(msg.seed, 0, undefined, transportSnapshot);
     sceneMgr.scene.add(chunks.group);
     if (vegetation) {
       sceneMgr.scene.remove(vegetation.group);
       vegetation.dispose();
     }
-    vegetation = new VegetationRenderer(world, {}, sceneryStream);
+    vegetation = new VegetationRenderer(world, {}, sceneryStream, chunks);
     sceneMgr.scene.add(vegetation.group);
     if (structures) {
       sceneMgr.scene.remove(structures.group);
@@ -430,7 +483,7 @@ const net = new NetClient({
       sceneMgr.scene.remove(rocks.group);
       rocks.dispose();
     }
-    rocks = new RockRenderer(world, sceneryStream);
+    rocks = new RockRenderer(world, sceneryStream, chunks, chunks.setSceneryGroundSupport.bind(chunks));
     sceneMgr.scene.add(rocks.group);
     if (caveDetails) {
       sceneMgr.scene.remove(caveDetails.group);
@@ -442,7 +495,8 @@ const net = new NetClient({
     // available even if the regional encounter worker cannot start.
     if (caveLandmarks) { sceneMgr.scene.remove(caveLandmarks.group); caveLandmarks.dispose(); }
     if (teleporters) { sceneMgr.scene.remove(teleporters.group); teleporters.dispose(); }
-    teleporters = new TeleporterRenderer(new EncounterStream(world.seed, msg.teleporters));
+    teleporters = new TeleporterRenderer(new EncounterStream(world.seed, msg.teleporters, undefined,
+      () => !isLocalWorldHost() || initialTerrainAt !== null, transportSnapshot));
     sceneMgr.scene.add(teleporters.group);
     caveLandmarks = new CaveLandmarkRenderer(teleporters.field);
     sceneMgr.scene.add(caveLandmarks.group);
@@ -451,7 +505,14 @@ const net = new NetClient({
   },
 
   onSnapshot(snap: Snapshot): void {
-    wildlifeModels.sync(snap.creatures ?? []);
+    nearbyCreatures = snap.creatures ?? [];
+    wildlifeModels.sync(snap.creatures ?? [], snap.tick);
+    const mapNow = performance.now();
+    if (mapNow >= nextMapIntelAt) {
+      const intel = buildMapIntel(snap, latestFrontierState, myId);
+      navigationMap.setIntel(intel); frontier?.setIntel(intel);
+      nextMapIntelAt = mapNow + 200;
+    }
     const nextAlerts = new Set<number>();
     for (const c of snap.creatures ?? []) {
       if (!c.alert || c.dead) continue;
@@ -468,6 +529,7 @@ const net = new NetClient({
     pickupModels.sync(snap.pickups ?? []);
     vehicleModels.update(snap.vehicles);
     lockState = snap.you.lockState;
+    aircraftThreat = snap.you.aircraftThreat;
     vehicleHealth = snap.you.vehicleHealth;
     const wasInit = pred.initialized;
     const wasAlive = pred.alive;
@@ -475,6 +537,8 @@ const net = new NetClient({
     const oldVehicle = pred.state.vehicle, oldVariant = pred.state.vehicleVariant, oldSeat=pred.state.seat??0,oldVehicleId=pred.state.vehicleId;
     const oldFlight = pred.state.airlift;
     pred.onSnapshot(snap);
+    if (!pred.alive && (wasAlive || !wasInit) && deadSince < 0) beginDeathMoment();
+    frontier?.setAlive(pred.alive, DEATH_CAMERA_SECONDS * 1000);
     if (pred.state.airlift && !oldFlight) {
       const pose=airliftPose(world!.collectTransportPlan(),pred.state.airlift,snap.tick);
       if(pose){input.yaw=pose.heading;input.pitch=-.2;}
@@ -571,18 +635,23 @@ const net = new NetClient({
     }
     if (ev.victim === myId) {
       pendingVehicleShots.clear();
-      deadSince = performance.now();
       killerName = ev.killer === myId ? '' : nameOf(ev.killer);
+      beginDeathMoment(ev.motion, killerName ? `${killerName} · ${weaponLabel(ev.weapon)}` : weaponLabel(ev.weapon));
       audio.death();
       updateOverlay();
-    } else if (ev.killer === myId) {
-      hud.showAnnounce(`You fragged ${nameOf(ev.victim)}`);
+    } else {
+      if (ev.motion && world && Math.hypot(ev.motion.x - sceneMgr.camera.position.x, ev.motion.z - sceneMgr.camera.position.z) < NET.INTEREST_RADIUS) {
+        deathScene.begin(ev.victim, ev.motion, false, sceneMgr.camera, performance.now() * .001);
+      }
+      if (ev.killer === myId) hud.showAnnounce(`You fragged ${nameOf(ev.victim)}`);
     }
   },
 
   onSpawn(ev): void {
+    deathScene.remove(ev.id);
     interp.reset(ev.id);
     if (ev.id === myId) {
+      deadSince = -1;
       pendingVehicleShots.clear();
       audio.spawn();
       updateOverlay();
@@ -638,6 +707,7 @@ const net = new NetClient({
     }
     names.delete(id);
     interp.reset(id);
+    playerModels.remove(id);
   },
 
   onScores(rows): void {
@@ -652,6 +722,9 @@ const net = new NetClient({
   onChat(message): void { chat?.add(message); },
 
   onClose(code): void {
+    nearbyCreatures = [];
+    latestFrontierState = null; navigationMap.clearIntel(); frontier?.clearIntel();
+    wildlifeModels.sync([]);
     resourceState = null; resourceModels.clear(); resourcesUI?.clear();
     chat?.close(false);
     airlift?.close(false);
@@ -682,7 +755,7 @@ chat = new ChatPanel(text => net.send(encodeClientChat(text)), (open, resume) =>
     else input.resumePlay();
   }
   updateOverlay();
-}, () => net.connected && !airlift?.open && !frontier?.open && !orbital?.open && !camps?.open);
+}, () => net.connected && !!pred?.alive && !airlift?.open && !frontier?.open && !orbital?.open && !camps?.open);
 airlift = new AirliftMap(destination => net.send(new ByteWriter(2).u8(Msg.CTravel).u8(destination).finish()), (open, resume) => {
   input.setSuspended(open);
   if (open) {
@@ -707,12 +780,16 @@ frontier = new FrontierUI(faction => net.send(new ByteWriter(2).u8(Msg.CFaction)
     input.setSuspended(true);
     if (document.pointerLockElement) document.exitPointerLock();
   } else {
-    input.setSuspended(false);
-    if (resume) { if (touch) touch.setActive(true); else input.resumePlay(); }
+    input.setSuspended(transferring || !!frontier?.respawning);
+    if (resume && !frontier?.respawning) { if (touch) touch.setActive(true); else input.resumePlay(); }
   }
   updateOverlay();
-}, () => orbital?.toggle(true));
+}, () => orbital?.toggle(true), id => net.send(new ByteWriter(100).u8(Msg.CRespawn).str(id).finish()));
 orbital = new OrbitalUI(destination => net.send(new ByteWriter(2).u8(Msg.CPlanet).u8(destination).finish()), (open, resume) => {
+  if (frontier?.respawning) {
+    if (open) orbital?.toggle(false, false);
+    input.setSuspended(true); touch?.setActive(false); return;
+  }
   if (open) {
     camps?.toggle(false, false); chat?.close(false); airlift?.close(false); frontier?.toggle(false, false);
     touch?.setActive(false); input.setSuspended(true);
@@ -724,6 +801,10 @@ orbital = new OrbitalUI(destination => net.send(new ByteWriter(2).u8(Msg.CPlanet
   updateOverlay();
 }, () => frontier?.toggle(true));
 camps = new CampsUI(action => net.send(encodeOutpostAction(action)), (open, resume) => {
+  if (frontier?.respawning) {
+    if (open) camps?.toggle(false, false);
+    input.setSuspended(true); touch?.setActive(false); return;
+  }
   if (open) {
     chat?.close(false); airlift?.close(false); frontier?.toggle(false, false); orbital?.toggle(false, false);
     touch?.setActive(false); input.setSuspended(true);
@@ -832,6 +913,7 @@ document.addEventListener('visibilitychange', () => {
 
 // -- main loop --------------------------------------------------------------
 let lastFrame = performance.now();
+let lastSceneDraw = -Infinity;
 
 function frame(): void {
   requestAnimationFrame(frame);
@@ -844,6 +926,9 @@ function frame(): void {
   lastFrame = now;
   fps = fps * 0.95 + (1 / Math.max(1e-3, frameSeconds)) * 0.05;
 
+  // A frame-local clock reset retains the authoritative pose already used
+  // to place this frame's camera; it must not prevent initial shader work.
+  const frameHasSnapshot = !!pred?.initialized;
   if (pred && pred.initialized) {
     // Keep the predicted tick leading the server by rtt + margin, nudging
     // the accumulator rate instead of jumping.
@@ -872,7 +957,7 @@ function frame(): void {
     const rp = pred.renderPos();
     const cam = sceneMgr.camera;
     const shake = effects.shake;
-    const driving = pred.state.vehicle !== VEHICLE.NONE;
+    const driving = pred.alive && !deathScene.has(myId) && pred.state.vehicle !== VEHICLE.NONE;
     const gunner = driving && pred.state.seat===1;
     const artillery = driving && pred.state.seat===2;
     const rt = net.estServerTick() - NET.INTERP_TICKS;
@@ -955,7 +1040,7 @@ function frame(): void {
     localSeat=pred.state.seat??0;
 
     // Remote entities at interpolated time.
-    playerModels.update(views, names, dt,driving&&localHull&&pred.state.vehicleId!==undefined?
+    playerModels.update(views.filter(v => !v.dead && !deathScene.has(v.id)), names, dt,driving&&localHull&&pred.state.vehicleId!==undefined?
       {vehicleId:pred.state.vehicleId,x:localHull.position.x,y:localHull.position.y,z:localHull.position.z,rotation:localHull.quaternion}:undefined);
 
     let projectiles = interp.sampleProjectiles(rt);
@@ -971,6 +1056,8 @@ function frame(): void {
     effects.updateProjectiles(projectiles);
     interp.gc(rt);
 
+    if (world) deathScene.update(world, cam, dt, now * .001, deadSince >= 0 && !spectate && !cleanCapture);
+
     // Terrain streaming around the player (or the spectate point).
     if (spectate && world) {
       if (!Number.isFinite(spectate.y)) spectate.y = world.groundY(spectate.x, spectate.z) + 26;
@@ -985,6 +1072,10 @@ function frame(): void {
       vz: spectate ? (Number.isFinite(lastStreamZ) ? (streamZ - lastStreamZ) / cameraDt : 0) : pred.state.vz,
       flight: spectate ? spectate.flight === true : pred.state.vehicle === VEHICLE.JET || !!pred.state.airlift,
     });
+    if (initialTerrainAt === null && chunks?.currentCoverageReady) {
+      initialTerrainAt = now;
+      sceneryStream?.start();
+    }
     lastStreamX = streamX; lastStreamZ = streamZ;
     scenery.update(streamX, streamZ);
     sceneMgr.setCaveView(chunks?.isBelowSurfaceEnvelope ?? false);
@@ -1066,7 +1157,7 @@ function frame(): void {
     if (!pred.alive) updateOverlay();
 
     const gspeed = Math.hypot(pred.state.vx, pred.state.vz);
-    viewModel.group.visible = pred.alive && !cleanCapture && pred.state.vehicle === VEHICLE.NONE && !pred.state.airlift;
+    viewModel.group.visible = pred.alive && !deathScene.has(myId) && !cleanCapture && pred.state.vehicle === VEHICLE.NONE && !pred.state.airlift;
     viewModel.update(dt, gspeed, pred.state.grounded, input.takeSway());
 
     // Vehicle audio: enter/exit stingers plus the continuous engine bed.
@@ -1129,9 +1220,16 @@ function frame(): void {
       else if (end.hitKind === 0) effects.addImpact(end.x, end.y, end.z);
     }
   }
+  aircraftWarning.update(aircraftThreat, pred?.state.heading ?? 0,
+    !!pred?.alive && pred.state.vehicle === VEHICLE.JET && !cleanCapture && !disconnected && !document.hidden, now * .001);
   effects.update(dt);
-  wildlifeModels.update(dt);
+  wildlifeModels.update(dt, net.estServerTick());
   const cameraPos = sceneMgr.camera.position;
+  const warnedHull = pred?.state.vehicle ? vehicleDefinition(pred.state.vehicle, pred.state.vehicleVariant) : undefined;
+  bossWarning.update(nearbyCreatures, { x: pred?.state.px ?? cameraPos.x,
+    y: (pred?.state.py ?? cameraPos.y) + (warnedHull?.radius ?? 1), z: pred?.state.pz ?? cameraPos.z }, net.estServerTick(),
+    !!pred?.alive && !cleanCapture && !spectate && !disconnected,
+    warnedHull?.radius ?? 0);
   const artilleryMarker=cleanCapture?null:artilleryFeedback.marker(now*.001);
   let artilleryTarget=null;
   if(artilleryMarker) {
@@ -1144,6 +1242,9 @@ function frame(): void {
   }
   hud.setArtillery(!cleanCapture&&pred?.alive&&pred.state.seat===2?artilleryFeedback.reloadSeconds(now*.001):null,
     artilleryFeedback.count,artilleryTarget);
+  // A welcome precedes the first authoritative position. Do not generate
+  // scenery around the camera's old/origin position while that snapshot waits.
+  if (pred?.initialized) {
   liquids?.update(cameraPos,now*.001);
   sceneMgr.liquidKind = liquids?.currentLiquid?.kind ?? null;
   const airMeter = document.getElementById('air-meter')!;
@@ -1156,10 +1257,14 @@ function frame(): void {
   const liftSeconds = !spectate && pred?.initialized ? pred.renderSeconds : net.estServerTick() / TICK_RATE;
   airliftPod.update(world?.collectTransportPlan()??null,pred?.state.airlift,liftSeconds,sceneMgr.camera,cleanCapture||!!spectate||!pred?.alive);
   if (pred) camps?.update(pred.state.px, pred.state.py, pred.state.pz, sceneMgr.camera.rotation.y, myId, pred.alive, !pred.state.vehicle && !pred.state.airlift, now * .001);
-  frontier?.update(cameraPos.x, cameraPos.y, cameraPos.z, sceneMgr.camera.rotation.y, now * .001);
+  frontier?.update(cameraPos.x, cameraPos.y, cameraPos.z, sceneMgr.camera.rotation.y, now * .001,
+    pred?.alive && !cleanCapture && !spectate && !disconnected && !frontier.open && !orbital?.open && !camps?.open && !airlift?.open && !chat?.open
+      ? { x: pred.state.px, y: pred.state.py, z: pred.state.pz, alive: pred.alive, onFoot: !pred.state.vehicle && !pred.state.airlift }
+      : undefined);
   if (pred) orbital?.update(pred.state.px, pred.state.py, pred.state.pz, sceneMgr.camera.rotation.y, pred.alive && !pred.state.vehicle && !pred.state.airlift, now * .001);
   frontierMarkers.update(cameraPos.x, cameraPos.z, now * .001);
-  navigationMap.update(cameraPos.x,cameraPos.z,sceneMgr.camera.rotation.y,now*.001,cleanCapture||!pred?.alive||!!airlift?.open);
+  navigationMap.update(cameraPos.x,cameraPos.z,sceneMgr.camera.rotation.y,now*.001,
+    cleanCapture||!pred?.alive||!!airlift?.open||!!frontier?.open||!!orbital?.open);
   audio.lift(world?nearestMovingLift(world.collectCityLifts(),liftSeconds,cameraPos,sceneMgr.camera.rotation.y,
     !document.hidden&&!disconnected&&!!pred?.alive):null);
   vehicleModels.updateTransport(liftSeconds);
@@ -1203,7 +1308,22 @@ function frame(): void {
   } else hud.setCaveGuide(!cleanCapture && pred?.alive && chunks?.isUnderground ? recallHint : liftHint);
   vegetation?.animate(now / 1000);
   groundCover?.animate(now / 1000);
-  sceneMgr.render(!!pred?.initialized);
+  }
+  // The tactical atlas covers the view. Keep live simulation, input and map
+  // updates at full cadence while drawing its narrow world backdrop at 10 Hz.
+  // Initial presentation and closing the atlas always render immediately.
+  if (!frontier?.open || !sceneMgr.renderStats.worldPresented || now - lastSceneDraw >= 100) {
+    sceneMgr.render(frameHasSnapshot);
+    lastSceneDraw = now;
+  }
+  if (sceneMgr.renderStats.worldPresented !== overlayWorldPresented) updateOverlay();
+  // Local cold generators start in stages: terrain, scenery/encounters, then
+  // map detail. The overview is already usable; continuous travel cannot
+  // postpone its refinement indefinitely by replacing pending scenery jobs.
+  const localMapReady = initialTerrainAt !== null &&
+    (sceneryStream?.initialReady || now - initialTerrainAt >= 10_000);
+  if (mapArtwork && !mapArtwork.started && sceneMgr.renderStats.worldPresented &&
+      (!isLocalWorldHost() || localMapReady)) mapArtwork.start();
 }
 
 requestAnimationFrame(frame);
@@ -1215,6 +1335,7 @@ requestAnimationFrame(frame);
       connected: net.connected,
       scenery: sceneryStream?.stats ?? null,
       initialized: pred?.initialized ?? false,
+      mapArtwork: mapArtwork?.stats ?? null,
       myId,
       predTick,
       simulationTick: pred?.state.simulationTick ?? null,
@@ -1230,6 +1351,11 @@ requestAnimationFrame(frame);
       },
       spectate: spectate ? { ...spectate } : null,
       cleanCapture,
+      deathCamera: deathScene.cameraActive,
+      deathBody: deathScene.position ? { ...deathScene.position } : null,
+      aircraftThreat: aircraftThreat ? { ...aircraftThreat } : null,
+      airlift: pred?.state.airlift ? { ...pred.state.airlift } : null,
+      airliftPod: airliftPod.diagnostics(sceneMgr.camera),
       camps: camps?.state ?? null,
       salvage: frontier?.state?.you.salvage ?? null,
       resources: resourceState,
@@ -1252,6 +1378,7 @@ requestAnimationFrame(frame);
       caveLandmarks: caveLandmarks?.stats ?? null,
       underground: chunks?.isUnderground ?? false,
       vehiclesVisible: vehicleModels.latest.length,
+      vehicleIds: vehicleModels.latest.map(v=>v.id),
       myVehicle: pred?.state.vehicle ?? 0,
       myVehicleVariant: pred?.state.vehicleVariant ?? 0,
       myVehicleSeat: pred?.state.seat ?? 0,
@@ -1268,6 +1395,7 @@ requestAnimationFrame(frame);
       rendering: sceneMgr.renderStats,
       players: names.size,
       creatures: wildlifeModels.count,
+      bossAttacks: wildlifeModels.attackStats,
       pickups: pickupModels.count,
     };
   },

@@ -1,4 +1,6 @@
 import type { Box, RockBounds, VegetationPlacement } from '@shared/index';
+import type { TransportSnapshot } from '@shared/transport';
+import { workerJobRestMs, isLocalWorldHost } from './device-profile.js';
 
 export interface SceneryBounds { minX: number; maxX: number; minZ: number; maxZ: number }
 export interface SceneryData {
@@ -12,8 +14,9 @@ export interface ScenerySource {
   read<K extends SceneryKind>(kind: K, bounds: SceneryBounds): SceneryData[K] | null;
 }
 export type SceneryQuery = { type: 'query'; id: number; kind: SceneryKind; bounds: SceneryBounds };
-export type SceneryRequest = { type: 'init'; seed: number } | SceneryQuery;
-export type SceneryResponse = { type: 'result'; id: number; kind: SceneryKind; data: SceneryData[SceneryKind] };
+export type SceneryRequest = { type: 'init'; seed: number; cooperative?: boolean; transportSnapshot?: TransportSnapshot } | SceneryQuery;
+export type SceneryResponse = { type: 'result'; id: number; kind: SceneryKind; data: SceneryData[SceneryKind];
+  workMs?: number; elapsedMs?: number; maxSliceMs?: number; slices?: number; paced?: boolean };
 export interface SceneryEndpoint {
   onmessage: ((event: MessageEvent<SceneryResponse>) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
@@ -31,17 +34,34 @@ export class SceneryStream implements ScenerySource {
   private readonly ready = new Map<SceneryKind, { key: string; data: SceneryData[SceneryKind] }>();
   private busy: SceneryQuery | null = null;
   private timeout: ReturnType<typeof setTimeout> | undefined;
+  private restTimer: ReturnType<typeof setTimeout> | undefined;
+  private readyAt = 0;
   private sequence = 0;
   private disposed = false;
+  private started = false;
+  private readonly completedKinds = new Set<SceneryKind>();
+  private readonly cooperative = isLocalWorldHost();
   failed = false;
 
-  constructor(seed: number, factory: () => SceneryEndpoint = () => new Worker('scenery.worker.js')) {
+  constructor(private readonly seed: number,
+    private readonly factory: () => SceneryEndpoint = () => new Worker('scenery.worker.js'), deferred = false,
+    private readonly transportSnapshot?: TransportSnapshot) {
+    if (!deferred) this.start();
+  }
+
+  /** Local play starts terrain first; pending pool queries remain coalesced
+   * until that first coverage is installed. Remote clients start immediately. */
+  start(): void {
+    if (this.started || this.disposed || this.failed) return;
+    this.started = true;
     try {
-      const worker = this.worker = factory();
+      const worker = this.worker = this.factory();
       worker.onmessage = ({ data: msg }) => {
         if (this.disposed || this.failed || msg.type !== 'result' ||
             msg.id !== this.busy?.id || msg.kind !== this.busy.kind) return;
         clearTimeout(this.timeout);
+        this.completedKinds.add(msg.kind);
+        this.readyAt = performance.now() + (msg.paced === true ? 0 : workerJobRestMs(msg.workMs));
         const query = this.busy; this.busy = null;
         if (this.wanted.get(msg.kind)?.id === msg.id) {
           this.ready.set(msg.kind, { key: boundsKey(query.bounds), data: msg.data });
@@ -51,11 +71,14 @@ export class SceneryStream implements ScenerySource {
       };
       worker.onerror = () => this.fail();
       worker.onmessageerror = () => this.fail();
-      worker.postMessage({ type: 'init', seed });
+      worker.postMessage({ type: 'init', seed: this.seed, ...(this.cooperative ? { cooperative: true } : {}),
+        ...(this.transportSnapshot ? { transportSnapshot: this.transportSnapshot } : {}) });
+      this.pump();
     } catch { this.fail(); }
   }
 
   get stats() { return { worker: !!this.worker, failed: this.failed, pending: this.wanted.size, ready: this.ready.size }; }
+  get initialReady(): boolean { return this.failed || this.completedKinds.size === 3; }
 
   read<K extends SceneryKind>(kind: K, bounds: SceneryBounds): SceneryData[K] | null {
     if (this.disposed || this.failed || !Object.values(bounds).every(Number.isFinite)) return null;
@@ -78,8 +101,16 @@ export class SceneryStream implements ScenerySource {
     if (!this.worker || this.busy || this.disposed) return;
     const next = this.wanted.values().next().value;
     if (!next) return;
+    const wait = this.readyAt - performance.now();
+    if (wait > 0) {
+      // Reads and completion callbacks share this gate. Select the latest
+      // wanted query only after resting; travel can replace it meanwhile.
+      this.restTimer ??= setTimeout(() => { this.restTimer = undefined; this.pump(); }, wait);
+      return;
+    }
+    clearTimeout(this.restTimer); this.restTimer = undefined;
     this.busy = next;
-    this.timeout = setTimeout(() => this.fail(), 15_000);
+    this.timeout = setTimeout(() => this.fail(), this.cooperative ? 60_000 : 15_000);
     try { this.worker.postMessage(next); } catch { this.fail(); }
   }
 
@@ -89,6 +120,7 @@ export class SceneryStream implements ScenerySource {
   }
   private stop(): void {
     clearTimeout(this.timeout); this.worker?.terminate(); this.worker = null;
+    clearTimeout(this.restTimer); this.restTimer = undefined;
     this.busy = null; this.wanted.clear(); this.ready.clear();
   }
   dispose(): void { this.disposed = true; this.stop(); }

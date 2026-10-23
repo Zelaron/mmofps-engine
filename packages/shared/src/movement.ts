@@ -97,6 +97,11 @@ export function createMoveState(x: number, y: number, z: number): MoveState {
     vx: 0, vy: 0, vz: 0,
     grounded: false, jumpHeld: false, dodgeCd: 0, alive: true,
     vehicle: 0, vehicleVariant: 0, heading: 0, boostFuel: 1, vehiclePitch: 0, vehicleRoll: 0, boosting: false,
+    // Keep one property order as actors walk, swim, board and return. Undefined
+    // retains the existing defaults and omission from serialized state.
+    jumpAscent: undefined, airlift: undefined, simulationTick: undefined,
+    seat: undefined, vehicleId: undefined, transportRoute: undefined,
+    vehicleRotation: undefined, airSeconds: undefined, swimming: undefined, submerged: undefined,
   };
 }
 
@@ -122,7 +127,10 @@ export function copyMoveState(from: MoveState, to: MoveState): void {
   to.airSeconds = from.airSeconds; to.swimming = from.swimming; to.submerged = from.submerged;
 }
 
-export function stepMove(world: World, s: MoveState, cmd: InputCmd, dt: number, simulationTick?: number): StepResult {
+/** Ground crest assistance stays enabled for ordinary simulation and client
+ * prediction. The server may explicitly disable only that arcade impulse for
+ * an admitted distant convoy; gravity and collision still use this controller. */
+export function stepMove(world: World, s: MoveState, cmd: InputCmd, dt: number, simulationTick?: number, allowGroundCrestLaunch = true): StepResult {
   const out: StepResult = { impact: 0, transitImpact: 0, jumped: false, dodged: false };
   const previousTick = s.simulationTick ?? ((simulationTick ?? 1) - 1);
   s.simulationTick = simulationTick ?? previousTick + dt * TICK_RATE;
@@ -166,13 +174,23 @@ export function stepMove(world: World, s: MoveState, cmd: InputCmd, dt: number, 
     const approach = { x: s.px, z: s.pz, grounded: s.grounded, velocityY: s.vy };
     carryTransit(world, s, before, now);
     const lift = carryCityLift(world, s, before, now);
-    out.impact = s.vehicle === VEHICLE.GUNBOAT ? stepBoat(world, s, cmd, dt) : stepVehicle(world, s, cmd, dt).impact;
+    out.impact = s.vehicle === VEHICLE.GUNBOAT ? stepBoat(world, s, cmd, dt) : stepVehicle(world, s, cmd, dt, allowGroundCrestLaunch).impact;
     out.impact = Math.max(out.impact, landOnCityLift(world, s, previousFeet, before, now, lift, false, approach));
     s.jumpHeld = (cmd.buttons & BTN.JUMP) !== 0;
     s.dodgeCd = Math.max(0, s.dodgeCd - dt);
     return out;
   }
 
+  const previousCollisions = world.pedestrianCollisions;
+  world.pedestrianCollisions = world.vehicleCollisions?.select(s, dt, s.simulationTick);
+  try {
+    world.pedestrianCollisions?.carry(s);
+    return stepPedestrian(world, s, cmd, dt, previousTick, out);
+  } finally { world.pedestrianCollisions = previousCollisions; }
+}
+
+function stepPedestrian(world: World, s: MoveState, cmd: InputCmd, dt: number,
+  previousTick: number, out: StepResult): StepResult {
   const fluid = world.liquidAt?.(s.px, s.py + .72, s.pz);
   if (fluid && fluid.surfaceY - fluid.bottomY > .8) {
     s.jumpAscent = false;
@@ -195,7 +213,7 @@ export function stepMove(world: World, s: MoveState, cmd: InputCmd, dt: number, 
     return out;
   }
 
-  const beforeLiftTime = previousTick / TICK_RATE, liftTime = s.simulationTick / TICK_RATE;
+  const beforeLiftTime = previousTick / TICK_RATE, liftTime = s.simulationTick! / TICK_RATE;
   const previousFeet = s.py;
   const previousHorizontalSpeed = Math.hypot(s.vx, s.vz);
   const liftApproach = { x: s.px, z: s.pz, grounded: s.grounded, velocityY: s.vy };

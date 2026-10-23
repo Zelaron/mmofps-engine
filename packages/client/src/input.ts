@@ -158,7 +158,7 @@ export class InputTracker {
         this.usePulse = RELOAD_PULSE_COMMANDS;
         return;
       }
-      if (e.code === 'KeyH' && new URLSearchParams(location.search).get('spectate')) {
+      if (e.code === 'KeyH') {
         // Playtest hyperspeed toggle (~10x run speed on foot).
         this.hyper = !this.hyper;
         this.onHyperToggle?.(this.hyper);

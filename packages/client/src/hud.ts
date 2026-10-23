@@ -373,12 +373,14 @@ export class Hud {
   showAnnounce(text: string): void {
     const line = document.createElement('div');
     line.className = 'announce-line';
+    const bounty = text.startsWith('PLANET BOUNTY:');
+    if (bounty) line.classList.add('announce-bounty');
     line.textContent = text;
     this.announce.appendChild(line);
     while (this.announce.children.length > 4) {
       this.announce.firstElementChild?.remove();
     }
-    window.setTimeout(() => line.remove(), 3300);
+    window.setTimeout(() => line.remove(), bounty ? 8100 : 3300);
   }
 
   /** Whiteout for a nearby nuclear detonation; strength 0..1 by proximity. */

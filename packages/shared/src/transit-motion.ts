@@ -19,19 +19,22 @@ export function placeTrainArtillery(world: World, state: MoveState, routeId: num
 
 interface Body { route: TransportRoute; car: number; pose: TransportPose }
 interface TransitFrame { seconds: number; bodies: Body[]; nearby?: Map<number, Body[]> }
-// Every simulated rider asks for the same previous/current pair. Retaining
-// both avoids rebuilding all route poses twice for every passenger each tick.
+// Actors use ordinary steps and bounded deferred steps with different
+// previous/current pairs. Keep a small exact-time working set so alternating
+// riders do not rebuild all route poses and spatial cells on every query.
 const frames = new WeakMap<World, TransitFrame[]>();
 function frameAt(world: World, seconds: number): TransitFrame {
   let cached = frames.get(world);
-  const found = cached?.find(frame => frame.seconds === seconds);
-  if (found) return found;
+  // Most field probes use the newest frame. Search without a per-query
+  // callback; hits leave insertion order and the eight-frame eviction intact.
+  if (cached) for (let i = cached.length - 1; i >= 0; i--)
+    if (cached[i].seconds === seconds) return cached[i];
   const bodies: Body[] = [];
   for (const route of world.collectTransportPlan().routes) for (let car = 0; car < route.carOffsets.length; car++)
     bodies.push({ route, car, pose: transportPose(route, seconds, route.carOffsets[car]) });
   if (!cached) { cached = []; frames.set(world, cached); }
   const frame = { seconds, bodies };
-  cached.push(frame); if (cached.length > 2) cached.shift();
+  cached.push(frame); if (cached.length > 8) cached.shift();
   return frame;
 }
 const CELL = 128, NEAR_DISTANCE = 32;

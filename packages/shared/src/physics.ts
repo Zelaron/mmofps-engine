@@ -1,5 +1,6 @@
 import { PLAYER } from './constants.js';
 import type { World } from './worldgen.js';
+import { proveCapsuleAirPrism } from './physics-air.js';
 
 // Capsule-vs-implicit-field collision. The world's sign is canonical
 // (positive air, negative solid), but its MAGNITUDE is not a metric distance:
@@ -89,6 +90,22 @@ export function capsuleClearance(world: World, px: number, py: number, pz: numbe
   return minD;
 }
 
+/** Exact predicate for capsuleClearance(...) < -tolerance. Positive field
+ * magnitudes are irrelevant here, so bounded sign queries can reject remote
+ * primitives and the first violating shell sample can finish the proof.
+ * Numeric clearance callers retain the complete original query above. */
+export function capsulePenetrates(world: World, px: number, py: number, pz: number, tolerance = 0): boolean {
+  if (!Number.isFinite(tolerance) || tolerance < 0) throw new RangeError('Capsule penetration tolerance must be finite and nonnegative');
+  const threshold = -tolerance;
+  for (const offset of AXIS_OFFSETS) {
+    const cy = py + offset;
+    for (const direction of PROBE_DIRS) {
+      if (world.sdf(px + direction[0] * R, cy + direction[1] * R, pz + direction[2] * R, true) < threshold) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Find the first real solid crossing along a ray that starts in air.
  * Small positive field values alone are never considered a surface.
@@ -100,30 +117,39 @@ function bracketSurfaceFromAir(
   maxDist: number,
   startD: number,
   knownEndD?: number,
+  closerThan = Infinity,
+  computeNormal = true,
 ): boolean {
   if (!(startD > 0) || maxDist <= 0) return false;
   const ex = x + dx * maxDist;
   const ey = y + dy * maxDist;
   const ez = z + dz * maxDist;
-  const endD = knownEndD ?? world.sdf(ex, ey, ez);
+  const endD = knownEndD ?? world.sdf(ex, ey, ez, true);
   if (endD > 0) return false;
 
   let lo = 0;
   let hi = maxDist;
   for (let i = 0; i < ROOT_ITERS; i++) {
     const mid = (lo + hi) * 0.5;
-    if (world.sdf(x + dx * mid, y + dy * mid, z + dz * mid) > 0) lo = mid;
+    if (world.sdf(x + dx * mid, y + dy * mid, z + dz * mid, true) > 0) lo = mid;
     else hi = mid;
+    // The air endpoint only moves outward. Once it reaches the current
+    // winner, this ray cannot win even after the remaining bisections.
+    if (lo >= closerThan) return false;
   }
 
-  const hx = x + dx * hi;
-  const hy = y + dy * hi;
-  const hz = z + dz * hi;
-  world.gradient(hx, hy, hz, grad);
+  // Shell fallback rays compete only by their unchanged bisected distance.
+  // A losing ray cannot affect the selected normal, so avoid its six field
+  // samples. Winning rays retain the same bisections and strict tie ordering.
+  if (hi >= closerThan) return false;
+
   probe.dist = hi;
-  probe.nx = grad.x;
-  probe.ny = grad.y;
-  probe.nz = grad.z;
+  if(computeNormal){
+    world.gradient(x+dx*hi,y+dy*hi,z+dz*hi,grad);
+    probe.nx = grad.x;
+    probe.ny = grad.y;
+    probe.nz = grad.z;
+  }
   return true;
 }
 
@@ -141,32 +167,35 @@ function sampledSphereContact(
   if (centerD <= 0) return recoverSolidCenter(world, x, y, z, r);
   const reach = r + CONTACT_SKIN;
   let bestDist = Infinity;
-  let bestNx = 0, bestNy = 1, bestNz = 0;
+  let bestX = 0, bestY = 0, bestZ = 0;
   for (const d of PROBE_DIRS) {
     const endD = world.sdf(
       x + d[0] * r,
       y + d[1] * r,
-      z + d[2] * r,
+      z + d[2] * r, true,
     );
     if (endD > 0 || !bracketSurfaceFromAir(
-      world, x, y, z, d[0], d[1], d[2], r, centerD, endD,
+      world, x, y, z, d[0], d[1], d[2], r, centerD, endD, bestDist, false,
     )) continue;
     if (probe.dist < bestDist) {
       bestDist = probe.dist;
-      bestNx = probe.nx;
-      bestNy = probe.ny;
-      bestNz = probe.nz;
+      bestX = x+d[0]*probe.dist;
+      bestY = y+d[1]*probe.dist;
+      bestZ = z+d[2]*probe.dist;
     }
   }
   if (bestDist === Infinity) return false;
 
+  // Sign samples and bisections choose the same winning ray independently
+  // of its normal. Only that final contact needs six gradient field probes.
+  world.gradient(bestX,bestY,bestZ,grad);
   contact.depth = reach - bestDist;
-  contact.nx = bestNx;
-  contact.ny = bestNy;
-  contact.nz = bestNz;
-  contact.mx = bestNx;
-  contact.my = bestNy;
-  contact.mz = bestNz;
+  contact.nx = grad.x;
+  contact.ny = grad.y;
+  contact.nz = grad.z;
+  contact.mx = grad.x;
+  contact.my = grad.y;
+  contact.mz = grad.z;
   return contact.depth > 0.0005;
 }
 
@@ -184,16 +213,16 @@ function recoverSolidCenter(
   let lo = 0;
   let hi = 0.05;
   while (hi < MAX_RECOVERY &&
-         world.sdf(x + dx * hi, y + dy * hi, z + dz * hi) <= 0) {
+         world.sdf(x + dx * hi, y + dy * hi, z + dz * hi, true) <= 0) {
     lo = hi;
     hi *= 2;
   }
   if (hi > MAX_RECOVERY) hi = MAX_RECOVERY;
-  if (world.sdf(x + dx * hi, y + dy * hi, z + dz * hi) <= 0) return false;
+  if (world.sdf(x + dx * hi, y + dy * hi, z + dz * hi, true) <= 0) return false;
 
   for (let i = 0; i < ROOT_ITERS; i++) {
     const mid = (lo + hi) * 0.5;
-    if (world.sdf(x + dx * mid, y + dy * mid, z + dz * mid) <= 0) lo = mid;
+    if (world.sdf(x + dx * mid, y + dy * mid, z + dz * mid, true) <= 0) lo = mid;
     else hi = mid;
   }
   const hx = x + dx * hi;
@@ -229,16 +258,15 @@ function sphereContact(
 
   // Usually the normalized implicit gradient identifies the closest face.
   if (bracketSurfaceFromAir(
-    world, x, y, z, towardX, towardY, towardZ, reach, centerD,
+    world, x, y, z, towardX, towardY, towardZ, reach, centerD, undefined, Infinity, false,
   )) {
     contact.depth = reach - probe.dist;
-    contact.nx = probe.nx;
-    contact.ny = probe.ny;
-    contact.nz = probe.nz;
-    contact.mx = probe.nx;
-    contact.my = probe.ny;
-    contact.mz = probe.nz;
-    if (contact.depth > 0.0005) return true;
+    if (contact.depth > 0.0005) {
+      world.gradient(x+towardX*probe.dist,y+towardY*probe.dist,z+towardZ*probe.dist,grad);
+      contact.nx = grad.x;contact.ny = grad.y;contact.nz = grad.z;
+      contact.mx = grad.x;contact.my = grad.y;contact.mz = grad.z;
+      return true;
+    }
     // A merely grazing surface on the gradient ray must not mask a deeper
     // negative shell sample in another direction.
     return sampledSphereContact(world, x, y, z, centerD, r);
@@ -298,7 +326,8 @@ export function probeGroundBelowPoint(
  * first. Raw magnitudes only prioritize work; sphereContact validates signs.
  */
 function findCapsuleContact(world: World, px: number, py: number, pz: number): boolean {
-  const col = world.column(px, pz);
+  if (proveCapsuleAirPrism(world, px, py, pz)) return false;
+  const col = world.sampleColumn?.(px, pz) ?? world.column(px, pz);
   const region = world.regionAt(px, pz);
   for (let i = 0; i < AXIS_OFFSETS.length; i++) {
     axisYs[i] = py + AXIS_OFFSETS[i];
@@ -362,7 +391,11 @@ export function collideCapsule(world: World, s: KinState, dt: number, allowSnap:
   const wasGrounded = s.grounded;
 
   const speed = Math.sqrt(s.vx * s.vx + s.vy * s.vy + s.vz * s.vz);
-  const steps = Math.min(8, Math.max(1, Math.ceil((speed * dt) / MAX_SUBSTEP_MOVE)));
+  // Thin airfoils are smaller than terrain details. Only a pedestrian near
+  // a hull needs the finer sweep; ordinary movement keeps its existing budget.
+  const steps = world.pedestrianCollisions
+    ? Math.min(32, Math.max(1, Math.ceil((speed * dt) / .16)))
+    : Math.min(8, Math.max(1, Math.ceil((speed * dt) / MAX_SUBSTEP_MOVE)));
   const sdt = dt / steps;
 
   for (let step = 0; step < steps; step++) {

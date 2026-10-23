@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { CAVE_ENTRANCE_THRESHOLD, WORLD, hash3i, unit, rockProfile, type Box, type World } from '@shared/index';
+import { snowCover, ALPINE_ROCK_START } from '@shared/climate';
 
 export const GROUND_COVER_CELL_SIZE = 16;
 export const GROUND_COVER_RADIUS = 64;
@@ -218,14 +219,14 @@ export class GroundCoverRenderer {
     const dx = this.world.column(x + 0.65, z).h - col.h;
     const dz = this.world.column(x, z + 0.65).h - col.h;
     if (dx * dx + dz * dz > 0.30) return placements;
-    const grassy = col.desert < 0.5 && col.temp - Math.max(0, col.h) * 0.005 >= 0.34 &&
-      col.h < 78 && rand(3) < 0.48 + col.moist * 0.45;
+    const grassy = col.desert < 0.5 && snowCover(col) === 0 &&
+      (col.h < ALPINE_ROCK_START || (col.rainforest ?? 0) > .35) && rand(3) < 0.48 + col.moist * 0.45;
     if (grassy) {
       for (let k = 0; k < 3; k++) {
         const px = x + (rand(10 + k * 4) - 0.5) * 2.8;
         const pz = z + (rand(11 + k * 4) - 0.5) * 2.8;
         const support = this.world.column(px, pz);
-        if (support.entr > CAVE_ENTRANCE_THRESHOLD - 0.08 || support.lavaY > -999 ||
+        if (support.entr > CAVE_ENTRANCE_THRESHOLD - 0.08 || support.lavaY > -999 || snowCover(support) > 0 ||
           structures.pads.some((box) => covers(box, px, pz))) continue;
         const size = 0.68 + rand(12 + k * 4) * 0.72;
         this.color.setHex(col.moist > 0.5 ? 0x62754b : 0x8c8b55);

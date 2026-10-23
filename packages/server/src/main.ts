@@ -6,7 +6,7 @@ import { planetById, type PlanetId } from '@shared/universe';
 //   PORT        listen port                     (default 8080)
 //   HOST        bind address                    (default 0.0.0.0)
 //   SEED        world seed                      (default 1337)
-//   BOTS        target arena population         (default 15)
+//   BOTS        maximum adaptive population     (default 192)
 //   MAX_PLAYERS max concurrent connections      (default 64)
 //   CLIENT_DIR  override path to built client
 

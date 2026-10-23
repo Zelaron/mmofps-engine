@@ -1,7 +1,7 @@
 // Central tunables for the whole game. The server is the authority for all of
 // them; the client mirrors them through the shared simulation code.
 
-export const PROTOCOL_VERSION = 25;
+export const PROTOCOL_VERSION = 28;
 
 export const TICK_RATE = 60;
 export const TICK_DT = 1 / TICK_RATE;
@@ -38,7 +38,7 @@ export const PLAYER = {
   REGEN_DELAY: 15,
   /** Passive recovery is deliberately only a fallback to health pickups. */
   REGEN_RATE: 1.2,
-  RESPAWN_SECONDS: 3,
+  RESPAWN_SECONDS: 10,
 } as const;
 
 export const WORLD = {

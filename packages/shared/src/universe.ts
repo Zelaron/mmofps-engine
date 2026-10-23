@@ -16,7 +16,10 @@ export function planetById(id: unknown) { return PLANETS.find(p => p.id === id);
 export function planetBySeed(seed: number) { return PLANETS.find(p => p.seed === seed) ?? PLANETS[0]; }
 export interface UniverseStatus {
   system: string; stars: string[];
-  planets: { id: PlanetId; available: boolean; players: number; capacity: number }[];
+  planets: { id: PlanetId; available: boolean; players: number; capacity: number;
+    /** Shares of control points: unclaimed, Accord, Helix, Vanguard. */
+    ownership?: [number, number, number, number];
+    campaign?: { botPopulation: [number, number, number, number]; threatenedBases: number; inboundSquads: number } }[];
 }
 export interface JourneyState {
   phase: 'charging' | 'departing' | 'arriving' | 'cancelled' | 'committed';

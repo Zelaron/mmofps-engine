@@ -42,6 +42,23 @@ function roundtrip(snap: Snapshot): { decoded: Snapshot; bytes: Uint8Array } {
   return { decoded, bytes };
 }
 
+test('committed boss attacks preserve origins, targets and long-lived world-clock ticks independently of melee flags', () => {
+  const attack = { originX: -50.125, originY: 15.5, originZ: 210.25,
+    x: 865.5, y: 2.125, z: -27.75, radius: 9, fireTick: 2 ** 40 + 90, impactTick: 2 ** 40 + 390 };
+  const creatures: CreatureState[] = [
+    { id: 100, species: 9, x: 0, y: 0, z: 0, yaw: 0, speed: 0, alert: true, health: .5, rangedAttack: attack },
+    { id: 101, species: 11, x: 50, y: 0, z: 50, yaw: 0, speed: 0, alert: true, windingUp: true },
+    { id: 102, species: 13, x: 90, y: 0, z: 90, yaw: 0, speed: 0, alert: false },
+  ];
+  const { decoded, bytes } = roundtrip(snapshot(creatures));
+  assert.deepEqual(decoded.creatures![0].rangedAttack, attack);
+  assert.equal(decoded.creatures![0].windingUp, undefined);
+  assert.equal(decoded.creatures![1].windingUp, true); assert.equal(decoded.creatures![1].rangedAttack, undefined);
+  assert.equal(decoded.creatures![2].id, 102); assert.equal(decoded.creatures![2].rangedAttack, undefined);
+  assert.ok(bytes.length - roundtrip(snapshot(creatures.map(c => ({ ...c, rangedAttack: undefined })))).bytes.length <= 44,
+    'the optional attack record has a fixed bounded wire cost');
+});
+
 test('creature snapshot tail preserves all species, coordinates and independent alert/death flags', () => {
   const creatures = Array.from({ length: 6 }, (_, i) => ({
     id: 61000 + i, species: i % CREATURE_DEFS.length,
@@ -66,7 +83,7 @@ test('creature snapshot tail preserves all species, coordinates and independent 
   assert.deepEqual(decoded.vehicles, source.vehicles);
 });
 
-test('fauna replication caps 18 creatures at 450 bytes even with maximum-width safe-integer IDs', () => {
+test('fauna replication caps 24 creatures at 600 bytes even with maximum-width safe-integer IDs', () => {
   const creatures: CreatureState[] = Array.from({ length: MAX_VISIBLE_CREATURES + 30 }, (_, i) => ({
     id: i + 1, species: i % CREATURE_DEFS.length, x: i, y: -40, z: -i,
     yaw: 0, speed: 1, alert: false,
@@ -79,8 +96,22 @@ test('fauna replication caps 18 creatures at 450 bytes even with maximum-width s
     assert.equal(result.decoded.creatures!.length, MAX_VISIBLE_CREATURES);
     assert.deepEqual(result.decoded.creatures!.map(c => c.id), large.slice(0, MAX_VISIBLE_CREATURES).map(c => c.id));
     assert.equal(result.bytes.length - empty.bytes.length, MAX_VISIBLE_CREATURES * bytesPerCreature);
-    assert.ok(result.bytes.length - empty.bytes.length <= 450);
+    assert.ok(result.bytes.length - empty.bytes.length <= 600);
   }
   assert.equal(creatures.length, MAX_VISIBLE_CREATURES + 30, 'encoding must not mutate server interest state');
   assert.deepEqual(roundtrip(snapshot([])).bytes, empty.bytes);
+});
+
+test('all planet species preserve normalized health and independently telegraphed attacks', () => {
+  const creatures = CREATURE_DEFS.map((def, species) => ({
+    id: species + 1, species, x: species, y: 0, z: 0, yaw: 0, speed: 0,
+    alert: true, dead: false, health: species / CREATURE_DEFS.length, windingUp: !!def.windup,
+  }));
+  const { decoded, bytes } = roundtrip(snapshot(creatures));
+  for (let i = 0; i < creatures.length; i++) {
+    const result = decoded.creatures![i];
+    assert.equal(result.species, i); assert.equal(!!result.windingUp, creatures[i].windingUp);
+    assert.ok(Math.abs(result.health! - creatures[i].health) <= 1 / 255);
+  }
+  assert.equal(bytes.length - roundtrip(snapshot()).bytes.length, creatures.length * 19, 'health costs one bounded byte per creature');
 });

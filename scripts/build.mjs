@@ -41,6 +41,11 @@ export const sceneryWorkerOptions = {
   entryPoints: [path.join(root, 'packages/client/src/render/scenery.worker.ts')],
   outfile: path.join(root, 'packages/client/dist/scenery.worker.js'),
 };
+export const mapWorkerOptions = {
+  ...workerOptions,
+  entryPoints: [path.join(root, 'packages/client/src/map.worker.ts')],
+  outfile: path.join(root, 'packages/client/dist/map.worker.js'),
+};
 
 export const serverOptions = {
   entryPoints: [path.join(root, 'packages/server/src/main.ts')],
@@ -73,6 +78,7 @@ if (isMain) {
     build({ ...workerOptions, minify }),
     build({ ...encounterWorkerOptions, minify }),
     build({ ...sceneryWorkerOptions, minify }),
+    build({ ...mapWorkerOptions, minify }),
     build({ ...serverOptions }),
   ]);
   copyStatic();

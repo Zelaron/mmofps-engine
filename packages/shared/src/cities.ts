@@ -9,6 +9,9 @@ import { cityLifePlan } from './city-life.js';
 import { planetBySeed } from './universe.js';
 
 export const CITY_RADIUS = 384;
+/** Public arcades admit the standard tank's 3.8m collision hull with room
+ * for suspension movement. Street floors stay level with their avenues. */
+export const CITY_ARCADE_CLEARANCE = 4.6;
 export type CityTheme = 'vesper' | 'aurelia';
 export interface CityDistrict { id: number; name: string; x: number; y: number; z: number; radius: number; seed: number; theme?: CityTheme }
 export interface CityLiftSite { id: number; cityId: number; x: number; z: number; bottom: number; top: number; hx: number; hz: number; phase: number; dwell?: number }
@@ -307,10 +310,10 @@ export function buildCityBlock(city: CityDistrict, cellX: number, cellZ: number)
     const core = Math.max(Math.abs(bx + .5), Math.abs(bz + .5)) < 2.6;
     const landmark = bx === 1 && bz === -1 || bx === -2 && bz === 0;
     const lowRoof = kind === 'roof';
-    const height = landmark ? (bx === 1 ? 78 : 61) : lowRoof ? 4.2 : core ? 22 + Math.floor(rng() * 9) * 3.6 : 8 + Math.floor(rng() * 5) * 3.6;
+    const height = landmark ? (bx === 1 ? 78 : 61) : lowRoof ? CITY_ARCADE_CLEARANCE + .6 : core ? 22 + Math.floor(rng() * 9) * 3.6 : 8 + Math.floor(rng() * 5) * 3.6;
     const hx = 15 + rng() * 6, hz = 15 + rng() * 6;
     const facade = 1 + Math.floor(rng() * 3);
-    const lobby = lowRoof ? 3.6 : 4.2;
+    const lobby = CITY_ARCADE_CLEARANCE;
     // Four substantial piers support open arcades at street level. Keeping
     // these broad openings also makes the larger city cheaper to collide.
     const piers = (px: number, pz: number, halfX: number, halfZ: number, top: number): void => {
@@ -319,8 +322,8 @@ export function buildCityBlock(city: CityDistrict, cellX: number, cellZ: number)
     if (kind === 'market') {
       // Two covered market aisles with a street-to-street central passage.
       for (const side of [-1, 1]) {
-        piers(x + side * 11, z, 7, 18, 3.8);
-        add(x + side * 11, 3.95, z, 8, .3, 19, 8);
+        piers(x + side * 11, z, 7, 18, lobby);
+        add(x + side * 11, lobby + .3, z, 8, .3, 19, 8);
         add(x + side * 11, .6, z + 12, 4.7, .6, 1);
       }
       continue;
@@ -341,22 +344,24 @@ export function buildCityBlock(city: CityDistrict, cellX: number, cellZ: number)
     if (kind === 'civic') {
       // A low civic hall, colonnade and offset clock/bell tower punctuate
       // neighborhoods without another full-footprint high-rise.
-      piers(x, z, 21, 17, 4.2);
-      add(x, 4.5, z, 22, .3, 18);
-      add(x, 6.2, z - 4, 16, 1.4, 10, 1);
-      add(x, 7.9, z - 4, 17, .3, 11);
-      add(x - 15, 13, z - 10, 4, 5, 4, 1);
-      add(x - 15, 18.6, z - 10, 4.8, .6, 4.8, 7);
+      piers(x, z, 21, 17, lobby);
+      add(x, lobby + .3, z, 22, .3, 18);
+      add(x, lobby + 2, z - 4, 16, 1.4, 10, 1);
+      add(x, lobby + 3.7, z - 4, 17, .3, 11);
+      add(x - 15, lobby + 8.8, z - 10, 4, 5, 4, 1);
+      add(x - 15, lobby + 14.4, z - 10, 4.8, .6, 4.8, 7);
       continue;
     }
     piers(x, z, hx, hz, lobby);
     if (lowRoof) {
-      add(x, 3.9, z, hx + .5, .3, hz + .5);
+      add(x, lobby + .3, z, hx + .5, .3, hz + .5);
       // The stair rises outside the building and joins its actual roof.
-      for (let i = 0; i < 12; i++) add(x + hx + 3.2, (i + 1) * .175, z + hz - 1 - i * .75, 1.3, (i + 1) * .175, .40);
-      add(x + hx + 1.5, 4.0, z + hz - 9.25, 2.1, .2, 1.4);
-      add(x - hx, 4.55, z, .2, .35, hz);
-      add(x, 4.55, z - hz, hx, .35, .2);
+      const steps = 15, rise = height / steps;
+      for (let i = 0; i < steps; i++) add(x + hx + 3.2, (i + 1) * rise * .5,
+        z + hz - 1 - i * .6, 1.3, (i + 1) * rise * .5, .325);
+      add(x + hx + 1.5, height - .2, z + hz - 10.1, 2.1, .2, 1.4);
+      add(x - hx, height + .35, z, .2, .35, hz);
+      add(x, height + .35, z - hz, hx, .35, .2);
     } else if (kind === 'terrace') {
       const story = 8 + Math.floor(rng() * 3) * 3.3;
       add(x, (story + lobby) * .5, z, hx, (story - lobby) * .5, hz, 2);
@@ -379,7 +384,7 @@ export function buildCityBlock(city: CityDistrict, cellX: number, cellZ: number)
     }
     // An awning and short bollards distinguish shopfronts without windows
     // made from transparent polygons or additional dynamic lights.
-    add(x, 3.05, z + hz + 1.1, 5, .18, 1.5);
+    add(x, lobby + .19, z + hz + 1.1, 5, .19, 1.5);
     for (const side of [-1, 1]) add(x + side * 5, .65, z + hz + 3, .22, .65, .22);
   }
   solids.push(...cityLifePlan(city).solids.filter(box => box.x + box.hx > x0 && box.x - box.hx < x1 &&

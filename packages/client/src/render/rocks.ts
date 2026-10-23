@@ -1,6 +1,7 @@
 ﻿import * as THREE from 'three';
 import { ROCK_GRANITE_PLANES, type RockBounds, type World } from '@shared/index';
 import type { ScenerySource } from './scenery-stream.js';
+import { sceneryPlacementReady, type SceneryTerrain } from './scenery-readiness.js';
 import { createSurfaceNoise } from './surface-material.js';
 import { boulderGeometry } from './rock-geometry.js';
 import { applyCitySceneryTint } from './city-environment.js';
@@ -91,7 +92,8 @@ function rockMaterial(): THREE.MeshStandardMaterial {
 }
 
 /** Eight shared meshes, no animation or per-frame terrain sampling. The near
- * budget only selects detail: every remaining collidable rock uses a far mesh. */
+ * budget only selects detail. An optional installed-terrain gate delays far
+ * rocks while preserving every protected nearby collision silhouette. */
 export class RockRenderer {
   readonly group = new THREE.Group();
   private readonly material = rockMaterial();
@@ -100,9 +102,18 @@ export class RockRenderer {
   private readonly tint = new THREE.Color();
   private cellX: number | null = null;
   private cellZ: number | null = null;
+  private visibleCellX: number | null = null;
+  private visibleCellZ: number | null = null;
+  private terrainRevision = -1;
+  private visibleFutureCells = '';
+  private supportRevision = -1;
+  private candidates: { rock: RockBounds; desert: boolean; distance: number }[] = [];
+  private visible: { rock: RockBounds; desert: boolean; distance: number }[] = [];
   private disposed = false;
 
-  constructor(private readonly world: RockWorld, private readonly scenery?: ScenerySource) {
+  constructor(private readonly world: RockWorld, private readonly scenery?: ScenerySource,
+    private readonly terrain?: SceneryTerrain,
+    private readonly groundSupport?: (cellX: number, cellZ: number, footprints: readonly RockBounds[], futureFootprints?: readonly RockBounds[]) => void) {
     this.group.name = 'boulders';
     for (let lod = 0; lod < 2; lod++) {
       for (let family = 0; family < 4; family++) {
@@ -129,19 +140,57 @@ export class RockRenderer {
     if (this.disposed || !Number.isFinite(cameraX) || !Number.isFinite(cameraZ)) return false;
     const cx = Math.floor(cameraX / ROCK_RENDER_CELL_SIZE);
     const cz = Math.floor(cameraZ / ROCK_RENDER_CELL_SIZE);
-    if (cx === this.cellX && cz === this.cellZ) return false;
+    const sameCell = cx === this.cellX && cz === this.cellZ;
+    const revision = this.terrain?.sceneryCoverageRevision ?? 0;
+    const next = this.terrain?.scenerySupportFutureCells?.() ?? [];
+    const futureCells = next.map(cell => cell.cellX + ',' + cell.cellZ).join(';');
+    const supportRevision = this.terrain?.scenerySupportRevision ?? 0;
+    const sameVisibility = cx === this.visibleCellX && cz === this.visibleCellZ && revision === this.terrainRevision &&
+      futureCells === this.visibleFutureCells && supportRevision === this.supportRevision;
+    if (sameCell && sameVisibility) return false;
     const x = (cx + 0.5) * ROCK_RENDER_CELL_SIZE, z = (cz + 0.5) * ROCK_RENDER_CELL_SIZE;
-    const bounds = { minX: x - ROCK_RENDER_RADIUS, maxX: x + ROCK_RENDER_RADIUS,
-      minZ: z - ROCK_RENDER_RADIUS, maxZ: z + ROCK_RENDER_RADIUS };
-    const source = this.scenery && !this.scenery.failed ? this.scenery.read('rocks', bounds) :
-      this.world.collectBoulders(bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ)
-        .map(rock => ({ rock, desert: this.world.column(rock.x, rock.z).desert > .5 }));
-    if (!source) return false;
-    this.cellX = cx; this.cellZ = cz;
-    const rocks = source
-      .map(({ rock, desert }) => ({ rock, desert, distance: (rock.x - x) ** 2 + (rock.z - z) ** 2 }))
-      .filter(({ distance }) => distance <= ROCK_RENDER_RADIUS ** 2)
-      .sort((a, b) => a.distance - b.distance);
+    let refreshed = false;
+    if (!sameCell) {
+      const bounds = { minX: x - ROCK_RENDER_RADIUS, maxX: x + ROCK_RENDER_RADIUS,
+        minZ: z - ROCK_RENDER_RADIUS, maxZ: z + ROCK_RENDER_RADIUS };
+      const source = this.scenery && !this.scenery.failed ? this.scenery.read('rocks', bounds) :
+        this.world.collectBoulders(bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ)
+          .map(rock => ({ rock, desert: this.world.column(rock.x, rock.z).desert > .5 }));
+      if (source) {
+        this.cellX = cx; this.cellZ = cz;
+        this.candidates = source
+          .map(({ rock, desert }) => ({ rock, desert, distance: (rock.x - x) ** 2 + (rock.z - z) ** 2 }))
+          .filter(({ distance }) => distance <= ROCK_RENDER_RADIUS ** 2)
+          .sort((a, b) => a.distance - b.distance);
+        refreshed = true;
+      }
+    }
+    // While the next worker footprint is pending, the overlapping cached
+    // placements must still become visible as the camera approaches them.
+    if (!refreshed && sameVisibility) return false;
+    const rocks = this.candidates.filter(({ rock }) => sceneryPlacementReady(this.terrain,
+      rock.x, rock.z, rock.hx, rock.hz, cx, cz, ROCK_RENDER_CELL_SIZE));
+    if (this.groundSupport) {
+      const protectedBy = (rock: RockBounds, x: number, z: number) => {
+        const dx = Math.max(x * ROCK_RENDER_CELL_SIZE - rock.x - rock.hx,
+          rock.x - rock.hx - (x + 1) * ROCK_RENDER_CELL_SIZE, 0);
+        const dz = Math.max(z * ROCK_RENDER_CELL_SIZE - rock.z - rock.hz,
+          rock.z - rock.hz - (z + 1) * ROCK_RENDER_CELL_SIZE, 0);
+        return dx * dx + dz * dz <= 128 ** 2;
+      };
+      const missing = (rock: RockBounds) => !this.terrain?.sceneryGroundReady(rock.x, rock.z, rock.hx, rock.hz);
+      const support = rocks.filter(({ rock }) => protectedBy(rock, cx, cz) && missing(rock)).map(entry => entry.rock);
+      // Existing cached placements only. Future hints do not make a rock
+      // visible and never request a new scenery footprint or world column.
+      const future = next.length ? this.candidates.filter(({ rock }) =>
+        !protectedBy(rock, cx, cz) && next.some(cell => protectedBy(rock, cell.cellX, cell.cellZ)) && missing(rock)).map(entry => entry.rock) : [];
+      this.groundSupport(cx, cz, support, future);
+    }
+    this.visibleFutureCells = futureCells; this.supportRevision = supportRevision;
+    this.terrainRevision = revision;
+    this.visibleCellX = cx; this.visibleCellZ = cz;
+    if (!refreshed && rocks.length === this.visible.length && rocks.every((rock, i) => rock === this.visible[i])) return false;
+    this.visible = rocks;
     for (const pool of this.pools) pool.count = 0;
     let nearCount = 0;
     for (const { rock, desert, distance } of rocks) {
@@ -170,6 +219,7 @@ export class RockRenderer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.groundSupport?.(this.visibleCellX ?? 0, this.visibleCellZ ?? 0, []);
     for (const pool of this.pools) {
       pool.count = 0;
       this.group.remove(pool);
@@ -177,6 +227,7 @@ export class RockRenderer {
       pool.geometry.dispose();
     }
     this.material.dispose();
+    this.candidates.length = 0; this.visible.length = 0;
   }
 
   private colorFor(rock: RockBounds, family: number, desert: boolean): void {

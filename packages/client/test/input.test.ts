@@ -61,6 +61,26 @@ function withInput(check: (input: InputTracker, doc: FakeDocument, win: FakeTarg
   }
 }
 
+test('H toggles playtest hyperspeed in normal play and ignores repeats, chat and paused input', () => {
+  withInput((input, doc, _win, canvas) => {
+    const toggles: boolean[] = []; input.onHyperToggle = value => toggles.push(value);
+    canvas.emit('click');
+    doc.emit('keydown', key('KeyH'));
+    assert.equal(input.hyper, true); assert.ok(input.sample(1, 0, 0).buttons & BTN.HYPER);
+    const game = new Game(1337, { frontier: true }), player = game.addPlayer('Playtester', null);
+    game.queueInput(player, input.sample(1, 0, 0)); game.step();
+    assert.ok(player.lastCmd!.buttons & BTN.HYPER, 'the live frontier accepts human playtest input');
+    doc.emit('keydown', { ...key('KeyH'), repeat: true });
+    doc.emit('keydown', { ...key('KeyH'), target: { matches: () => true } });
+    assert.deepEqual(toggles, [true]);
+    input.setSuspended(true); doc.emit('keydown', key('KeyH'));
+    assert.equal(input.sample(2, 0, 0).buttons, 0); assert.equal(input.hyper, true);
+    input.setSuspended(false); canvas.emit('click'); doc.emit('keydown', key('KeyH'));
+    assert.equal(input.hyper, false); assert.equal(input.sample(3, 0, 0).buttons & BTN.HYPER, 0);
+    assert.deepEqual(toggles, [true, false]);
+  });
+});
+
 test('sub-tick touch and mouse fire taps survive exactly one input sample', () => {
   withInput((input, doc, _win, canvas) => {
     input.setTouchMode(true);

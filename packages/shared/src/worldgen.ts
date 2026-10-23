@@ -1,11 +1,12 @@
 import { OutpostField } from './outposts.js';
+import { initializeAirProofWorld, registerCanonicalWorldPrototype } from './physics-air.js';
 import { Noise } from './noise.js';
 import { hash2i, hash3i, unit } from './rng.js';
 import { smoothstep, lerp, clamp, TAU } from './math.js';
 import { sdBox, sdCylinderY, smin } from './sdf.js';
 import { solidBoxDistance } from './box-field.js';
 import { PLAYER, WORLD } from './constants.js';
-import { CAVE_CELL, caveBiomeColor, caveFloorAt, caveColumn, type CaveSite, type CaveColumn } from './caves.js';
+import { CAVE_CELL, caveBiomeColor, caveFloorAt, cavePathPoint, caveColumn, type CaveSite, type CaveColumn } from './caves.js';
 import { STRUCTURE_KIND, buildStructureFamily, generateUndergroundStructure,
   type StructureKind, type StructureSite, type UndergroundStructure } from './structures.js';
 export { STRUCTURE_KIND, type StructureKind, type StructureSite } from './structures.js';
@@ -15,9 +16,12 @@ import { buildCityBlock, cityLiftSites, capitalPlan, type CityDistrict, type Cit
 import { capitalBoundary, capitalSegments, capitalDistance, CAPITAL_SKY_HEIGHT, type CapitalSegment } from './capital-geometry.js';
 import { rainforestAt } from './rainforest.js';
 import { gradeLiquidTerrain, liquidAtSurfaceColumn, islandCoastDistance, ISLAND_SHORE_START, canReachCoast, type LiquidSample } from './liquids.js';
-import { buildTransportPlan, transportGroundAt, type TransportPlan } from './transport.js';
+import { surfaceTemperature, snowCover, ALPINE_ROCK_START, ALPINE_ROCK_END } from './climate.js';
+import { buildTransportPlan, restoreTransportPlan, transportGroundAt, TRANSPORT_SNAPSHOT_VERSION, type TransportPlan, type TransportSnapshot } from './transport.js';
+export { TRANSPORT_SNAPSHOT_VERSION, type TransportSnapshot } from './transport.js';
 import { TransportBridgeIndex } from './transport-geometry.js';
 import { transitDistance } from './transit-motion.js';
+import type { VehicleCollisionField, VehicleCollisionSelection } from './vehicle-collision.js';
 import { createJungleTempleSites, buildJungleTemplePlan, jungleTempleColumn, jungleTempleField, jungleTempleGrade,
   type JungleTempleSite, type TempleColumn } from './jungle-temples.js';
 export { CITY_RADIUS, type CityDistrict } from './cities.js';
@@ -155,6 +159,9 @@ const VEGETATION_MARGIN = 4;
 const STRUCT_CACHE_LIMIT = 16_384;
 const PROP_CACHE_LIMIT = 65_536;
 const REGION_CACHE_LIMIT = 16_384;
+// A full campaign has 192 actors. Retain their repeated contact stencils
+// across deferred movement ticks without rounding world coordinates.
+const COLUMN_CACHE_BUCKETS = 16384;
 const PAD_SMOOTH = 0.6;
 /** Roof thickness outside the explicit open arch; shared with the mesher. */
 export const CAVE_MIN_ROOF = 4.8;
@@ -215,6 +222,31 @@ function setBounded<K, V>(
   cache.set(key, value);
 }
 
+interface TransportProviderMethods { prototype: object; names: string[]; methods: unknown[] }
+const captureTransportMethods = (prototype: object): TransportProviderMethods => {
+  const names = Object.getOwnPropertyNames(prototype).filter(name => name !== 'constructor' &&
+    typeof Object.getOwnPropertyDescriptor(prototype, name)?.value === 'function');
+  return { prototype, names, methods: names.map(name => (prototype as Record<string, unknown>)[name]) };
+};
+const transportMethodsMatch = (value: object, shape: TransportProviderMethods): boolean =>
+  Object.getPrototypeOf(value) === shape.prototype && shape.names.every((name, i) =>
+    (value as Record<string, unknown>)[name] === shape.methods[i]);
+interface TransportProviders {
+  seed: number; landscape: Landscape; noise: Noise; landscapeSeed: number; noiseSeed: unknown;
+  naturalHeight: unknown; base: unknown;
+}
+
+
+// A single allocation site, with the original nine fields followed by optional
+// slots in their existing public-column insertion order. Undefined preserves
+// field decisions; own-property presence deliberately differs from absence.
+export function createColumnData(h:number,temp:number,moist:number,desert:number,
+  entr:number,entrRaw:number,volc:number,lavaY:number,lavaBasin:ColumnData['lavaBasin']):ColumnData {
+  return { h,temp,moist,desert,entr,entrRaw,volc,lavaY,lavaBasin,
+    rainforest:undefined,city:undefined,road:undefined,templeSite:undefined,temple:undefined,
+    transport:undefined,deepRock:undefined,cave:undefined,caveBranches:undefined };
+}
+
 export class World {
   readonly noise: Noise;
   private readonly landscape: Landscape;
@@ -226,36 +258,55 @@ export class World {
   private structureRegionCache = new Map<string, StructureRegion>();
   private cityLifts: readonly CityLiftSite[] | null = null;
   private transportPlan?: TransportPlan;
+  private pendingTransportSnapshot?: TransportSnapshot;
+  private nativeTransportPlan = false;
+  private readonly transportProviders: TransportProviders;
   private transportCells = new Map<string, Box[]>();
   private transportBridgeIndex?: TransportBridgeIndex;
   /** Activated only by simulation; render workers keep the static field. */
   readonly outposts = new OutpostField();
   motionTime?: number;
+  /** Replicated hull poses; activated only for an individual pedestrian step. */
+  vehicleCollisions?: VehicleCollisionField;
+  pedestrianCollisions?: VehicleCollisionSelection;
   private flatCityColumns: readonly ColumnData[] | null = null;
-  // Repeated vertical/contact probes share immutable terrain columns. Keep
-  // exact coordinates (no quantization) and evict one oldest entry at a time.
+  // Exact coordinates, two candidates per hash bucket. Fixed-size typed keys
+  // avoid rounded positions or allocations in the contact-query cache.
   // Public column() still returns fresh data; moving solids are never cached.
-  private readonly sdfColumnRows = new Map<number, Map<number, ColumnData>>();
-  private readonly sdfColumnXs = new Float64Array(512);
-  private readonly sdfColumnZs = new Float64Array(512);
-  private sdfColumnCount = 0;
-  private sdfColumnCursor = 0;
+  private readonly sdfColumns: (ColumnData | undefined)[] = new Array(COLUMN_CACHE_BUCKETS * 2);
+  private readonly sdfColumnXs = new Float64Array(COLUMN_CACHE_BUCKETS * 2);
+  private readonly sdfColumnZs = new Float64Array(COLUMN_CACHE_BUCKETS * 2);
+  private readonly sdfColumnVictims = new Uint8Array(COLUMN_CACHE_BUCKETS);
+  private readonly sdfColumnKey = new Float64Array(2);
+  private readonly sdfColumnKeyBits = new Uint32Array(this.sdfColumnKey.buffer);
   private caveCache = new Map<string, CaveSite | null>();
+  private lastCaveX = NaN; private lastCaveZ = NaN;
+  private lastCave: CaveSite | null = null;
   private jungleTemples: readonly JungleTempleSite[] | null = null;
 
-  // 1-entry memo for regionAt(): collision queries cluster spatially, so the
-  // previous region is almost always reusable.
+  // Collision probes mostly reuse one region, or alternate across one nearby
+  // cell margin. Keep a second exact rectangle behind the primary fast path.
   private lastRegion: Region | null = null;
+  private secondaryRegion: Region | null = null;
+  private srMinX = Infinity; private srMaxX = -Infinity;
+  private srMinZ = Infinity; private srMaxZ = -Infinity;
   private lrSi0 = 1e9; private lrSi1 = 1e9;
   private lrSj0 = 1e9; private lrSj1 = 1e9;
   private lrBi0 = 1e9; private lrBi1 = 1e9;
   private lrBj0 = 1e9; private lrBj1 = 1e9;
   private lrVi0 = 1e9; private lrVi1 = 1e9;
   private lrVj0 = 1e9; private lrVj1 = 1e9;
+  private lrMinX = Infinity; private lrMaxX = -Infinity;
+  private lrMinZ = Infinity; private lrMaxZ = -Infinity;
 
-  constructor(readonly seed: number) {
+  constructor(readonly seed: number, snapshot?: TransportSnapshot) {
     this.noise = new Noise(seed | 0);
     this.landscape = new Landscape(seed, (x, z) => this.naturalColumn(x, z).h, (x, z) => this.rawColumn(x, z));
+    initializeAirProofWorld(this, this.landscape, this.noise);
+    const landscape = this.landscape as unknown as Record<string, unknown>;
+    this.transportProviders = { seed, landscape: this.landscape, noise: this.noise, landscapeSeed: this.landscape.seed,
+      noiseSeed: (this.noise as unknown as Record<string, unknown>).seed, naturalHeight: landscape.naturalHeight, base: landscape.base };
+    this.pendingTransportSnapshot = snapshot;
   }
 
   // ---- Column (2D) data --------------------------------------------------
@@ -395,8 +446,8 @@ export class World {
     }
     if (h < -26) h = -26 + (h + 26) * 0.25;
 
-    return { h, temp, moist, desert, entr: 0, entrRaw: 0, volc, lavaY,
-      lavaBasin: volcChannel > 0.02 ? { level: 12 + cont * 52 + volc * 20, channel: volcChannel } : undefined };
+    return createColumnData(h,temp,moist,desert,0,0,volc,lavaY,
+      volcChannel > 0.02 ? { level: 12 + cont * 52 + volc * 20, channel: volcChannel } : undefined);
   }
 
   collectJungleTemples(): readonly JungleTempleSite[] {
@@ -425,15 +476,19 @@ export class World {
 
   private baseColumn(x: number, z: number): ColumnData {
     const col = this.naturalColumn(x, z);
-    col.rainforest = rainforestAt(this.seed, x, z) * (1 - smoothstep(.08, .3, col.volc));
+    const forest = rainforestAt(this.seed, x, z);
+    // Outside a forest the weight is already exactly zero. Avoid the
+    // volcanic-mask expression on this common terrain-query path.
+    col.rainforest = forest === 0 ? 0 : forest * (1 - smoothstep(.08, .3, col.volc));
     if (col.rainforest > 0) {
       col.temp = lerp(col.temp, .84, col.rainforest);
       col.moist = lerp(col.moist, .97, col.rainforest);
       col.desert *= 1 - col.rainforest;
     }
     const city = this.landscape.cityAt(x, z, 192);
+    const cityBoundary = city ? capitalBoundary(city, x, z) : Infinity;
     if (city) {
-      if (capitalBoundary(city, x, z) <= 0) { col.city = city; col.volc = 0; col.lavaY = -1000; col.lavaBasin = undefined; }
+      if (cityBoundary <= 0) { col.city = city; col.volc = 0; col.lavaY = -1000; col.lavaBasin = undefined; }
     }
     const road = this.landscape.roadAt(x, z, col.h);
     if (road) {
@@ -470,7 +525,7 @@ export class World {
       // District grading owns its full floor, including where an old hill
       // trail crosses the enlarged boundary. Blend after roads so their
       // weighted shoulders cannot lift terrain through the exact pavement.
-      const boundary = capitalBoundary(city, x, z);
+      const boundary = cityBoundary;
       let target = city.y;
       if (city.theme === 'vesper') {
         // An open geological abyss, not a subtractive cave with a hidden roof.
@@ -501,7 +556,7 @@ export class World {
   /** Surface liquid volumes stop at their actual bed. Caves below a lake are
    * dry unless they have an explicit, separately levelled cistern volume. */
   liquidAt(x: number, y: number, z: number): LiquidSample | undefined {
-    const col = this.column(x, z);
+    const col = this.sampleColumn(x, z);
     const surface = liquidAtSurfaceColumn(this.seed, x, y, z, col.h, col.lavaY);
     if (surface) return surface;
     if (col.templeSite) {
@@ -516,6 +571,24 @@ export class World {
   collectRoadSegments(minX: number, maxX: number, minZ: number, maxZ: number): RoadSegment[] {
     return this.landscape.collectRoads(minX, maxX, minZ, maxZ);
   }
+  *collectRoadSegmentSteps(minX: number, maxX: number, minZ: number, maxZ: number): Generator<void, RoadSegment[], void> {
+    if (this.collectRoadSegments !== canonicalMapWorldCollector)
+      return this.collectRoadSegments(minX, maxX, minZ, maxZ);
+    return yield* this.landscape.collectRoadSteps(minX, maxX, minZ, maxZ);
+  }
+  /** Map-only collection; ordinary terrain still includes summit trails. */
+  collectMajorRoadSegments(minX: number, maxX: number, minZ: number, maxZ: number): RoadSegment[] {
+    if (this.collectRoadSegments !== canonicalMapWorldCollector)
+      return this.collectRoadSegments(minX, maxX, minZ, maxZ).filter(road => !road.trail);
+    return this.landscape.collectMajorRoads(minX, maxX, minZ, maxZ);
+  }
+  *collectMajorRoadSegmentSteps(minX: number, maxX: number, minZ: number, maxZ: number): Generator<void, RoadSegment[], void> {
+    if (typeof this.collectMajorRoadSegments !== 'function')
+      return this.collectRoadSegments(minX, maxX, minZ, maxZ).filter(road => !road.trail);
+    if (this.collectMajorRoadSegments !== canonicalMapWorldMajorCollector || this.collectRoadSegments !== canonicalMapWorldCollector)
+      return this.collectMajorRoadSegments(minX, maxX, minZ, maxZ);
+    return yield* this.landscape.collectMajorRoadSteps(minX, maxX, minZ, maxZ);
+  }
   collectMountains(minX: number, maxX: number, minZ: number, maxZ: number): MountainSite[] {
     return this.landscape.collectMountains(minX, maxX, minZ, maxZ);
   }
@@ -525,22 +598,64 @@ export class World {
     return this.cityLifts ??= [...this.collectCities().flatMap(city => cityLiftSites(city)), ...this.collectTransportPlan().lifts];
   }
 
+  /** Whether static terrain providers still match their captured native
+   * methods, seeds and dependencies. This does not certify a clear volume:
+   * callers must separately check live camps, hulls and moving transport. */
+  hasNativeTerrainProviders(): boolean {
+    return canonicalTransportProviderGuard.call(this);
+  }
+
+  private nativeTransportProviders(): boolean {
+    const saved = this.transportProviders, landscape = this.landscape as unknown as Record<string, unknown>;
+    return Object.is(saved.seed, this.seed) && saved.landscape === this.landscape && saved.noise === this.noise &&
+      Object.is(saved.landscapeSeed, this.landscape.seed) && Object.is(saved.noiseSeed, (this.noise as unknown as Record<string, unknown>).seed) &&
+      saved.naturalHeight === landscape.naturalHeight && saved.base === landscape.base &&
+      transportMethodsMatch(this, canonicalTransportWorld) && transportMethodsMatch(this.landscape, canonicalTransportLandscape) &&
+      transportMethodsMatch(this.noise, canonicalTransportNoise);
+  }
+
+  /** Isolated native plan for same-build worker initialization. The receiving
+   * World validates compatibility/providers and privately clones it lazily.
+   * A cached plan built with injected providers is never certified by later
+   * restoring their methods. Call after normal main-world plan generation. */
+  transportSnapshot(): TransportSnapshot | undefined {
+    if (!Number.isFinite(this.seed) || !canonicalTransportProviderGuard.call(this)) return undefined;
+    const plan = this.collectTransportPlan();
+    return this.nativeTransportPlan ? structuredClone({ version: TRANSPORT_SNAPSHOT_VERSION, seed: this.seed, plan }) : undefined;
+  }
+
   collectTransportPlan(): TransportPlan {
     if (this.transportPlan) return this.transportPlan;
-    const plan = buildTransportPlan({ seed: this.seed, cities: this.collectCities(), temples: this.collectJungleTemples(),
+    const snapshot = this.pendingTransportSnapshot;
+    this.pendingTransportSnapshot = undefined;
+    const canonical = canonicalTransportProviderGuard.call(this);
+    const restored = snapshot && canonical && Number.isFinite(this.seed) && Object.is(snapshot.seed, this.seed) &&
+      snapshot.version === TRANSPORT_SNAPSHOT_VERSION ? restoreTransportPlan(snapshot.plan) : undefined;
+    const plan = restored ?? buildTransportPlan({ seed: this.seed, cities: this.collectCities(), temples: this.collectJungleTemples(),
       sampleHeight: (x, z) => this.baseColumn(x, z).h });
-    this.transportPlan = plan;
-    this.transportBridgeIndex = new TransportBridgeIndex(plan.bridges);
+    const bridgeIndex = new TransportBridgeIndex(plan.bridges), cells = new Map<string, Box[]>();
     for (const box of plan.solids) for (let x = Math.floor((box.x - box.hx) / 256); x <= Math.floor((box.x + box.hx) / 256); x++)
       for (let z = Math.floor((box.z - box.hz) / 256); z <= Math.floor((box.z + box.hz) / 256); z++) {
-        const key = `${x},${z}`, cell = this.transportCells.get(key);
-        if (cell) cell.push(box); else this.transportCells.set(key, [box]);
+        const key = `${x},${z}`, cell = cells.get(key);
+        if (cell) cell.push(box); else cells.set(key, [box]);
       }
+    // Publish only after the complete clone and every private index exists.
+    this.transportPlan = plan; this.nativeTransportPlan = canonical;
+    this.transportBridgeIndex = bridgeIndex; this.transportCells = cells;
     return plan;
   }
 
   /** Deterministic uphill cave, wholly contained in its grid cell. */
   private caveFor(ix: number, iz: number): CaveSite | null {
+    if (ix === this.lastCaveX && iz === this.lastCaveZ) return this.lastCave;
+    // Commit after resolution: even an injected generator that makes a nested
+    // cave query cannot leave the outer tuple paired with the nested result.
+    const result = this.resolveCaveCell(ix, iz);
+    this.lastCaveX = ix; this.lastCaveZ = iz; this.lastCave = result;
+    return result;
+  }
+
+  private resolveCaveCell(ix: number, iz: number): CaveSite | null {
     const key = cellKey(ix, iz);
     if (this.caveCache.has(key)) return this.caveCache.get(key)!;
     const seed = hash2i(this.seed ^ 0x6c8e9cf5, ix, iz);
@@ -647,6 +762,31 @@ export class World {
     return sites;
   }
 
+  /** Internal read-only sampling shares the exact column used by contact probes.
+   * The public generator keeps returning fresh data for mesh/material callers. */
+  private cachedColumn(x: number, z: number): ColumnData {
+    const keys = this.sdfColumnKey, bits = this.sdfColumnKeyBits;
+    // Canonicalize signed zero just as Map's numeric keys do. Hashing the
+    // actual floating-point representation never rounds nearby coordinates.
+    keys[0] = x === 0 ? 0 : x; keys[1] = z === 0 ? 0 : z;
+    let hash = Math.imul(bits[0] ^ bits[1], 0x9e3779b1) ^ Math.imul(bits[2] ^ bits[3], 0x85ebca77);
+    hash = Math.imul(hash ^ (hash >>> 16), 0x7feb352d);
+    const bucket = (hash ^ (hash >>> 15)) & (COLUMN_CACHE_BUCKETS - 1);
+    const first = bucket * 2, second = first + 1;
+    if (this.sdfColumns[first] && this.sdfColumnXs[first] === x && this.sdfColumnZs[first] === z)
+      return this.sdfColumns[first]!;
+    if (this.sdfColumns[second] && this.sdfColumnXs[second] === x && this.sdfColumnZs[second] === z)
+      return this.sdfColumns[second]!;
+    const column = this.column(x, z);
+    const slot = first + this.sdfColumnVictims[bucket];
+    this.sdfColumnVictims[bucket] ^= 1;
+    // Replace only the private cache reference. Previously returned columns
+    // remain valid and immutable even when this bucket is reused.
+    this.sdfColumnXs[slot] = x; this.sdfColumnZs[slot] = z;
+    this.sdfColumns[slot] = column;
+    return column;
+  }
+
   column(x: number, z: number): ColumnData {
     const col = this.baseColumn(x, z);
     const arrival = transportGroundAt(this.collectTransportPlan(), x, z, col.h);
@@ -707,7 +847,15 @@ export class World {
   }
 
   terrainHeight(x: number, z: number): number {
-    return this.column(x, z).h;
+    return this.sampleColumn(x, z).h;
+  }
+
+  /** Exact immutable column for simulation queries; use column() for editable data. */
+  sampleColumn(x: number, z: number): Readonly<ColumnData> {
+    // Injected terrain can change between probes; only generated columns
+    // have the immutability contract required for cross-query reuse.
+    if (this.column !== World.prototype.column) return this.column(x, z);
+    return this.cachedColumn(x, z);
   }
 
   // ---- Caves -------------------------------------------------------------
@@ -791,7 +939,7 @@ export class World {
   }
 
   private terrainSdf(x: number, y: number, z: number): number {
-    return this.terrainSdfCol(x, y, z, this.column(x, z));
+    return this.terrainSdfCol(x, y, z, this.sampleColumn(x, z));
   }
 
   /**
@@ -805,7 +953,7 @@ export class World {
    * column's 2D data, so the common outdoor case costs a few evaluations.
    */
   roofedAbove(x: number, y: number, z: number): boolean {
-    const col = this.column(x, z);
+    const col = this.sampleColumn(x, z);
     // Above the entrance headroom the terrain field is positive and grows
     // with height; nothing can be overhead.
     const top = col.h + CAVE_ENTRANCE_HEADROOM;
@@ -829,7 +977,7 @@ export class World {
    * it deliberately cannot recurse through bouldersFor()/regionAt().
    */
   private terrainGroundY(x: number, z: number): number | null {
-    const col = this.column(x, z);
+    const col = this.sampleColumn(x, z);
     let airY = Math.min(WORLD.MAX_HEIGHT - 1, col.h + 2);
     let airD = this.terrainSdfCol(x, airY, z, col);
     if (airD <= 0) return null; // column contract was violated
@@ -1464,18 +1612,18 @@ export class World {
       const col = this.column(x, z);
       if (col.city || col.templeSite || col.transport) continue;
       if (liquidAtSurfaceColumn(this.seed, x, col.h + .1, z, col.h, col.lavaY)) continue;
-      const rainforest = (col.rainforest ?? 0) > .35 && col.h < 175;
+      const surfaceTemp = surfaceTemperature(col);
+      const rainforest = (col.rainforest ?? 0) > .35 && col.h < 175 && surfaceTemp > .32;
       const grove = smoothstep(
         -0.28,
         0.28,
         this.noise.fbm2(x * 0.0018 + 181.0, z * 0.0018 - 347.0, 2),
       );
-      // Match the altitude-adjusted temperature used by materialAt(), so
-      // snowy highlands transition to conifers instead of leafy forests.
-      const surfaceTemp = col.temp - Math.max(0, col.h) * 0.005;
+      // Broad leaves and cacti stop before the shared frost line. Conifers
+      // continue into snowy country, thinning out at the upper tree line.
       const treeLine = smoothstep(-0.08, 0.12, surfaceTemp);
       const temperate =
-        smoothstep(0.20, 0.46, surfaceTemp) *
+        smoothstep(0.26, 0.46, surfaceTemp) *
         smoothstep(0.93, 0.70, surfaceTemp);
       const green = smoothstep(0.28, 0.64, col.moist);
       const broadleaf =
@@ -1486,9 +1634,8 @@ export class World {
         lerp(0.35, 1, grove) *
         treeLine;
       const cactus =
-        col.desert * lerp(0.72, 0.38, grove);
-      // Nothing grows on volcanic ash (and cacti have no altitude gate, so
-      // a hot volcanic highland would otherwise sprout cacti beside lava).
+        col.desert * lerp(0.72, 0.38, grove) * smoothstep(.26, .38, surfaceTemp);
+      // Warm temperatures do not make volcanic ash habitable, even for cacti.
       // The hard 2.2x factor zeroes growth well before the basalt line.
       const density = Math.max(
         rainforest ? .96 : 0,
@@ -1592,6 +1739,24 @@ export class World {
     return out;
   }
 
+  /** Cooperative render queries may pause after each complete canonical cell.
+   * The synchronous collector above remains the simulation's unchanged path.
+   * Empty cells also yield: rejecting a cold cell can still require terrain. */
+  *collectVegetationCells(
+    minX: number, maxX: number, minZ: number, maxZ: number,
+  ): Generator<VegetationPlacement[] | null, void, void> {
+    if (this.collectVegetation !== World.prototype.collectVegetation) {
+      yield this.collectVegetation(minX, maxX, minZ, maxZ);
+      return;
+    }
+    const i0 = Math.floor((minX - VEGETATION_MARGIN) / VEGETATION_CELL);
+    const i1 = Math.floor((maxX + VEGETATION_MARGIN) / VEGETATION_CELL);
+    const j0 = Math.floor((minZ - VEGETATION_MARGIN) / VEGETATION_CELL);
+    const j1 = Math.floor((maxZ + VEGETATION_MARGIN) / VEGETATION_CELL);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++)
+      yield this.vegetationFor(i, j);
+  }
+
   /** Collect all authoritative primitives affecting an XZ rectangle. */
   private undergroundStructFor(ci: number, cj: number): UndergroundStructure | null {
     const key = cellKey(ci, cj);
@@ -1600,7 +1765,21 @@ export class World {
       setBounded(this.undergroundStructCache,key,null,STRUCT_CACHE_LIMIT);return null;
     }
     const value = generateUndergroundStructure(this.seed, ci, cj,
-      (x, y, z) => this.terrainSdf(x, y, z), (x, z) => this.column(x, z).h);
+      (x, y, z) => this.terrainSdf(x, y, z), (x, z) => this.column(x, z).h, candidate => {
+        // Road changes can refit a hillside entrance and its cave below.
+        // Outpost pillars and equipment must respect those walking lanes,
+        // as well as the outpost's own axis-aligned central aisle.
+        const { x, z } = candidate.site;
+        for (const route of this.collectCaveSites(x - 14, x + 14, z - 14, z + 14)) {
+          for (let along = 0; along <= route.length; along += 2) {
+            const point = cavePathPoint(route, along);
+            if (candidate.solids.some(box =>
+              Math.abs(point.x - box.x) < box.hx + 1.4 && Math.abs(point.z - box.z) < box.hz + 1.4 &&
+              box.y + box.hy > point.y + .3 && box.y - box.hy < point.y + 2.1)) return false;
+          }
+        }
+        return true;
+      });
     setBounded(this.undergroundStructCache, key, value, STRUCT_CACHE_LIMIT);
     return value;
   }
@@ -1717,6 +1896,23 @@ export class World {
     return boulders;
   }
 
+  /** Same bounds, generation and i/j order as collectBoulders, one cell per
+   * advance. Cancelling a render job never computes its remaining cells. */
+  *collectBoulderCells(
+    minX: number, maxX: number, minZ: number, maxZ: number,
+  ): Generator<RBox[] | null, void, void> {
+    if (this.collectBoulders !== World.prototype.collectBoulders) {
+      yield this.collectBoulders(minX, maxX, minZ, maxZ);
+      return;
+    }
+    const i0 = Math.floor((minX - BOULDER_MARGIN) / BOULDER_CELL);
+    const i1 = Math.floor((maxX + BOULDER_MARGIN) / BOULDER_CELL);
+    const j0 = Math.floor((minZ - BOULDER_MARGIN) / BOULDER_CELL);
+    const j1 = Math.floor((maxZ + BOULDER_MARGIN) / BOULDER_CELL);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++)
+      yield this.bouldersFor(i, j);
+  }
+
   /** Collect all authoritative primitives affecting an XZ rectangle. */
   collectRegion(
     minX: number,
@@ -1741,6 +1937,15 @@ export class World {
 
   /** Region for a single point, memoized on the last cell tuple. */
   regionAt(x: number, z: number): Region {
+    // Each tuple owns the intersection of twelve half-open coordinate
+    // intervals. Most contact/normal probes remain well inside that region;
+    // avoid recomputing all twelve floor divisions until a boundary is near.
+    if (this.lastRegion && x > this.lrMinX && x < this.lrMaxX && z > this.lrMinZ && z < this.lrMaxZ)
+      return this.lastRegion;
+    // A secondary hit leaves the primary tuple untouched. Boundary probes
+    // must still compare their original floor tuple against that same region.
+    if (this.secondaryRegion && x > this.srMinX && x < this.srMaxX && z > this.srMinZ && z < this.srMaxZ)
+      return this.secondaryRegion;
     // These bounds exactly mirror collectRegion(). Caching only lower indices
     // is incorrect: an upper index changes within the
     // same lower-index cell, making primitive membership depend on which
@@ -1776,6 +1981,9 @@ export class World {
     if (!this.regionCache.has(key)) {
       setBounded(this.regionCache, key, region, REGION_CACHE_LIMIT);
     }
+    this.secondaryRegion = this.lastRegion;
+    this.srMinX = this.lrMinX; this.srMaxX = this.lrMaxX;
+    this.srMinZ = this.lrMinZ; this.srMaxZ = this.lrMaxZ;
     this.lastRegion = region;
     this.lrSi0 = si0; this.lrSi1 = si1;
     this.lrSj0 = sj0; this.lrSj1 = sj1;
@@ -1783,6 +1991,22 @@ export class World {
     this.lrBj0 = bj0; this.lrBj1 = bj1;
     this.lrVi0 = vi0; this.lrVi1 = vi1;
     this.lrVj0 = vj0; this.lrVj1 = vj1;
+    // Shrink slightly so rounding near an integer/margin boundary always
+    // takes the original floor-based path. Native region membership and its
+    // boundary tie rules remain the authority, including negative positions.
+    const epsilon = Math.max(1, Math.abs(x), Math.abs(z)) * Number.EPSILON * 16;
+    this.lrMinX = Math.max(si0 * STRUCT_CELL + STRUCT_MARGIN, si1 * STRUCT_CELL - STRUCT_MARGIN,
+      bi0 * BOULDER_CELL + BOULDER_MARGIN, bi1 * BOULDER_CELL - BOULDER_MARGIN,
+      vi0 * VEGETATION_CELL + VEGETATION_MARGIN, vi1 * VEGETATION_CELL - VEGETATION_MARGIN) + epsilon;
+    this.lrMaxX = Math.min((si0 + 1) * STRUCT_CELL + STRUCT_MARGIN, (si1 + 1) * STRUCT_CELL - STRUCT_MARGIN,
+      (bi0 + 1) * BOULDER_CELL + BOULDER_MARGIN, (bi1 + 1) * BOULDER_CELL - BOULDER_MARGIN,
+      (vi0 + 1) * VEGETATION_CELL + VEGETATION_MARGIN, (vi1 + 1) * VEGETATION_CELL - VEGETATION_MARGIN) - epsilon;
+    this.lrMinZ = Math.max(sj0 * STRUCT_CELL + STRUCT_MARGIN, sj1 * STRUCT_CELL - STRUCT_MARGIN,
+      bj0 * BOULDER_CELL + BOULDER_MARGIN, bj1 * BOULDER_CELL - BOULDER_MARGIN,
+      vj0 * VEGETATION_CELL + VEGETATION_MARGIN, vj1 * VEGETATION_CELL - VEGETATION_MARGIN) + epsilon;
+    this.lrMaxZ = Math.min((sj0 + 1) * STRUCT_CELL + STRUCT_MARGIN, (sj1 + 1) * STRUCT_CELL - STRUCT_MARGIN,
+      (bj0 + 1) * BOULDER_CELL + BOULDER_MARGIN, (bj1 + 1) * BOULDER_CELL - BOULDER_MARGIN,
+      (vj0 + 1) * VEGETATION_CELL + VEGETATION_MARGIN, (vj1 + 1) * VEGETATION_CELL - VEGETATION_MARGIN) - epsilon;
     return region;
   }
 
@@ -1794,18 +2018,29 @@ export class World {
    * topology. Terrain/structures are meshed, while deterministic vegetation
    * transforms render matching analytic stems plus cosmetic canopies.
    */
-  sdfCol(x: number, y: number, z: number, col: ColumnData, region: Region): number {
+  sdfCol(x: number, y: number, z: number, col: ColumnData, region: Region, signOnly = false): number {
     let d = this.terrainSdfCol(x, y, z, col);
 
+    // Contact-shell and bisection probes only consume the air/solid sign.
+    // A small positive bound lets primitive indexes reject distant geometry
+    // without evaluating its irrelevant distance. Never clamp before a
+    // smooth union: two positive fields can blend into real solid.
+    if (signOnly && region.pads.length === 0) d = Math.min(d, 1e-9);
     const bs = region.boulders;
     for (let i = 0; i < bs.length; i++) {
       const b = bs[i];
+      // rockProfile is a max with this exact normalized box bound. Reject
+      // distant fracture planes without changing the winning field value.
+      const lower=Math.max(Math.abs((x-b.x)/b.hx)-1,Math.abs((y-b.y)/b.hy)-1,Math.abs((z-b.z)/b.hz)-1)*Math.min(b.hx,b.hy,b.hz);
+      if(lower>=d)continue;
       const bd = sdBoulder(x, y, z, b);
       if (bd < d) d = bd;
     }
     const ps = region.pads;
     for (let i = 0; i < ps.length; i++) {
       const p = ps[i];
+      // Smooth union can reach PAD_SMOOTH beyond the nearer field.
+      if(Math.max(Math.abs(x-p.x)-p.hx,Math.abs(y-p.y)-p.hy,Math.abs(z-p.z)-p.hz)>=d+PAD_SMOOTH)continue;
       d = smin(d, sdBox(x, y, z, p.x, p.y, p.z, p.hx, p.hy, p.hz), PAD_SMOOTH);
     }
     // The exact plinth owns its engineered floor. Smooth terrain unions
@@ -1819,6 +2054,10 @@ export class World {
         d = Math.max(d, y - top);
       }
     }
+    // All remaining operations are min/max CSG. This positive cap preserves
+    // their exact sign, including zero, and every nonpositive result. The
+    // ordinary query retains its complete magnitude for rays and normals.
+    if (signOnly) d = Math.min(d, 1e-9);
     d = solidBoxDistance(region.solids, x, y, z, d);
     if (region.transportBridges) d = region.transportBridges.distance(x, y, z, d);
     if (region.capitalArea) {
@@ -1829,12 +2068,17 @@ export class World {
     const cs = region.cuts;
     for (let i = 0; i < cs.length; i++) {
       const b = cs[i];
+      if(Math.max(Math.abs(x-b.x)-b.hx,Math.abs(y-b.y)-b.hy,Math.abs(z-b.z)-b.hz)>=-d)continue;
       const cd = -sdBox(x, y, z, b.x, b.y, b.z, b.hx, b.hy, b.hz);
       if (cd > d) d = cd;
     }
     const vegetation = region.vegetation;
     for (let i = 0; i < vegetation.length; i++) {
       const plant = vegetation[i];
+      // The cylinder's radial field is at least either horizontal slab;
+      // its full field is at least that radial field or its vertical slab.
+      if(Math.abs(x-plant.x)-plant.radius>=d||Math.abs(z-plant.z)-plant.radius>=d||
+          Math.abs(y-(plant.y+plant.height*.5))-plant.height*.5>=d)continue;
       const stem = sdCylinderY(
         x, y, z,
         plant.x, plant.y + plant.height * 0.5, plant.z,
@@ -1849,22 +2093,26 @@ export class World {
     // moving deck/wall union as ordinary sdf and its contact/gradient probes.
     // Terrain workers leave motionTime unset and continue meshing static land.
     d = this.outposts.distance(x, y, z, d);
-    return this.motionTime === undefined ? d : transitDistance(this, this.motionTime, x, y, z, d);
+    if (this.motionTime !== undefined) d = transitDistance(this, this.motionTime, x, y, z, d);
+    return this.pedestrianCollisions?.distance(x, y, z, d) ?? d;
   }
 
-  sdf(x: number, y: number, z: number): number {
-    return this.staticSdf(x, y, z);
+  /** `signOnly` preserves <=0 exactly, but may cap positive air magnitudes. */
+  sdf(x: number, y: number, z: number, signOnly = false): number {
+    return this.staticSdf(x, y, z, signOnly);
   }
 
-  private staticSdf(x: number, y: number, z: number): number {
+  private staticSdf(x: number, y: number, z: number, signOnly = false): number {
     // Within a fully graded city, near-surface terrain is an exact plane.
     // The abyss, station clearings, cave approaches, outskirts and deep rock
     // keep their canonical columns. Props, cuts, camps and moving transport
     // always pass through the complete field below.
     if (!this.flatCityColumns) {
-      this.flatCityColumns = this.collectCities().filter(c => c.theme !== 'vesper').map(city => ({
-        h: city.y, city, temp: 0, moist: 0, desert: 0, entr: 0, entrRaw: 0, volc: 0, lavaY: -1000,
-      }));
+      this.flatCityColumns = this.collectCities().filter(c => c.theme !== 'vesper').map(city => {
+        const column = createColumnData(city.y,0,0,0,0,0,0,-1000,undefined);
+        column.city = city;
+        return column;
+      });
     }
     for (const flat of this.flatCityColumns) {
       if (y < flat.h - CAVE_MIN_ROOF) continue;
@@ -1876,24 +2124,10 @@ export class World {
       } else if (Math.max(Math.abs(dx), Math.abs(dz)) > city.radius) continue;
       if (transportGroundAt(this.collectTransportPlan(), x, z, flat.h) ||
           this.caveFor(Math.floor(x / CAVE_CELL), Math.floor(z / CAVE_CELL))) break;
-      return this.sdfCol(x, y, z, flat, this.regionAt(x, z));
+      return this.sdfCol(x, y, z, flat, this.regionAt(x, z), signOnly);
     }
-    let column = this.sdfColumnRows.get(x)?.get(z);
-    if (!column) {
-      column = this.column(x, z);
-      const cursor = this.sdfColumnCursor;
-      if (this.sdfColumnCount === 512) {
-        const oldX = this.sdfColumnXs[cursor], row = this.sdfColumnRows.get(oldX)!;
-        row.delete(this.sdfColumnZs[cursor]);
-        if (row.size === 0) this.sdfColumnRows.delete(oldX);
-      } else this.sdfColumnCount++;
-      let row = this.sdfColumnRows.get(x);
-      if (!row) this.sdfColumnRows.set(x, row = new Map());
-      row.set(z, column);
-      this.sdfColumnXs[cursor] = x; this.sdfColumnZs[cursor] = z;
-      this.sdfColumnCursor = (cursor + 1) & 511;
-    }
-    return this.sdfCol(x, y, z, column, this.regionAt(x, z));
+    const column = this.cachedColumn(x, z);
+    return this.sdfCol(x, y, z, column, this.regionAt(x, z), signOnly);
   }
 
   /** Outward (into-air) surface normal via central differences. */
@@ -1913,18 +2147,24 @@ export class World {
   /**
    * Conservatively march a ray against the implicit field. A hit always
    * requires a real air-to-solid sign bracket; a small positive local minimum
-   * is not a surface.
+   * is not a surface. Height-only callers can omit the normal's six field
+   * samples; marching and hit coordinates remain identical. Heuristic AI
+   * feelers may request a larger minimum sample step; authoritative collision,
+   * weapon and terrain queries retain the default fine sampling.
    */
-  trace(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number): TraceHit {
+  trace(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, maxDist: number, computeNormal = true, minimumStep = TRACE_MIN_STEP): TraceHit {
+    minimumStep = Number.isFinite(minimumStep) ? Math.max(TRACE_MIN_STEP,Math.min(.15,minimumStep)) : TRACE_MIN_STEP;
     const out: TraceHit = { hit: false, dist: maxDist, x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0 };
     let t = 0;
     let d = this.sdf(ox, oy, oz);
     if (d <= 0) {
       out.hit = true; out.dist = 0;
       out.x = ox; out.y = oy; out.z = oz;
-      const g = { x: 0, y: 0, z: 0 };
-      this.gradient(ox, oy, oz, g);
-      out.nx = g.x; out.ny = g.y; out.nz = g.z;
+      if (computeNormal) {
+        const g = { x: 0, y: 0, z: 0 };
+        this.gradient(ox, oy, oz, g);
+        out.nx = g.x; out.ny = g.y; out.nz = g.z;
+      }
       return out;
     }
 
@@ -1934,12 +2174,12 @@ export class World {
     // only 11.2m at the minimum step and made groundY return its sentinel in
     // canonical air. Size the safety budget from the requested travel range;
     // ordinary sphere-marched rays still exit in a handful of iterations.
-    const maxIters = Math.ceil(maxDist / TRACE_MIN_STEP) + 2;
+    const maxIters = Math.ceil(maxDist / minimumStep) + 2;
     for (let i = 0; i < maxIters && t < maxDist; i++) {
       // A small positive value is not a hit: non-distance fields can have a
       // positive local minimum. Advance until an actual outside->solid sign
       // bracket exists, then preserve its solid endpoint while bisecting.
-      const step = Math.max(d * TRACE_FIELD_SCALE, TRACE_MIN_STEP);
+      const step = Math.max(d * TRACE_FIELD_SCALE, minimumStep);
       const nextT = Math.min(maxDist, t + step);
       const nd = this.sdf(
         ox + dx * nextT,
@@ -1951,16 +2191,18 @@ export class World {
         let hi = nextT;  // known solid
         for (let k = 0; k < 12; k++) {
           const mid = (lo + hi) * 0.5;
-          if (this.sdf(ox + dx * mid, oy + dy * mid, oz + dz * mid) > 0) lo = mid;
+          if (this.sdf(ox + dx * mid, oy + dy * mid, oz + dz * mid, true) > 0) lo = mid;
           else hi = mid;
         }
         const ht = hi; // retain the non-positive side of the bracket
         out.hit = true;
         out.dist = ht;
         out.x = ox + dx * ht; out.y = oy + dy * ht; out.z = oz + dz * ht;
-        const g = { x: 0, y: 0, z: 0 };
-        this.gradient(out.x, out.y, out.z, g);
-        out.nx = g.x; out.ny = g.y; out.nz = g.z;
+        if (computeNormal) {
+          const g = { x: 0, y: 0, z: 0 };
+          this.gradient(out.x, out.y, out.z, g);
+          out.nx = g.x; out.ny = g.y; out.nz = g.z;
+        }
         return out;
       }
       if (nextT >= maxDist) break;
@@ -1973,7 +2215,7 @@ export class World {
   /** First surface straight down from the sky. */
   groundY(x: number, z: number): number {
     const top = this.landscape.cityAt(x, z)?.theme ? CAPITAL_SKY_HEIGHT : WORLD.MAX_HEIGHT - 1;
-    const hit = this.trace(x, top, z, 0, -1, 0, top - WORLD.KILL_Y + 10);
+    const hit = this.trace(x, top, z, 0, -1, 0, top - WORLD.KILL_Y + 10, false);
     return hit.hit ? hit.y : 0;
   }
 
@@ -2100,13 +2342,12 @@ export class World {
     // Volcanic surfaces are ash-black basalt all the way up: no snowcaps,
     // no sand, no grass in the burned province.
     if (col.volc > 0.4) return MAT.BASALT;
+    if (snowCover(col, y, normalY) >= .5) return MAT.SNOW;
     if ((col.rainforest ?? 0) > .35) return normalY < .55 ? MAT.ROCK : normalY < .78 ? MAT.DIRT : MAT.GRASS;
-    const tAdj = col.temp - Math.max(0, y) * 0.005;
-    if (tAdj < 0.34) return MAT.SNOW;
     if (col.desert > 0.5) return MAT.SAND;
     if (normalY < 0.55) return MAT.ROCK;
     if (normalY < 0.78) return MAT.DIRT;
-    if (y > 78) return MAT.ROCK;
+    if (y > (ALPINE_ROCK_START + ALPINE_ROCK_END) * .5) return MAT.ROCK;
     return MAT.GRASS;
   }
 
@@ -2130,12 +2371,8 @@ export class World {
       case MAT.BASALT: r = 0.11; g = 0.095; b = 0.105; break;
       case MAT.LAVA: r = 1.0; g = 0.42; b = 0.06; break;
       case MAT.ROAD: {
-        // Begin from the local biome; the continuous shoulder blend below
-        // avoids a binary dark triangle edge at the lane material boundary.
-        if (col.temp - Math.max(0, y) * 0.005 < 0.34) { r = 0.90; g = 0.92; b = 0.96; }
-        else if (col.desert > 0.5) { r = 0.82; g = 0.72; b = 0.50; }
-        else if (y > 78) { r = 0.50; g = 0.50; b = 0.53; }
-        else { r = lerp(0.50, 0.27, col.moist); g = lerp(0.54, 0.50, col.moist); b = lerp(0.26, 0.21, col.moist); }
+        // The continuous biome blend below supplies the road's substrate.
+        r = g = b = 0;
         break;
       }
       default: { // Geological provinces retain readable mineral strata at depth.
@@ -2154,11 +2391,11 @@ export class World {
       r = lerp(.50, .27, moisture); g = lerp(.54, .50, moisture); b = lerp(.26, .21, moisture);
       const soil = 1 - smoothstep(.60, .85, normalY);
       r = lerp(r, .46, soil); g = lerp(g, .36, soil); b = lerp(b, .25, soil);
-      const stone = Math.max(1 - smoothstep(.42, .62, normalY), smoothstep(68, 105, y) * (1 - (col.rainforest ?? 0)));
+      const stone = Math.max(1 - smoothstep(.42, .62, normalY), smoothstep(ALPINE_ROCK_START, ALPINE_ROCK_END, y) * (1 - (col.rainforest ?? 0)));
       r = lerp(r, .50, stone); g = lerp(g, .50, stone); b = lerp(b, .53, stone);
       const sand = smoothstep(.32, .68, col.desert);
       r = lerp(r, .82, sand); g = lerp(g, .72, sand); b = lerp(b, .50, sand);
-      const snow = (1 - smoothstep(.26, .43, col.temp - Math.max(0, y) * .005)) * smoothstep(.3, .65, normalY);
+      const snow = snowCover(col, y, normalY);
       r = lerp(r, .90, snow); g = lerp(g, .92, snow); b = lerp(b, .96, snow);
     }
     if (col.city && Math.abs(y - col.city.y) < 1.5) {
@@ -2195,3 +2432,11 @@ export class World {
     out[o + 2] = clamp(b * j, 0, 1);
   }
 }
+
+const canonicalMapWorldCollector = World.prototype.collectRoadSegments;
+const canonicalMapWorldMajorCollector = World.prototype.collectMajorRoadSegments;
+const canonicalTransportWorld = captureTransportMethods(World.prototype);
+const canonicalTransportLandscape = captureTransportMethods(Landscape.prototype);
+const canonicalTransportNoise = captureTransportMethods(Noise.prototype);
+const canonicalTransportProviderGuard = (World.prototype as unknown as { nativeTransportProviders(this: World): boolean }).nativeTransportProviders;
+registerCanonicalWorldPrototype(World.prototype, Landscape.prototype, Noise.prototype, OutpostField.prototype);

@@ -34,7 +34,7 @@ export class CityLiftRenderer {
     this.frames = new THREE.InstancedMesh(frameGeometry(), new THREE.MeshLambertMaterial({ color: 0x829195 }), this.sites.length);
     const field = new THREE.PlaneGeometry(1.88, 1.88).rotateX(-Math.PI / 2);
     this.fields = new THREE.InstancedMesh(field, new THREE.MeshBasicMaterial({ transparent: true, opacity: .55,
-      side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }), this.sites.length);
+      side: THREE.DoubleSide, forceSinglePass: true, depthWrite: false, blending: THREE.AdditiveBlending }), this.sites.length);
     this.frames.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.fields.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.frames.count = this.fields.count = 0;

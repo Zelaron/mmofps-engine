@@ -249,9 +249,10 @@ export class TransportRenderer {
     if (key !== this.signature) { this.signature = key; this.rebuild(x, y, z); }
     for (const mesh of this.bodies.values()) mesh.count = 0;
     this.stats.bodies = 0;
+    const bodyRange = renderProfile().fogFar + 300;
     for (const route of this.plan.routes) for (let car = 0; car < route.carOffsets.length; car++) {
       const pose = transportPose(route, seconds, route.carOffsets[car]);
-      if (Math.hypot(pose.x - x, pose.y - y, pose.z - z) > renderProfile().fogFar + 300) continue;
+      if (Math.hypot(pose.x - x, pose.y - y, pose.z - z) > bodyRange) continue;
       const mesh = this.bodies.get(route.kind === 'ferry' ? 'ferry' : `train-${car}`)!;
       this.transform.position.set(pose.x, pose.y, pose.z); this.transform.rotation.set(0, pose.yaw, 0); this.transform.scale.setScalar(1); this.transform.updateMatrix();
       mesh.setMatrixAt(mesh.count++, this.transform.matrix); this.stats.bodies++;

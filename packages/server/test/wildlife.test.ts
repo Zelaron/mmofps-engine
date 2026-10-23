@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { World, WEAPONS, PLAYER, VEHICLE, CREATURE_DEFS, MAX_CREATURES, MAX_VISIBLE_CREATURES, type InputCmd, type WeaponDef } from '@shared/index';
+import { World, WEAPONS, PLAYER, VEHICLE, VEHICLE_VARIANT, CREATURE, CREATURE_DEFS, MAX_CREATURES, MAX_VISIBLE_CREATURES, type InputCmd, type WeaponDef } from '@shared/index';
 import { Wildlife, WILDLIFE_AI_BUDGET, WILDLIFE_LOCAL_CAP } from '../src/wildlife.js';
 import { Game, type ServerPlayer } from '../src/game.js';
 import { MAX_ENTITY_ID } from '@shared/entity-id';
@@ -28,7 +28,7 @@ test('safe-integer wildlife IDs keep steering responsive and idle timing exact',
     const creature = fauna.spawn(0, { x: 0, y: 0, z: 0 })!;
     assert.equal(creature.id, id); assert.ok(creature.yaw >= 0 && creature.yaw < Math.PI * 2);
     const originalYaw = creature.yaw;
-    const observer = { id: 1, x: 100, y: 0, z: 0, alive: true, vehicle: VEHICLE.JET };
+    const observer = { id: 1, x: 100, y: 40, z: 0, alive: true, vehicle: VEHICLE.JET };
     for (let tick = 6; tick <= 240; tick += 6) {
       fauna.update(tick, [observer]);
       const moving = (BigInt(tick) + BigInt(id) * 37n) % 240n < 140n;
@@ -67,6 +67,50 @@ test('grazers flee without attacking; predators need clear range and obey bite c
   const blocked = new Wildlife(flatWorld(true), () => bites++, () => {});
   blocked.spawn(2, { x: 1, y: 0, z: 0 }); blocked.update(6, [player]);
   assert.equal(bites, 1, 'a wall blocks predator attacks');
+});
+
+test('undead bite reachable hull surfaces, including landed aircraft, without hitting airborne targets or through cover', () => {
+  for (const [vehicle, vehicleVariant, x, y] of [[VEHICLE.JEEP, 0, 3, 0], [VEHICLE.TANK, 0, 3.3, 0],
+    [VEHICLE.TANK, VEHICLE_VARIANT.BASTION, 4.1, 0], [VEHICLE.JET, 0, 3.1, 0], [VEHICLE.GUNBOAT, 0, 3.6, -.65]]) {
+    const hits: number[] = [], world = flatWorld(), fauna = new Wildlife(world, id => hits.push(id), () => {});
+    const zombie = fauna.spawn(CREATURE.SHAMBLER, { x: 0, y: 0, z: 0 })!;
+    const driver = { id: 1, x, y, z: 0, alive: true, vehicle, vehicleVariant, vehicleId: 10 };
+    fauna.update(6, [driver]);
+    assert.deepEqual(hits, [1], `vehicle ${vehicle}/${vehicleVariant}: a nearby hull can be struck from outside it`);
+    fauna.update(12, [driver]); assert.equal(hits.length, 1, 'armor attacks keep the ordinary melee cooldown');
+    driver.y = 20; fauna.update(90, [driver]); assert.equal(hits.length, 1, 'melee cannot reach a flying hull');
+    assert.equal(zombie.alert, false);
+    const blocked = new Wildlife(flatWorld(true), id => hits.push(id), () => {});
+    blocked.spawn(CREATURE.SHAMBLER, { x: 0, y: 0, z: 0 });
+    blocked.update(6, [{ ...driver, y }]); assert.equal(hits.length, 1, 'solid cover protects occupied vehicles');
+  }
+});
+
+test('committed monster attacks hit each crewed hull once and a driven escape dodges the slam', () => {
+  const hits: number[] = [], fauna = new Wildlife(flatWorld(), id => hits.push(id), () => {});
+  fauna.spawn(CREATURE.OSSUARY_TITAN, { x: 0, y: 0, z: 0 });
+  const crew = [1, 2, 3].map(id => ({ id, x: 12, y: 0, z: 0, alive: true,
+    vehicle: VEHICLE.TANK, vehicleId: 10 }));
+  fauna.update(6, crew); assert.deepEqual(hits, []);
+  fauna.update(96, crew); assert.deepEqual(hits, [1], 'passengers must not multiply damage against the same armor');
+  fauna.update(402, crew);
+  for (const member of crew) member.x = 18;
+  fauna.update(492, crew); assert.deepEqual(hits, [1], 'driving out during the windup avoids the committed impact');
+});
+
+test('authoritative undead attacks damage occupied vehicle armor and leave its crew protected', () => {
+  const game = new Game(1337), driver = game.addPlayer('Driver', null), gunner = game.addPlayer('Gunner', null);
+  Object.assign(driver.state, { px: 3.3, py: 400, pz: 0, vehicle: VEHICLE.TANK });
+  Object.assign(gunner.state, { px: 3.3, py: 400, pz: 0, vehicle: VEHICLE.TANK, seat: 1 });
+  driver.vehicleId = gunner.vehicleId = 10; driver.spawnProtectedUntil = gunner.spawnProtectedUntil = 0;
+  const hull = { id: 10, type: VEHICLE.TANK, x: 3.3, y: 400, z: 0, heading: 0,
+    health: 4500, occupant: driver.id, gunner: gunner.id, respawnAtTick: -1 };
+  game.vehicles.set(hull.id, hull);
+  game.wildlife.spawn(CREATURE.SHAMBLER, { x: 0, y: 400, z: 0 });
+  game.wildlife.update(6, [driver, gunner].map(p => ({ id: p.id, x: p.state.px, y: p.state.py,
+    z: p.state.pz, alive: true, vehicle: p.state.vehicle, vehicleId: p.vehicleId })));
+  assert.equal(hull.health, 4500 - CREATURE_DEFS[CREATURE.SHAMBLER].damage);
+  assert.equal(driver.health, 100); assert.equal(gunner.health, 100);
 });
 
 test('small mixed groups become visible near a walker without exceeding the local cap', () => {
@@ -194,4 +238,73 @@ test('fauna combat uses real authoritative hits and gives resources without PvP 
   assert.ok(game.pickups.size > 0, 'successful hunts produce authoritative collectible resources');
   assert.ok([...game.pickups.values()].every(p => p.kind !== 2 && !WEAPONS[p.weapon]?.spawnEmpty),
     'even a cave creature outside cannot drop ammo that unlocks found weapons');
+});
+
+test('boss slams warn first, can be dodged, hit several nearby actors and respect cover', () => {
+  const hits: number[] = [], world = flatWorld(), fauna = new Wildlife(world, id => hits.push(id), () => {});
+  const boss = fauna.spawn(9, { x: 0, y: 0, z: 0 })!;
+  const players = [1, 2].map((id, i) => ({ id, x: 6 + i * 2, y: 0, z: 0, alive: true, vehicle: 0 }));
+  fauna.update(6, players); assert.equal(hits.length, 0); assert.equal(boss.windupUntil, 96);
+  assert.equal(fauna.snapshot(0, 0, 0)[0].windingUp, true);
+  players[0].x = 18;
+  fauna.update(96, players); assert.deepEqual(hits, [2], 'walking beyond the warning ring dodges the committed attack');
+  players[0].x = 6; fauna.update(402, players); assert.ok(boss.windupUntil > 402);
+  fauna.update(492, players); assert.deepEqual(hits, [2, 1, 2], 'both players can be hit by a committed area attack');
+  fauna.update(798, players); const trace = world.trace;
+  world.trace = (x, y, z, dx, dy, dz, max) => Math.abs(dy) < .5
+    ? { hit: true, x, y, z, nx: 1, ny: 0, nz: 0, dist: .1 } : trace(x, y, z, dx, dy, dz, max);
+  fauna.update(888, players); assert.deepEqual(hits, [2, 1, 2], 'solid cover also blocks a committed slam');
+});
+
+test('protected faction spawn areas reject infestations and cannot be camped by pursuing bosses', () => {
+  const hits: number[] = [], fauna = new Wildlife(flatWorld(), id => hits.push(id), () => {}, undefined, undefined,
+    { protectedAreas: () => [{ x: 0, z: 0, radius: 70 }] });
+  assert.equal(fauna.spawn(6, { x: 40, y: 0, z: 0 }), null);
+  assert.equal(fauna.spawn(9, { x: 220, y: 0, z: 0 }), null, 'boss home and full leash stay clear of the spawn');
+  assert.ok(fauna.spawn(0, { x: 40, y: 0, z: 0 }), 'passive fauna can still graze nearby');
+  const boss = fauna.spawn(9, { x: 280, y: 0, z: 0 })!;
+  boss.x = 77; boss.health--;
+  fauna.update(6, [{ id: 1, x: 68, y: 0, z: 0, alive: true, vehicle: 0 }]);
+  assert.equal(boss.alert, false); assert.equal(boss.windupUntil, 0); assert.deepEqual(hits, []);
+});
+
+test('boss health takes sustained team damage and yields one guaranteed reward on defeat', () => {
+  let rewards = 0;
+  const fauna = new Wildlife(flatWorld(), () => {}, () => rewards++), boss = fauna.spawn(11, { x: 0, y: 0, z: 0 })!;
+  assert.equal(fauna.damage(boss, 1000, 1, 0), false); assert.ok(boss.health > 10000);
+  assert.ok(fauna.snapshot(0, 0, 0)[0].health! < 1);
+  assert.equal(fauna.damage(boss, 14000, 2, 60), true); assert.equal(rewards, 1);
+  assert.equal(fauna.damage(boss, 14000, 2, 61), false); assert.equal(rewards, 1);
+  assert.equal(fauna.snapshot(0, 0, 0)[0].health, 0);
+});
+
+test('server accepts an explicit future planet roster without altering the global species table', () => {
+  const fauna = new Wildlife(flatWorld(), () => {}, () => {}, undefined, undefined,
+    { ecology: { id: 'future-reef', roster: [{ species: 12, weight: 1, group: [3, 3], habitat: 'surface' }] } });
+  for (let tick = 6; tick <= 900; tick += 6) fauna.update(tick, [{ id: 1, x: 64, y: 0, z: 64, alive: true, vehicle: 0 }]);
+  assert.ok(fauna.creatures.size >= 3);
+  assert.ok([...fauna.creatures.values()].every(c => c.species === 12));
+});
+
+test('bots are local creature targets but do not consume the offscreen encounter budget', () => {
+  const hits: number[] = [], fauna = new Wildlife(flatWorld(), id => hits.push(id), () => {});
+  fauna.spawn(6, { x: 0, y: 0, z: 0 });
+  const human = { id: 1, x: 90, y: 0, z: 0, alive: true, vehicle: 0 };
+  const bot = { id: 2, x: 1, y: 0, z: 0, alive: true, vehicle: 0, isBot: true };
+  fauna.update(6, [human, bot]); assert.deepEqual(hits, [2]);
+  for (let tick = 12; tick <= 900; tick += 6) fauna.update(tick, [bot]);
+  assert.equal(fauna.creatures.size, 0, 'unobserved bots neither retain nor spawn distant infestations');
+});
+
+test('coastal encounters sample adjacent water at its own bed elevation', () => {
+  const world = flatWorld(), dry = world.column(0, 0);
+  world.column = (x: number) => ({ ...dry, city: undefined, h: x > 120 ? -8 : 0 });
+  world.liquidAt = (x, y) => x > 120 && y >= -8 && y <= 0
+    ? { id: 1, kind: 'water', surfaceY: 0, bottomY: -8, distance: -1, flowX: 0, flowZ: 0 } : undefined;
+  const fauna = new Wildlife(world, () => {}, () => {}, undefined, undefined, {
+    ecology: { id: 'coast-fixture', roster: [{ species: 13, weight: 1, group: [1, 1], habitat: 'shore', maxElevation: 35 }] },
+  });
+  for (let tick = 6; tick <= 900; tick += 6) fauna.update(tick, [{ id: 1, x: 0, y: 0, z: 0, alive: true, vehicle: 0 }]);
+  assert.equal(fauna.creatures.size, 1, 'a dry shore can host a rare coastal boss beside a lower ocean bed');
+  assert.ok([...fauna.creatures.values()].every(c => c.x <= 120));
 });

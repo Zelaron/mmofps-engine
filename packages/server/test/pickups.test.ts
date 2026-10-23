@@ -199,6 +199,61 @@ test('the nearest eligible collector wins regardless of insertion order', () => 
   assert.equal(later.health, 30);
 });
 
+test('empty crates cannot leak retained contacts or notices between available pickups', () => {
+  const game = new Game(6015);
+  const received: { player: string; bytes: Uint8Array }[] = [];
+  const add = (name: string) => game.addPlayer(name, {
+    send: bytes => received.push({ player: name, bytes }),
+  });
+  const first = add('First'), second = add('Second'), collector = add('Collector');
+  for (const p of [first, second, collector]) {
+    p.state.px = 0; p.state.py = 100; p.state.pz = 0;
+    p.health = PLAYER.MAX_HEALTH;
+  }
+  collector.state.px = 20;
+  collector.health = 50;
+  localPickup(game, first, 1, PICKUP_HEALTH, -1).x = 1000;
+  localPickup(game, first, 2, PICKUP_HEALTH, -1);
+  localPickup(game, first, 3, PICKUP_HEALTH, -1).x = 2000;
+  localPickup(game, collector, 4, PICKUP_HEALTH, -1);
+  const notices = () => received.flatMap(({ player, bytes }) =>
+    pickupResults([bytes]).map(event => ({ player, ...event })));
+
+  internal(game).updatePickups();
+  assert.deepEqual(notices().map(({ player, pickupId, result }) =>
+    ({ player, pickupId, result })), [
+    { player: 'First', pickupId: 2, result: PICKUP_RESULT_FULL },
+    { player: 'Second', pickupId: 2, result: PICKUP_RESULT_FULL },
+    { player: 'Collector', pickupId: 4, result: PICKUP_RESULT_COLLECTED },
+  ]);
+  assert.deepEqual([...game.pickups.keys()], [1, 2, 3]);
+  assert.equal(collector.health, 50 + HEALTH_PICKUP_AMOUNT);
+
+  // Only the first player's old contact remains in the release band. This
+  // tick needs a retained list, but no entered list or notice.
+  first.state.px = 1.4;
+  second.state.px = 100;
+  internal(game).updatePickups();
+  assert.deepEqual([...first.fullPickupContacts], [2]);
+  assert.deepEqual([...second.fullPickupContacts], []);
+  assert.equal(notices().length, 3);
+
+  // The returning full player enters while an eligible player collects.
+  // Both pending contact lists must be discarded without stale feedback.
+  second.state.px = .2;
+  collector.state.px = -.2;
+  collector.health = 50;
+  internal(game).updatePickups();
+  assert.deepEqual(notices().slice(3).map(({ player, pickupId, result }) =>
+    ({ player, pickupId, result })), [
+    { player: 'Collector', pickupId: 2, result: PICKUP_RESULT_COLLECTED },
+  ]);
+  assert.deepEqual([...game.pickups.keys()], [1, 3]);
+  for (const p of [first, second, collector]) assert.equal(p.fullPickupContacts.size, 0);
+  internal(game).updatePickups();
+  assert.equal(notices().length, 4, 'empty available crates emit no delayed notices');
+});
+
 test('distant players outside pickup hash buckets cannot affect collection', () => {
   const game = new Game(6012);
   const farReceived: Uint8Array[] = [];

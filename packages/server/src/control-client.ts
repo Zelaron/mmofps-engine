@@ -15,7 +15,7 @@ export class ControlClient {
       // bootstrap operations are idempotent for the exact same identity
       // and epoch, including a commit whose response was lost. Other writes
       // keep their own explicit receipt/recovery policies in WorldNode.
-      if (error instanceof ControlError || !['namespace', 'register', 'entities/reserve'].includes(method)) throw error;
+      if (error instanceof ControlError || !['namespace', 'register', 'entities/reserve', 'regions/layout'].includes(method)) throw error;
       await new Promise(resolve => setTimeout(resolve, 100));
       return this.request<T>(method, body);
     }

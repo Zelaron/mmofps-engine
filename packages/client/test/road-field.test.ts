@@ -28,7 +28,13 @@ test('terrain previews and final meshes can use the same base palette without ba
 });
 
 test('volcanic road triangles retain basalt before and outside the continuous gravel field',()=>{
-  const world=new World(1337),x=2102.495,z=-658.759,col=world.column(x,z);
+  const world=new World(1337);
+  const road=world.collectRoadSegments(1800,3500,-1500,0).find(r=>{
+    const x=(r.a.x+r.b.x)/2,z=(r.a.z+r.b.z)/2,c=world.column(x,z);
+    return c.volc>.4 && c.road && c.road.distance<1 && c.lavaY===-1000;
+  })!;
+  assert.ok(road,'a real dry volcanic road is exercised after hazard routing');
+  const x=(road.a.x+road.b.x)/2,z=(road.a.z+road.b.z)/2,col=world.column(x,z);
   const empty={sites:[],solids:[],pads:[],cuts:[],vegetation:[],boulders:[]};
   assert.ok(col.volc>.4 && col.road && col.road.distance<1);
   assert.equal(world.material(x,col.h,z,col,1,empty),MAT.ROAD,'gameplay retains road footsteps');

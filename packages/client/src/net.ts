@@ -50,6 +50,7 @@ export class NetClient {
   private offsetTicks = 0;
   private hasOffset = false;
   private latestServerTick = 0;
+  private lastEstimatedTick = 0;
   private lastSnapshotAt = -Infinity;
   rttMs = 80;
   connected = false;
@@ -62,7 +63,8 @@ export class NetClient {
     this.connected = false;
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
-    this.hasOffset = false; this.latestServerTick = 0; this.lastSnapshotAt = -Infinity; this.rttMs = 80;
+    this.hasOffset = false; this.latestServerTick = 0; this.lastEstimatedTick = 0;
+    this.lastSnapshotAt = -Infinity; this.rttMs = 80;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.binaryType = 'arraybuffer';
@@ -97,8 +99,14 @@ export class NetClient {
 
   /** Estimated server tick right now (lags true server time by ~downlink). */
   estServerTick(): number {
-    // A stalled server cannot advance indefinitely in client wall time.
-    return Math.min(this.nowTicks() + this.offsetTicks, this.latestServerTick + TICK_RATE * .25);
+    if (!this.hasOffset) return this.latestServerTick;
+    // A stalled server cannot advance indefinitely in client wall time. Late
+    // snapshots can correct the offset backward; hold the displayed timeline
+    // until it catches up instead of visibly rewinding shells and vehicles.
+    // latestServerTick only increases, so this remains within the same cap.
+    const estimate = Math.min(this.nowTicks() + this.offsetTicks, this.latestServerTick + TICK_RATE * .25);
+    this.lastEstimatedTick = Math.max(this.lastEstimatedTick, estimate);
+    return this.lastEstimatedTick;
   }
 
   get snapshotAgeMs(): number { return performance.now() - this.lastSnapshotAt; }
@@ -106,6 +114,7 @@ export class NetClient {
   /** Force re-sync after tab-hidden gaps. */
   resync(): void {
     this.hasOffset = false;
+    this.lastEstimatedTick = 0;
     this.rttMs = 80;
   }
 
@@ -152,6 +161,7 @@ export class NetClient {
         }
         r.off--;
         const welcome = decodeWelcome(r);
+        this.observeTick(welcome.tick);
         this.connected = true;
         h.onWelcome(welcome);
         break;

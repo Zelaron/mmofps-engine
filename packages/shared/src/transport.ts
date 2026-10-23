@@ -24,8 +24,105 @@ export interface TransportPlan {
   bridges: TransportPrism[];
   accesses: StationAccess[];
 }
+/** Generator compatibility, not just message shape. Bump whenever transport
+ * layout, grading, or any source terrain/city/temple semantics change. A main
+ * bundle and worker with different revisions must generate their own plan. */
+export const TRANSPORT_SNAPSHOT_VERSION = 1;
+export interface TransportSnapshot {
+  version: number;
+  seed: number;
+  plan: TransportPlan;
+}
 export interface StationAccess { stationId: number; x: number; startZ: number; endZ: number; startY: number; endY: number; profile: { z: number; y: number }[] }
 export interface TransportInputs { seed: number; cities: readonly CityDistrict[]; temples: readonly JungleTempleSite[]; sampleHeight: (x: number, z: number) => number }
+interface GroundCandidates { stations: TransportStation[]; accesses: StationAccess[] }
+interface GroundIndex {
+  cells: Map<number, Map<number, GroundCandidates>>;
+  cellX: number; cellZ: number; current: GroundCandidates;
+}
+const GROUND_CELL = 256;
+const EMPTY_GROUND: GroundCandidates = { stations: [], accesses: [] };
+// Only completed native plans are registered. Injected mutable fixture plans
+// retain the original full scan and cannot acquire stale cached footprints.
+const groundIndexes = new WeakMap<TransportPlan, GroundIndex>();
+
+function indexGround(plan: TransportPlan): GroundIndex | undefined {
+  const cells: GroundIndex['cells'] = new Map();
+  const add = (x0: number, x1: number, z0: number, z1: number, station?: TransportStation, access?: StationAccess): boolean => {
+    const minX = Math.floor((x0 - 1e-7) / GROUND_CELL), maxX = Math.floor((x1 + 1e-7) / GROUND_CELL);
+    const minZ = Math.floor((z0 - 1e-7) / GROUND_CELL), maxZ = Math.floor((z1 + 1e-7) / GROUND_CELL);
+    if (![minX, maxX, minZ, maxZ].every(Number.isSafeInteger) || minX > maxX || minZ > maxZ ||
+        (maxX - minX + 1) * (maxZ - minZ + 1) > 4096) return false;
+    for (let cx = minX; cx <= maxX; cx++) {
+      let column = cells.get(cx);
+      if (!column) { column = new Map(); cells.set(cx, column); }
+      for (let cz = minZ; cz <= maxZ; cz++) {
+        let bucket = column.get(cz);
+        if (!bucket) { bucket = { stations: [], accesses: [] }; column.set(cz, bucket); }
+        if (station) bucket.stations.push(station);
+        if (access) bucket.accesses.push(access);
+      }
+    }
+    return true;
+  };
+  for (const station of plan.stations)
+    if (!add(station.x + 80 - 114, station.x + 80 + 114, station.z + 80 - 114, station.z + 80 + 114, station)) return undefined;
+  for (const access of plan.accesses)
+    if (!add(access.x - 270, access.x + 270, access.startZ - 256, access.endZ + 256, undefined, access)) return undefined;
+  return { cells, cellX: NaN, cellZ: NaN, current: EMPTY_GROUND };
+}
+
+/** Internal snapshot restoration. Each receiving World owns a fresh clone;
+ * source/other-world mutations cannot change its indexed geometry. Validate
+ * before registering any index, including finite bounded cell-loop extents.
+ * Invalid or uncloneable payloads let the caller generate canonically. */
+export function restoreTransportPlan(source: TransportPlan): TransportPlan | undefined {
+  try {
+    const plan: TransportPlan = structuredClone(source);
+    const dense = (value: unknown): value is unknown[] => {
+      if (!Array.isArray(value)) return false;
+      for (let i = 0; i < value.length; i++) if (!Object.prototype.hasOwnProperty.call(value, i)) return false;
+      return true;
+    };
+    if (!plan || !['stations', 'harbors', 'routes', 'solids', 'lifts', 'pods', 'bridges', 'accesses']
+      .every(key => dense(plan[key as keyof TransportPlan]))) return undefined;
+    const finite = (...values: number[]) => values.every(Number.isFinite);
+    const point = (p: TransportPoint) => !!p && finite(p.x, p.y, p.z);
+    const namedPoint = (p: TransportPoint & { id: number; name: string }) => point(p) && Number.isSafeInteger(p.id) && typeof p.name === 'string';
+    if (!plan.stations.every(s => namedPoint(s) && finite(s.railY) && typeof s.airlift === 'boolean' &&
+      ['city', 'forest', 'temple', 'port'].includes(s.kind)) ||
+      !plan.harbors.every(h => namedPoint(h) && finite(h.landX, h.landZ, h.heading)) ||
+      !plan.pods.every(p => namedPoint(p) && Number.isSafeInteger(p.stationId))) return undefined;
+    if (!plan.solids.every(box => {
+      if (!point(box) || !finite(box.hx, box.hy, box.hz) || Math.min(box.hx, box.hy, box.hz) < 0) return false;
+      const x0 = Math.floor((box.x - box.hx) / 256), x1 = Math.floor((box.x + box.hx) / 256);
+      const z0 = Math.floor((box.z - box.hz) / 256), z1 = Math.floor((box.z + box.hz) / 256);
+      return [x0, x1, z0, z1].every(Number.isSafeInteger) && (x1 - x0 + 1) * (z1 - z0 + 1) <= 4096;
+    })) return undefined;
+    if (!plan.bridges.every(b => finite(b.bottom, b.top) && b.bottom <= b.top && typeof b.rail === 'boolean' &&
+      dense(b.corners) && b.corners.length === 4 && b.corners.every(p => finite(p.x, p.z))) ||
+      !plan.lifts.every(l => Number.isSafeInteger(l.id) && Number.isSafeInteger(l.cityId) &&
+        finite(l.x, l.z, l.bottom, l.top, l.hx, l.hz, l.phase, l.dwell ?? 0) && l.bottom <= l.top && l.hx >= 0 && l.hz >= 0)) return undefined;
+    if (!plan.accesses.every(a => Number.isSafeInteger(a.stationId) && finite(a.x, a.startZ, a.endZ, a.startY, a.endY) &&
+      a.startZ <= a.endZ && dense(a.profile) && a.profile.length >= 2 &&
+      a.profile.every((p, i) => finite(p.z, p.y) && (i === 0 || p.z >= a.profile[i - 1].z)))) return undefined;
+    if (!plan.routes.every(r => Number.isSafeInteger(r.id) && typeof r.name === 'string' &&
+      (r.kind === 'ferry' || r.kind === 'train') && finite(r.speed, r.dwell, r.phase) && r.speed > 0 && r.dwell >= 0 &&
+      dense(r.carOffsets) && r.carOffsets.every(Number.isFinite) &&
+      dense(r.stops) && r.stops.length >= 2 && r.stops.every(namedPoint) &&
+      dense(r.legs) && r.legs.length >= 2 && r.legs.every(l => namedPoint(l.from) && namedPoint(l.to) &&
+        typeof l.reverse === 'boolean' && Number.isFinite(l.length) && l.length > 0 &&
+        dense(l.points) && l.points.length >= 2 && l.points.every(point) &&
+        dense(l.distances) && l.distances.length === l.points.length &&
+        l.distances.every((d, i) => Number.isFinite(d) && d >= 0 && (i === 0 || d >= l.distances[i - 1]))))) return undefined;
+    const ground = indexGround(plan);
+    if (!ground) return undefined;
+    groundIndexes.set(plan, ground);
+    return plan;
+  } catch {
+    return undefined;
+  }
+}
 export const RAIL_HEIGHT = 320;
 export const TRAIN_CAR_OFFSETS = [0, 28, 56, 84] as const;
 export const TRAIN_ARTILLERY_MOUNT = { car: 3, x: 0, y: 1.2, z: 0 } as const;
@@ -47,21 +144,34 @@ export function transportRoutes(plan: TransportPlan): readonly TransportRoute[] 
 /** Arrival clearings are queried after the pre-transport base column. The
  * plan samples that base only, keeping station grading recursion-free. */
 export function transportGroundAt(plan: TransportPlan, x: number, z: number, baseHeight: number): { height: number; weight: number } | undefined {
-  let result: { height: number; weight: number } | undefined;
-  const blend = (height: number, weight: number): void => {
-    if (weight <= 0) return;
-    if (!result) { result = { height, weight }; return; }
-    const inherited = result.weight * (1 - weight), combined = inherited + weight;
-    result = { height: (result.height * inherited + height * weight) / combined, weight: combined };
-  };
-  for (const s of plan.stations) {
+  const index = groundIndexes.get(plan);
+  let stations = plan.stations, accesses = plan.accesses ?? [];
+  if (index && Number.isFinite(x) && Number.isFinite(z)) {
+    const cx = Math.floor(x / GROUND_CELL), cz = Math.floor(z / GROUND_CELL);
+    if (cx !== index.cellX || cz !== index.cellZ) {
+      index.cellX = cx; index.cellZ = cz;
+      index.current = index.cells.get(cx)?.get(cz) ?? EMPTY_GROUND;
+    }
+    stations = index.current.stations; accesses = index.current.accesses;
+    if (!stations.length && !accesses.length) return undefined;
+  }
+  let hasBlend = false, blendHeight = 0, blendWeight = 0;
+  for (const s of stations) {
     const dx = Math.max(0, Math.abs(x - s.x - 80) - 42), dz = Math.max(0, Math.abs(z - s.z - 80) - 42);
     if (dx > 72 || dz > 72) continue;
-    blend(s.y - .06, 1 - smoothstep(0, 72, Math.hypot(dx, dz)));
+    const sampleHeight = s.y - .06, weight = 1 - smoothstep(0, 72, Math.hypot(dx, dz));
+    if (weight <= 0) continue;
+    if (!hasBlend) {
+      blendHeight = sampleHeight; blendWeight = weight; hasBlend = true;
+    } else {
+      const inherited = blendWeight * (1 - weight), combined = inherited + weight;
+      blendHeight = (blendHeight * inherited + sampleHeight * weight) / combined;
+      blendWeight = combined;
+    }
   }
-  let height = result ? lerp(baseHeight, result.height, result.weight) : baseHeight;
-  let changed = !!result;
-  for (const a of plan.accesses ?? []) {
+  let height = hasBlend ? lerp(baseHeight, blendHeight, blendWeight) : baseHeight;
+  let changed = hasBlend;
+  for (const a of accesses) {
     const dx = Math.max(0, Math.abs(x - a.x) - 14), dz = Math.max(a.startZ - z, z - a.endZ, 0);
     if (dx >= 256 || dz >= 256) continue;
     const distance = Math.hypot(dx, dz); if (distance >= 256) continue;
@@ -203,6 +313,8 @@ export function buildTransportPlan(input: TransportInputs): TransportPlan {
   populateStations(plan, input);
   populateRoutes(plan, input);
   populateStructures(plan, input);
+  const ground = indexGround(plan);
+  if (ground) groundIndexes.set(plan, ground);
   return plan;
 }
 

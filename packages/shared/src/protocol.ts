@@ -24,6 +24,7 @@ export const Msg = {
   CPlanet: 7,
   COutpost: 8,
   CHarvest: 9,
+  CRespawn: 29,
 
   SWelcome: 10,
   SSnapshot: 11,
@@ -89,8 +90,15 @@ export class ByteWriter {
     return this.u8(v);
   }
 
-  str(s: string): this {
-    const bytes = textEncoder.encode(s.slice(0, 60));
+  str(s: string, maxChars = 60): this {
+    let end = Math.min(s.length, Math.max(0, Math.min(255, Math.floor(maxChars))));
+    // Do not split a surrogate pair or wrap the one-byte UTF-8 length.
+    if (end > 0 && end < s.length && s.charCodeAt(end - 1) >= 0xd800 && s.charCodeAt(end - 1) <= 0xdbff &&
+        s.charCodeAt(end) >= 0xdc00 && s.charCodeAt(end) <= 0xdfff) end--;
+    const encoded = textEncoder.encode(s.slice(0, end));
+    let length = Math.min(255, encoded.length);
+    while (length > 0 && length < encoded.length && (encoded[length] & 0xc0) === 0x80) length--;
+    const bytes = encoded.subarray(0, length);
     this.u8(bytes.length);
     this.ensure(bytes.length);
     this.buf.set(bytes, this.off);
@@ -238,6 +246,15 @@ export type EntRocket = EntProjectile;
 
 export type SnapshotEntity = EntPlayer | EntProjectile;
 
+export interface AircraftThreat {
+  /** 1: a launcher is tracking us, 2: full lock, 3: a guided missile is inbound. */
+  stage: 1 | 2 | 3;
+  /** Absolute world yaw toward the threatening launcher or nearest missile. */
+  bearing: number;
+  /** Approximate closing time in seconds; zero for launcher-only warnings. */
+  eta: number;
+}
+
 export interface YourState {
   jumpAscent?: boolean;
   airlift?: AirliftFlight;
@@ -275,6 +292,8 @@ export interface YourState {
   vehicleHealth: number;
   /** LOCK_NONE / LOCK_ACQUIRING / LOCK_LOCKED for the homing HUD. */
   lockState: number;
+  /** Target-side radar warning, sent to every occupied aircraft seat. */
+  aircraftThreat?: AircraftThreat;
 }
 
 export interface Snapshot {
@@ -411,6 +430,11 @@ export function encodeSnapshot(w: ByteWriter, snap: Snapshot): void {
   w.u8(clamp(Math.round(you.boostFuel * 255), 0, 255));
   w.u16(clamp(Math.round(you.vehicleHealth), 0, 65535));
   w.u8(clamp(you.lockState, 0, 255));
+  if (you.vehicle === VEHICLE.JET) {
+    const threat = you.aircraftThreat;
+    w.u8(threat?.stage ?? 0);
+    if (threat) w.u16(quantYaw(threat.bearing)).u16(clamp(Math.round(threat.eta * 100), 0, 65535));
+  }
   w.u8(clamp(Math.round((you.airSeconds ?? 18) * 10), 0, 180));
   w.u8((you.swimming ? 1 : 0) | (you.submerged ? 2 : 0) | (you.airlift ? 4 : 0) | (you.jumpAscent ? 8 : 0));
   if (you.airlift) w.u8(you.airlift.source).u8(you.airlift.destination).tick(you.airlift.startTick).u16(you.airlift.durationTicks);
@@ -473,7 +497,14 @@ export function encodeSnapshot(w: ByteWriter, snap: Snapshot): void {
   w.u8(creatures.length);
   for (const c of creatures) {
     w.entity(c.id).u8(c.species).f32(c.x).f32(c.y).f32(c.z)
-      .u16(quantYaw(c.yaw)).u8(clamp(Math.round(c.speed * 20), 0, 255)).u8((c.alert ? 1 : 0) | (c.dead ? 2 : 0));
+      .u16(quantYaw(c.yaw)).u8(clamp(Math.round(c.speed * 20), 0, 255))
+      .u8((c.alert ? 1 : 0) | (c.dead ? 2 : 0) | (c.windingUp ? 4 : 0) | (c.health !== undefined ? 8 : 0) | (c.rangedAttack ? 16 : 0));
+    if (c.health !== undefined) w.u8(clamp(Math.round(c.health * 255), 0, 255));
+    if (c.rangedAttack) {
+      const a = c.rangedAttack;
+      w.f32(a.originX).f32(a.originY).f32(a.originZ).f32(a.x).f32(a.y).f32(a.z)
+        .f32(a.radius).tick(a.fireTick).tick(a.impactTick);
+    }
   }
 }
 
@@ -515,6 +546,13 @@ export function decodeSnapshot(r: ByteReader): Snapshot {
   you.boostFuel = r.u8() / 255;
   you.vehicleHealth = r.u16();
   you.lockState = r.u8();
+  if (you.vehicle === VEHICLE.JET) {
+    const stage = r.u8();
+    if (stage) {
+      const bearing = unquantYaw(r.u16()), eta = r.u16() / 100;
+      if (stage <= 3) you.aircraftThreat = { stage: stage as 1 | 2 | 3, bearing, eta };
+    }
+  }
   const air = r.u8() / 10, liquidFlags = r.u8();
   if (air < 18) you.airSeconds = air;
   if (liquidFlags & 1) you.swimming = true;
@@ -597,7 +635,10 @@ export function decodeSnapshot(r: ByteReader): Snapshot {
   for (let i = 0; i < creatureCount; i++) {
     const id = r.entity(), species = r.u8(), x = r.f32(), y = r.f32(), z = r.f32();
     const yaw = unquantYaw(r.u16()), speed = r.u8() / 20, flags = r.u8();
-    creatures.push({ id, species, x, y, z, yaw, speed, alert: (flags & 1) !== 0, dead: (flags & 2) !== 0 });
+    creatures.push({ id, species, x, y, z, yaw, speed, alert: (flags & 1) !== 0, dead: (flags & 2) !== 0,
+      ...(flags & 4 ? { windingUp: true } : {}), ...(flags & 8 ? { health: r.u8() / 255 } : {}),
+      ...(flags & 16 ? { rangedAttack: { originX: r.f32(), originY: r.f32(), originZ: r.f32(),
+        x: r.f32(), y: r.f32(), z: r.f32(), radius: r.f32(), fireTick: r.tick(), impactTick: r.tick() } } : {}) });
   }
   return { tick, lastSeq, you, ents, pickups, vehicles, creatures };
 }
@@ -652,12 +693,25 @@ export function decodeExplosion(r: ByteReader): ExplosionEvent {
   };
 }
 
-export interface DeathEvent { victim: number; killer: number; weapon: number }
-export function encodeDeath(victim: number, killer: number, weapon: number): Uint8Array {
-  return new ByteWriter(10).u8(Msg.SDeath).entity(victim).entity(killer).u8(weapon).finish();
+export interface DeathMotion { x: number; y: number; z: number; vx: number; vy: number; vz: number; yaw: number }
+export interface DeathEvent { victim: number; killer: number; weapon: number; motion?: DeathMotion }
+export function encodeDeath(victim: number, killer: number, weapon: number, motion?: DeathMotion): Uint8Array {
+  const w = new ByteWriter(48).u8(Msg.SDeath).entity(victim).entity(killer).u8(weapon);
+  if (motion) for (const key of ['x', 'y', 'z', 'vx', 'vy', 'vz', 'yaw'] as const) {
+    if (!Number.isFinite(motion[key])) throw new Error('Invalid death motion');
+    w.f32(motion[key]);
+  }
+  return w.finish();
 }
 export function decodeDeath(r: ByteReader): DeathEvent {
-  return { victim: r.entity(), killer: r.entity(), weapon: r.u8() };
+  const event: DeathEvent = { victim: r.entity(), killer: r.entity(), weapon: r.u8() };
+  if (r.remaining) {
+    if (r.remaining !== 28) throw new Error('Invalid death motion length');
+    const motion = { x: r.f32(), y: r.f32(), z: r.f32(), vx: r.f32(), vy: r.f32(), vz: r.f32(), yaw: r.f32() };
+    if (!Object.values(motion).every(Number.isFinite)) throw new Error('Invalid death motion');
+    event.motion = motion;
+  }
+  return event;
 }
 
 export interface SpawnEvent { id: number; x: number; y: number; z: number }
@@ -765,5 +819,5 @@ export function decodeScores(r: ByteReader): ScoreRow[] {
 }
 
 export function encodeServerMessage(text: string): Uint8Array {
-  return new ByteWriter(80).u8(Msg.SMessage).str(text).finish();
+  return new ByteWriter(80).u8(Msg.SMessage).str(text, 255).finish();
 }

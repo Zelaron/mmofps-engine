@@ -161,7 +161,7 @@ function visibleTransforms(details: CaveDetails, x?: number, z?: number, radius 
   return result;
 }
 
-function sampleRoom(x: number, y: number, z: number, dx: number, dy: number, dz: number, _range?: number): TraceHit {
+function sampleRoom(x: number, y: number, z: number, dx: number, dy: number, dz: number, _range?: number, _computeNormal?: boolean, _minimumStep?: number): TraceHit {
   const dist = dy > 0 ? 12 : dy < 0 ? 3 : 6;
   return { hit: true, dist, x: x + dx * dist, y: y + dy * dist, z: z + dz * dist,
     nx: dy === 0 ? -dx : 0, ny: -dy, nz: dy === 0 ? -dz : 0 };

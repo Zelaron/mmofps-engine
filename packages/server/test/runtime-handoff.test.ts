@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Game, type ServerPlayer } from '../src/game.js';
-import { captureActors, type RuntimeHandoff } from '../src/runtime-handoff.js';
-import { BTN, VEHICLE, rotationFromEuler, vehicleDefinition } from '@shared/index';
+import { captureActors, checkedHandoff, type RuntimeHandoff } from '../src/runtime-handoff.js';
+import { BTN, VEHICLE, createMoveState, rotationFromEuler, vehicleDefinition } from '@shared/index';
 import { namespaceRange } from '@shared/entity-id';
 
 function game(namespace = 0): Game {
@@ -22,7 +22,8 @@ test('JSON handoff retains jumping, reloads, queued inputs, explosives and lag h
   Object.assign(p.state, { vx: 9.5, vy: 8.6, vz: -2, jumpHeld: true, jumpAscent: true, dodgeCd: .43, simulationTick: 1200 });
   Object.assign(p, { health: 77, weapon: 1, fireCd: .2, reloadWeapon: 1, reloadCd: .7,
     reloadHeld: true, regenBlockUntil: 1500, faction: 1, factionChangeAt: 1800,
-    fallCreditAttackerId: 100_001, fallCreditUntilTick: 1250, salvage: 137, spree: 3 });
+    fallCreditAttackerId: 100_001, fallCreditUntilTick: 1250, salvage: 137, spree: 3,
+    lastDeath: { x: 350, y: 27, z: -900 } });
   p.ammo[1].magazine = 0; p.discoveries.add('1337:city-2'); p.fullPickupContacts.add(0x80000009);
   source.queueInput(p, command(p, BTN.FORWARD | BTN.JUMP)); source.step();
   source.queueInput(p, command(p, BTN.FORWARD));
@@ -44,6 +45,7 @@ test('JSON handoff retains jumping, reloads, queued inputs, explosives and lag h
   assert.deepEqual(arrived.inputQueue, p.inputQueue); assert.equal(arrived.lastProcessedSeq, p.lastProcessedSeq);
   assert.equal(arrived.reloadCd, p.reloadCd); assert.deepEqual(arrived.ammo, p.ammo);
   assert.deepEqual(arrived.discoveries, p.discoveries); assert.deepEqual(arrived.fullPickupContacts, p.fullPickupContacts);
+  assert.deepEqual(arrived.lastDeath, p.lastDeath, 'regional handoff keeps the last-death map marker');
   arrived.ammo[0].magazine--; assert.notEqual(arrived.ammo[0].magazine, wire.players[0].ammo[0].magazine);
   arrived.ammo[0].magazine++;
   destination.step(); control.step();
@@ -81,7 +83,8 @@ test('a passenger handoff includes pilot, aircraft pose, both weapons and projec
 
 test('refused handoffs leave both authorities unchanged and local rollback retains the connection and timers', () => {
   const source = game(), p = source.addPlayer('Explorer', null, false, 100_000);
-  Object.assign(p, { recallSince: 1140, regenBlockUntil: 1300, respawnAtTick: -1, lastInputAtTick: 1198 });
+  Object.assign(p, { recallSince: 1140, regenBlockUntil: 1300, respawnAtTick: -1, lastInputAtTick: 1198,
+    spawnProtectedUntil: 1380, preferredSpawnId: 'base-city-2' });
   Object.assign(p.state, { vx: 14, vy: 4.2, dodgeCd: .7, simulationTick: 1200 });
   const detached = source.takeHandoff([p.id]), destination = game(1);
   destination.addPlayer('Already present', null, false, p.id);
@@ -91,6 +94,8 @@ test('refused handoffs leave both authorities unchanged and local rollback retai
   const [restored] = source.restoreHandoff(detached);
   assert.equal(restored, p); assert.equal(p.state.vx, 14); assert.equal(p.state.vy, 4.2); assert.equal(p.state.dodgeCd, .7);
   assert.equal(p.regenBlockUntil, 1312); assert.equal(p.recallSince, 1152); assert.equal(p.lastInputAtTick, 1210);
+  assert.equal(p.spawnProtectedUntil, 1392, 'spawn protection preserves remaining time across a worker handoff');
+  assert.equal(p.preferredSpawnId, 'base-city-2', 'the selected respawn base travels with the actor');
   assert.equal(p.state.simulationTick, 1200, 'platform carry retains the old world time');
   assert.equal(p.respawnAtTick, -1, 'sentinels never become active timers');
   assert.throws(() => source.restoreHandoff(detached), /occupied/);
@@ -106,4 +111,53 @@ test('refused handoffs leave both authorities unchanged and local rollback retai
     assert.equal(empty.players.size, 0); assert.equal(empty.projectiles.size, 0); assert.equal(empty.vehicles.size, 0);
   }
   assert.throws(() => empty.acceptHandoff(detached.record, new Map()), /connection/);
+});
+
+test('checked wire order remains stable while installed optional movement fields regain the factory layout', () => {
+  const source = game(), p = source.addPlayer('Transit', null, false, 100_000);
+  Object.assign(p.state, { simulationTick: 1200, jumpAscent: false, airSeconds: 7.25, swimming: false, submerged: false,
+    airlift: { source: 1, destination: 2, startTick: 1200, durationTicks: 300 } });
+  const wire = captureActors(source, [p.id]).record;
+  // Existing peers can send another key order and ordinary extra data. The
+  // durable receipt hashes that exact wire order, so validation must retain it.
+  wire.players[0].state = Object.fromEntries(Object.entries(wire.players[0].state).reverse()) as typeof p.state;
+  Object.defineProperty(wire.players[0].state, '__proto__', {
+    value: { retainedExtra: 'data' }, enumerable: true, configurable: true, writable: true,
+  });
+  const serialized = JSON.stringify(wire);
+  assert.equal(JSON.stringify(checkedHandoff(wire)), serialized);
+  const destination = game(1);
+  const [arrived] = destination.acceptHandoff(wire, sinks(wire));
+  const keys = Object.keys(createMoveState(0, 0, 0));
+  assert.deepEqual(Object.keys(arrived.state).slice(0, keys.length), keys);
+  assert.equal(arrived.state.simulationTick, 1200);
+  assert.equal(arrived.state.airSeconds, 7.25);
+  assert.deepEqual(arrived.state.airlift, p.state.airlift);
+  assert.notEqual(arrived.state.airlift, wire.players[0].state.airlift);
+  assert.equal(Object.getPrototypeOf(arrived.state), Object.prototype);
+  assert.deepEqual(Object.getOwnPropertyDescriptor(arrived.state, '__proto__'), {
+    value: { retainedExtra: 'data' }, enumerable: true, configurable: true, writable: true,
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(arrived.state)), JSON.parse(JSON.stringify(wire.players[0].state)));
+  assert.equal(JSON.stringify(wire), serialized, 'installation cannot reorder or mutate the receipt payload');
+});
+
+test('legacy handoffs may omit optional movement fields but still require all original field types', () => {
+  const source = game(), p = source.addPlayer('Legacy', null, false, 100_000);
+  const wire = captureActors(source, [p.id]).record;
+  const required = ['px', 'py', 'pz', 'vx', 'vy', 'vz', 'grounded', 'jumpHeld', 'dodgeCd', 'alive',
+    'vehicle', 'vehicleVariant', 'heading', 'boostFuel', 'vehiclePitch', 'vehicleRoll', 'boosting'];
+  const state = wire.players[0].state as unknown as Record<string, unknown>;
+  for (const key of Object.keys(state)) if (!required.includes(key)) delete state[key];
+  assert.doesNotThrow(() => checkedHandoff(wire));
+  const destination = game(1), [arrived] = destination.acceptHandoff(wire, sinks(wire));
+  assert.deepEqual(Object.keys(arrived.state), Object.keys(createMoveState(0, 0, 0)));
+  assert.equal(arrived.state.simulationTick, undefined); assert.equal(arrived.state.airlift, undefined);
+  for (const key of required) {
+    const missing = copy(wire), wrong = copy(wire);
+    delete (missing.players[0].state as unknown as Record<string, unknown>)[key];
+    (wrong.players[0].state as unknown as Record<string, unknown>)[key] = 'wrong type';
+    assert.throws(() => checkedHandoff(missing), /Incomplete handoff movement/, key);
+    assert.throws(() => checkedHandoff(wrong), /Incomplete handoff movement/, key);
+  }
 });

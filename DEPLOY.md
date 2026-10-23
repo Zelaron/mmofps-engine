@@ -22,7 +22,7 @@ The build automatically downloads two fixed-version font files and checks their 
 | `PORT`, `HOST` | `8080`, `0.0.0.0` | Gateway address, or an external worker's listen address. |
 | `DATA_DIR` | `data` in cluster mode | Universe SQLite database and a separate directory per local world. |
 | `MAX_PLAYERS` | `64` | Human admission limit per world; not a proven capacity claim. |
-| `BOTS` | `15` | Target population; bots step aside for humans. |
+| `BOTS` | `192` | Maximum bot-filled population target per planet, including humans. Default adaptive range: 96–192. |
 | `LOCAL_PLANETS` | `meridian,cinder,nacre` | Worlds supervised locally. An empty value starts only gateway/coordinator. |
 | `COORDINATOR_HOST`, `COORDINATOR_PORT` | `127.0.0.1`, free port | Private coordinator interface. |
 | `COORDINATOR_SECRET` | generated per local run | Service secret, at least 32 characters. Configure it for external workers. |
@@ -59,6 +59,6 @@ To update a checkout, stop the service, back up `data/`, use `git pull --ff-only
 
 ## Compatibility and saved worlds
 
-The current browser protocol is **25**. Since protocol 23, workers reserve durable entity ID blocks before simulation startup. A registered process ID cannot bootstrap again: generate a new UUID at each worker launch. The local cluster launcher already does this. Keep the coordinator database when upgrading; its allocation history prevents a restarted worker from colliding with entities still alive elsewhere. Update clients, the coordinator and all workers together.
+The current browser protocol is **28**. Since protocol 23, workers reserve durable entity ID blocks before simulation startup. A registered process ID cannot bootstrap again: generate a new UUID at each worker launch. The local cluster launcher already does this. Keep the coordinator database when upgrading; its allocation history prevents a restarted worker from colliding with entities still alive elsewhere. Update clients, the coordinator and all workers together.
 
 Startup migrates saved databases transactionally, including regional camp revisions and renewable resource receipts; retain a consistent pre-upgrade backup. Protocol 24 added authoritative base teleporter layouts, and protocol 25 added resource gathering. Regional camp loading does not enable a partitioned deployment: the current launcher and remaining simulation controllers still use one full authority per planet.

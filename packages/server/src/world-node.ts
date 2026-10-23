@@ -17,7 +17,13 @@ import { OutpostReplica, type RegionalOutposts, type OutpostCellUpdate } from '.
 import { Gathering } from './gathering.js';
 import type { ResourceNode } from '@shared/resources';
 import { RESOURCE_YIELD } from '@shared/resources';
+import { RegionGrid, type RegionLayout, type RegionBounds } from '@shared/regions';
+import type { Territory } from '@shared/frontier';
+import type { PlanetOwnership } from './coordinator.js';
 import type { ResourceReceipt } from './resource-ledger.js';
+import { OrbitalCampaign } from './orbital-campaign.js';
+import type { Bot } from './bots.js';
+import type { InputCmd } from '@shared/movement';
 
 export interface WorldNodeOptions { url: string; secret: string; id: string; planet: PlanetId; region?: string; advertise?: string }
 interface Lease {
@@ -25,6 +31,16 @@ interface Lease {
   conn: PlayerConn | null; player: ServerPlayer | null; transferring: boolean; building?: boolean;
 }
 interface Launch { lease: Lease; destination: PlanetId; tick: number; x: number; y: number; z: number; health: number }
+export function regionalOwnership(territories: readonly Pick<Territory, 'owner' | 'x' | 'z'>[], bounds: RegionBounds):
+  { ownership: PlanetOwnership; ownershipPoints: number } {
+  const ownership: PlanetOwnership = [0, 0, 0, 0];
+  let ownershipPoints = 0;
+  for (const point of territories) {
+    if (point.x < bounds.minX || point.x >= bounds.maxX || point.z < bounds.minZ || point.z >= bounds.maxZ) continue;
+    ownership[point.owner]++; ownershipPoints++;
+  }
+  return { ownership: ownershipPoints ? ownership.map(count => count / ownershipPoints) as PlanetOwnership : [1, 0, 0, 0], ownershipPoints };
+}
 export class WorldNode {
   private readonly control: ControlClient;
   private readonly leases = new Map<string, Lease>();
@@ -37,18 +53,21 @@ export class WorldNode {
   private endpoint = '';
   private authorityUntil = 0;
   private authorityEpoch: number | undefined;
+  private ownershipBounds: RegionBounds | null = null;
   private ready = false;
   private failure: Error | null = null;
   private readonly clock = new SimulationClock();
   private readonly outpostReplica: OutpostReplica;
   private outpostSyncGeneration = 0;
   private outpostViewUntil = 0;
+  private campaign: OrbitalCampaign | null = null;
   targetTick(): number { return this.clock.target(); }
   millisecondsUntil(tick: number): number { return this.clock.millisecondsUntil(tick); }
   get status() { return { ready: this.ready && !this.failure && !this.entities?.status.failed && performance.now() < this.authorityUntil &&
       performance.now() < this.outpostViewUntil && !this.outpostsNeedSync,
     epoch: this.authorityEpoch ?? 0, targetTick: this.ready ? this.targetTick() : null, uncertaintyMs: Number.isFinite(this.clock.uncertaintyMs) ? this.clock.uncertaintyMs : null,
-    entities: this.entities?.status, region: this.options.region ?? 'world', outpostRevision: this.outpostReplica.cursor?.revision }; }
+    entities: this.entities?.status, region: this.options.region ?? 'world', outpostRevision: this.outpostReplica.cursor?.revision,
+    campaign: this.campaign?.status }; }
   private outpostsNeedSync = false;
   private readonly pending = new Set<Promise<unknown>>();
   constructor(private readonly game: Game, readonly options: WorldNodeOptions, private readonly capacity: number, private readonly entities?: EntityPool) {
@@ -56,8 +75,30 @@ export class WorldNode {
     this.gathering = new Gathering(game, (player, node, expected) => this.extract(player, node, expected));
     this.outpostReplica = new OutpostReplica(game.world.outposts, { id: options.id, planet: options.planet, region: options.region ?? 'world' });
   }
+  attachBots(bots: Bot[], targetPopulation: number): void {
+    if (this.campaign) throw new Error('Campaign roster is already attached');
+    this.campaign = new OrbitalCampaign(this.game,bots,{
+      planet:this.options.planet,
+      call:<T>(method:string,body:unknown)=>this.control.call<T>(method,body),
+      authority:()=>this.authorityEpoch===undefined?null:{id:this.options.id,epoch:this.authorityEpoch},
+      ready:()=>this.status.ready,
+      populationLimit:()=>{
+        let humans=0;for(const p of this.game.players.values())if(!p.isBot)humans++;
+        return Math.max(0,targetPopulation-humans);
+      },
+      owns:(x,z)=>!!this.ownershipBounds && x>=this.ownershipBounds.minX && x<this.ownershipBounds.maxX &&
+        z>=this.ownershipBounds.minZ && z<this.ownershipBounds.maxZ,
+    });
+  }
+  botCommand(bot: Bot, command: InputCmd): InputCmd { return this.campaign?.command(bot,command)??command; }
+  protectBot(bot: Bot): boolean { return this.campaign?.protected(bot)??false; }
+  frozenBot(bot: Bot): boolean { return this.campaign?.frozen(bot)??false; }
+  retireBot(bot: Bot): void { this.campaign?.retire(bot); }
   async start(port: number): Promise<void> {
     this.endpoint = this.options.advertise ?? `ws://127.0.0.1:${port}/ws`;
+    const layout = await this.control.call<RegionLayout>('regions/layout', { planet: this.options.planet });
+    this.ownershipBounds = new RegionGrid(layout).get(this.options.region ?? 'world');
+    if (!this.ownershipBounds) throw new Error('World region is not in the configured layout');
     const waitingUntil = performance.now() + NODE_TIMEOUT_MS + 2500;
     for (;;) {
       try { await this.heartbeat(); break; }
@@ -148,7 +189,8 @@ export class WorldNode {
     const rows = active.map(l => this.checkpoint(l));
     let humans = 0; for (const p of this.game.players.values()) if (!p.isBot) humans++;
     const grant = await this.control.call<AuthorityGrant>('register', { id: this.options.id, planet: this.options.planet,
-      region: this.options.region ?? 'world', url: this.endpoint, capacity: this.capacity, humans, tick: this.game.tick, epoch: this.authorityEpoch });
+      region: this.options.region ?? 'world', url: this.endpoint, capacity: this.capacity, humans, tick: this.game.tick, epoch: this.authorityEpoch,
+      ...(this.game.frontier && this.ownershipBounds ? regionalOwnership(this.game.frontier.territories, this.ownershipBounds) : {}) });
     if (this.authorityEpoch !== undefined && grant.epoch !== this.authorityEpoch) throw new ControlError('fenced', 'World authority changed');
     this.entities?.bind(grant.epoch);
     this.authorityEpoch = grant.epoch;
@@ -189,6 +231,7 @@ export class WorldNode {
       return false;
     }
     this.entities?.pump();
+    this.campaign?.step();
     for (const lease of this.leases.values()) if (performance.now() >= lease.validUntil) lease.conn?.disconnect(1013, 'Reconnecting to character authority');
     for (const lease of this.leases.values()) if (lease.player && !lease.transferring && this.game.players.get(lease.player.id) === lease.player)
       this.gathering.step(lease.player, !!lease.building || this.launches.has(lease.key));
@@ -327,6 +370,7 @@ export class WorldNode {
     this.ready = false;
     if (this.timer) clearInterval(this.timer);
     if (this.resourceTimer) clearInterval(this.resourceTimer);
+    await this.campaign?.close();
     await this.resourceSync;
     await this.inFlight;
     await this.entities?.close();

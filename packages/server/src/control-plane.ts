@@ -19,6 +19,10 @@ export async function startControlPlane(coordinator: Coordinator, secret: string
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       let result: unknown;
       switch (req.url) {
+        case '/campaign/exchange': result = coordinator.campaignExchange(body); break;
+        case '/campaign/depart': result = coordinator.departCampaign(body); break;
+        case '/campaign/cancel': result = coordinator.cancelCampaign(body); break;
+        case '/campaign/transfer': result = coordinator.inspectCampaign(body.id, body.authority); break;
         case '/regions/configure': result = coordinator.configureRegions(body.planet, body.layout); break;
         case '/regions/layout': result = coordinator.layout(body.planet); break;
         case '/regions/route': result = coordinator.route(body.planet, body.region ?? coordinator.region(body.planet, body.position).id); break;

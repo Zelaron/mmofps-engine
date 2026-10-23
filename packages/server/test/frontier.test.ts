@@ -9,18 +9,82 @@ import { SpatialIndex } from '../src/spatial-index.js';
 import { TICK_RATE } from '@shared/constants';
 import { ByteReader, decodeSnapshot, BTN, Msg } from '@shared/index';
 import { decodeFrontierState, encodeFrontierState } from '@shared/frontier-wire';
+import { CAPTURE_SECONDS, inCaptureRange } from '@shared/frontier';
+import { PLANETS } from '@shared/universe';
+import { capsuleClearance } from '@shared/physics';
 
-test('neutral explorers and allies are protected; hostile combat and self damage remain', () => {
+function damage(game: Game, victim: ServerPlayer, attacker: ServerPlayer): void {
+  victim.spawnProtectedUntil = -1;
+  (game as unknown as { damage(v: ServerPlayer, n: number, a: ServerPlayer, w: number, x: number, y: number, z: number): void })
+    .damage(victim, 20, attacker, 1, 3, 5, 0);
+}
+
+test('new arrivals join either combat faction and exchange damage with enemy bots without enlisting', () => {
   const game = new Game(1337, { frontier: true });
-  const explorer = game.addPlayer('Explorer', null), a = game.addPlayer('Accord', null), b = game.addPlayer('Helix', null);
-  a.faction = 1; b.faction = 2;
-  const damage = (victim: ServerPlayer, attacker: ServerPlayer) => (game as unknown as { damage(v: ServerPlayer, n: number, a: ServerPlayer, w: number, x: number, y: number, z: number): void }).damage(victim, 20, attacker, 1, 3, 5, 0);
-  assert.equal(game.areEnemies(a, explorer), false);
-  damage(explorer, a); damage(a, explorer);
-  assert.equal(explorer.health, 100); assert.equal(a.health, 100); assert.equal(explorer.state.vy, 0);
-  damage(b, a); assert.equal(b.health, 80);
-  b.faction = 1; damage(b, a); assert.equal(b.health, 80);
-  damage(a, a); assert.equal(a.health, 80);
+  const bots = ['Accord', 'Helix', 'Vanguard'].map(name => game.addPlayer(name, null, true));
+  const factions = new Set<number>();
+  for (let i = 0; i < 24; i++) {
+    const player = game.addPlayer(`Arrival ${i}`, null);
+    assert.ok(player.faction >= 1 && player.faction <= 3);
+    factions.add(player.faction);
+    const enemy = bots.find(bot => bot.faction !== player.faction)!;
+    const ally = bots.find(bot => bot.faction === player.faction)!;
+    enemy.health = ally.health = 100;
+    assert.equal(game.areEnemies(enemy, player), true, 'enemy AI can acquire the new arrival');
+    damage(game, enemy, player); damage(game, player, enemy);
+    assert.equal(enemy.health, 80); assert.equal(player.health, 80);
+    damage(game, ally, player); damage(game, player, ally);
+    assert.equal(ally.health, 100); assert.equal(player.health, 80);
+    const state = game.frontier!.snapshot(player, game.players.values(), game.tick);
+    assert.equal(state.you.faction, player.faction, 'the initial HUD receives the assigned allegiance');
+  }
+  assert.deepEqual(factions, new Set([1, 2, 3]));
+});
+
+test('old neutral saves receive a combat faction once and retain their progress', () => {
+  const game = new Game(1337, { frontier: true }), old = game.addPlayer('Old explorer', null);
+  old.faction = 0; old.salvage = 137; old.health = 63; old.ammo[1].magazine = 7;
+  old.discoveries.add('1337:city-2');
+  const saved = capturePlayer(game, old); delete saved.factionAssigned;
+  const returning = game.addPlayer('Returning', null), assigned = returning.faction;
+  restorePlayer(game, returning, saved);
+  assert.ok(assigned >= 1 && assigned <= 3); assert.equal(returning.faction, assigned);
+  assert.equal(returning.salvage, 137); assert.equal(returning.health, 63); assert.equal(returning.ammo[1].magazine, 7);
+  assert.deepEqual(returning.discoveries, old.discoveries);
+  assert.deepEqual([returning.state.px, returning.state.py, returning.state.pz], [old.state.px, old.state.py, old.state.pz]);
+  const nextSave = capturePlayer(game, returning), next = game.addPlayer('Next login', null);
+  next.faction = assigned === 1 ? 2 : 1;
+  restorePlayer(game, next, nextSave);
+  assert.equal(next.faction, assigned, 'reconnect keeps the assigned faction');
+  for (const faction of [1, 2, 3] as const) {
+    restorePlayer(game, next, { ...saved, faction });
+    assert.equal(next.faction, faction, 'legacy combat allegiance is preserved too');
+  }
+});
+
+test('players cannot enlist as unclaimed and all three combat allegiances persist', () => {
+  const game = new Game(1337, { frontier: true }), player = game.addPlayer('Soldier', null);
+  const original = player.faction;
+  assert.ok(game.frontier!.enlist(player, 0, game.tick)); assert.equal(player.faction, original);
+  for (const faction of [1, 2, 3] as const) {
+    player.faction = faction;
+    const saved = capturePlayer(game, player), returning = game.addPlayer('Returning', null);
+    restorePlayer(game, returning, saved); assert.equal(returning.faction, faction);
+    const destination = new Game(7331, { frontier: true }), arriving = destination.addPlayer('Arriving', null);
+    restorePlayer(destination, arriving, { ...saved, seed: destination.seed, arrival: true });
+    assert.equal(arriving.faction, faction);
+  }
+});
+
+test('all three opposing factions exchange damage while allies remain protected', () => {
+  const game = new Game(1337, { frontier: true });
+  const actors = [1, 2, 3].map((faction, i) => { const p = game.addPlayer(`Soldier ${i}`, null); p.faction = faction as 1 | 2 | 3; return p; });
+  for (const a of actors) for (const b of actors) if (a !== b) {
+    b.health = 100; assert.equal(game.areEnemies(a, b), true); damage(game, b, a); assert.equal(b.health, 80);
+  }
+  actors[1].faction = actors[0].faction; actors[1].health = 100;
+  damage(game, actors[1], actors[0]); assert.equal(actors[1].health, 100);
+  actors[0].health = 100; damage(game, actors[0], actors[0]); assert.equal(actors[0].health, 80);
 });
 
 test('territory capture needs presence; neutral players do not contest; human presence is five times a bot', () => {
@@ -28,23 +92,67 @@ test('territory capture needs presence; neutral players do not contest; human pr
   const player = game.addPlayer('Scout', null), neutral = game.addPlayer('Explorer', null), bot = game.addPlayer('Bot', null, true);
   const site = frontier.territories[1]; site.owner = 0; site.influence = 0;
   for (const p of [player, neutral, bot]) { p.state.px = site.x; p.state.py = site.y; p.state.pz = site.z; }
-  player.faction = 1; bot.faction = 2;
+  player.faction = 1; neutral.faction = 0; bot.faction = 2;
   frontier.step([player, neutral, bot], 0, 10); assert.equal(site.influence, 0); assert.equal(site.contested, true);
-  frontier.step([player, neutral], 0, 7); assert.ok(Math.abs(site.influence + .2) < 1e-9);
+  frontier.step([player, neutral], 0, CAPTURE_SECONDS * .2); assert.ok(Math.abs(site.influence + .2) < 1e-9);
   site.influence = 0;
-  frontier.step([bot, neutral], 0, 7); assert.ok(Math.abs(site.influence - .04) < 1e-9);
-  frontier.step([player, neutral], 0, 40); assert.equal(site.owner, 1);
+  frontier.step([bot, neutral], 0, CAPTURE_SECONDS * .2); assert.ok(Math.abs(site.influence - .04) < 1e-9);
+  frontier.step([player, neutral], 0, CAPTURE_SECONDS * 1.1); assert.equal(site.owner, 1);
   player.state.py += 20;
   const before = site.influence; frontier.step([player], 0, 20); assert.equal(site.influence, before);
 });
 
-test('standing down is refused during combat and the allegiance cooldown', () => {
+test('every city and harbor flag is supported, dry, reachable and capturable on all planets', () => {
+  for (const { seed } of PLANETS) {
+    const game = new Game(seed, { frontier: true }), frontier = game.frontier!, player = game.addPlayer('Captor', null);
+    player.faction = 1;
+    for (const site of frontier.territories) {
+      const label = `${seed}: ${site.id}`;
+      assert.ok(capsuleClearance(game.world, site.x, site.y + .02, site.z) >= -.02, `${label}: room to stand`);
+      assert.ok(game.world.sdf(site.x, site.y - .12, site.z) <= 0, `${label}: supported floor`);
+      assert.equal(game.world.liquidAt(site.x, site.y, site.z), undefined, `${label}: dry flag`);
+      Object.assign(player.state, { px: site.x, py: site.y, pz: site.z });
+      assert.ok(inCaptureRange(site, player.state.px, player.state.py, player.state.pz));
+      site.owner = 0; site.influence = 0;
+      frontier.step([player], 0, CAPTURE_SECONDS + .01);
+      assert.equal(site.owner, 1, `${label}: standing beside the flag captures it`);
+    }
+  }
+});
+
+test('enemy territory neutralizes, pauses while contested, captures and persists with clear announcements', () => {
+  const packets: Uint8Array[] = [], game = new Game(1337, { frontier: true }), frontier = game.frontier!;
+  const p = game.addPlayer('Captor', { send: bytes => packets.push(bytes) }), enemy = game.addPlayer('Defender', null);
+  p.faction = 1; enemy.faction = 2;
+  const site = frontier.territories[1]; site.owner = 2; site.influence = 1;
+  for (const actor of [p, enemy]) Object.assign(actor.state, { px: site.x, py: site.y, pz: site.z });
+  frontier.step([p], 0, CAPTURE_SECONDS / 2);
+  assert.equal(site.influence, .5); assert.equal(site.owner, 2);
+  assert.ok(Math.abs(site.captureRate! + 1 / CAPTURE_SECONDS) < 1e-10);
+  frontier.step([p, enemy], 1, 60);
+  assert.equal(site.contested, true); assert.equal(site.influence, .5); assert.equal(site.captureRate, 0);
+  frontier.step([p], 2, CAPTURE_SECONDS / 2);
+  assert.equal(site.owner, 0); assert.equal(site.influence, 0);
+  frontier.step([p], 3, CAPTURE_SECONDS / 2);
+  assert.equal(site.influence, -.5);
+  frontier.step([], 4, 60); assert.equal(site.influence, -.5); assert.equal(site.captureRate, 0);
+  frontier.step([p], 5, CAPTURE_SECONDS / 2);
+  assert.equal(site.owner, 1); assert.equal(site.influence, -1);
+  const messages = packets.filter(bytes => bytes[0] === Msg.SMessage).map(bytes => { const r = new ByteReader(bytes); r.u8(); return r.str(); });
+  assert.ok(messages.some(message => message.includes('neutralized')));
+  assert.ok(messages.some(message => message.includes('captured')));
+  const next = new Game(1337, { frontier: true }); next.frontier!.restore(frontier.save());
+  assert.equal(next.frontier!.territories.find(t => t.id === site.id)!.owner, 1);
+  assert.equal(next.frontier!.territories.find(t => t.id === site.id)!.influence, -1);
+});
+
+test('faction changes are refused during combat and the allegiance cooldown', () => {
   const game = new Game(1337, { frontier: true }), player = game.addPlayer('Pilot', null);
-  assert.equal(game.frontier!.enlist(player, 1, 0), null);
-  assert.ok(game.frontier!.enlist(player, 0, 1));
+  assert.equal(game.frontier!.enlist(player, player.faction === 1 ? 2 : 1, 0), null);
+  assert.ok(game.frontier!.enlist(player, 3, 1));
   player.regenBlockUntil = 90 * TICK_RATE;
-  assert.ok(game.frontier!.enlist(player, 0, 40 * TICK_RATE));
-  assert.equal(game.frontier!.enlist(player, 0, 91 * TICK_RATE), null);
+  assert.ok(game.frontier!.enlist(player, 3, 40 * TICK_RATE));
+  assert.equal(game.frontier!.enlist(player, 3, 91 * TICK_RATE), null);
 });
 
 test('strategic messages carry full city names and territory lists beyond legacy chat limits', () => {

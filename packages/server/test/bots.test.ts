@@ -28,20 +28,20 @@ const GRAVITY = ARTILLERY.gravity ?? 16;
 const MUZZLE_OFFSET = 0.5;
 const MAX_FLIGHT_TIME = 12;
 
-test('the default fifteen-bot roster is vivid, unique, and wire-safe', () => {
+test('the larger default roster preserves vivid, unique, wire-safe names', () => {
   const expected = [
     'Steven Seagull', 'Bruise Lee', 'Spruce Willis', 'Snackie Chan',
     'Jason Mimosa', 'Harrison Sword', 'John Lambo', 'Duck Norris',
     'Sylvester Calzone', 'Lint Eastwood', 'Rat Damon', 'Tom Booze',
     'Roger Boar', 'Russell Dough', 'Orlando Broom',
   ];
-  assert.equal(DEFAULT_TARGET_POPULATION, expected.length);
+  assert.equal(DEFAULT_TARGET_POPULATION, 192);
   assert.deepEqual(expected.map((_name, i) => botName(i)), expected);
   assert.equal(botName(15), 'Steven Seagull-2');
   assert.equal(botName(29), 'Orlando Broom-2');
   assert.equal(botName(30), 'Steven Seagull-3');
 
-  const capacityRoster = Array.from({ length: 64 }, (_unused, i) => botName(i));
+  const capacityRoster = Array.from({ length: DEFAULT_TARGET_POPULATION }, (_unused, i) => botName(i));
   assert.equal(new Set(capacityRoster).size, capacityRoster.length);
   assert.ok(capacityRoster.every((name) => name.length <= NET.MAX_NAME_LEN));
 });
@@ -739,6 +739,7 @@ function fakeGame(
     tick: 0,
     areEnemies: Game.prototype.areEnemies,
     players: new Map(players.map((p) => [p.id, p])),
+    vehicles: new Map(),
     world: terrain,
   } as unknown as Game;
 }

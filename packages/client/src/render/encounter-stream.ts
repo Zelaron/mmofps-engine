@@ -1,5 +1,6 @@
 import { ENCOUNTER_REGION_SIZE, ENCOUNTER_CACHE_LIMIT, type CavePOI } from '@shared/encounters';
 import type { TeleporterPad } from '@shared/teleporters';
+import type { TransportSnapshot } from '@shared/transport';
 
 export interface EncounterStats { cached: number; wanted: number; pending: string | null }
 export interface EncounterSource {
@@ -11,7 +12,7 @@ export interface EncounterSource {
   dispose?(): void;
 }
 export type EncounterWorkerRequest =
-  | { type: 'init'; seed: number; base: readonly TeleporterPad[] }
+  | { type: 'init'; seed: number; base: readonly TeleporterPad[]; transportSnapshot?: TransportSnapshot }
   | { type: 'select'; request: number; points: readonly { x: number; z: number }[] };
 export interface EncounterWorkerState {
   type: 'state'; request: number; revision: number; stats: EncounterStats;
@@ -42,7 +43,8 @@ export class EncounterStream implements EncounterSource {
   revision = 0;
 
   constructor(seed: number, base: readonly TeleporterPad[],
-    factory: () => EncounterWorkerEndpoint = () => new Worker('encounters.worker.js')) {
+    factory: () => EncounterWorkerEndpoint = () => new Worker('encounters.worker.js'),
+    private readonly canGenerate: () => boolean = () => true, transportSnapshot?: TransportSnapshot) {
     this.flat = base.slice();
     try {
       const worker = this.worker = factory();
@@ -58,7 +60,7 @@ export class EncounterStream implements EncounterSource {
       };
       worker.onerror = () => this.stopFailedWorker();
       worker.onmessageerror = () => this.stopFailedWorker();
-      worker.postMessage({ type: 'init', seed, base });
+      worker.postMessage({ type: 'init', seed, base, ...(transportSnapshot ? { transportSnapshot } : {}) });
     } catch { this.stopFailedWorker(); }
   }
 
@@ -69,7 +71,7 @@ export class EncounterStream implements EncounterSource {
   }
 
   update(points: readonly { x: number; z: number }[], _budgetMs?: number, _maxSteps?: number): boolean {
-    if (this.disposed) return false;
+    if (this.disposed || !this.canGenerate()) return false;
     const cells = [...new Set(points.filter(p => Number.isFinite(p.x + p.z)).map(p =>
       `${Math.floor(p.x / ENCOUNTER_REGION_SIZE)},${Math.floor(p.z / ENCOUNTER_REGION_SIZE)}`))].sort().slice(0, ENCOUNTER_CACHE_LIMIT);
     const selection = cells.join(';');

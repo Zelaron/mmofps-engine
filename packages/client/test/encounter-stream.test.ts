@@ -22,6 +22,21 @@ class FakeWorker implements EncounterWorkerEndpoint {
   emit(message: EncounterWorkerState) { this.onmessage?.({ data: message } as MessageEvent<EncounterWorkerState>); }
 }
 
+test('encounter startup gate retains base pads and selects only the latest position when released', () => {
+  let terrainReady = false;
+  const worker = new FakeWorker(), stream = new EncounterStream(1337, base, () => worker, () => terrainReady);
+  try {
+    stream.update([{ x: 1, z: 2 }]);
+    stream.update([{ x: 1200, z: 4 }]);
+    assert.equal(worker.messages.length, 1, 'cold regional generation waits for terrain');
+    assert.deepEqual(stream.pads, base, 'authoritative base transport remains immediately available');
+    terrainReady = true; stream.update([{ x: 2300, z: 4 }]);
+    assert.deepEqual(worker.messages[1], { type: 'select', request: 1, points: [{ x: 2560, z: 512 }] });
+    stream.update([{ x: 2301, z: 4 }]);
+    assert.equal(worker.messages.length, 2);
+  } finally { stream.dispose(); }
+});
+
 test('encounter stream sends district changes only and rejects stale background selections', () => {
   const worker = new FakeWorker(), stream = new EncounterStream(1337, base, () => worker);
   assert.deepEqual(stream.pads, base, 'base transport is available before any worker result');
@@ -73,6 +88,75 @@ test('unavailable or failed encounter workers retain existing transport without 
   } finally { EncounterField.prototype.update = original; }
 });
 
+test('encounter cold slices earn local rest that newer selections cannot bypass, while remote cadence stays unchanged', async () => {
+  const result = await build({ entryPoints: [fileURLToPath(new URL('../src/render/encounters.worker.ts', import.meta.url))],
+    bundle: true, format: 'iife', platform: 'browser', target: 'es2020', write: false, logLevel: 'silent',
+    plugins: [{ name: 'measured-cold-encounter', setup(plugin) {
+      plugin.onLoad({ filter: /[/\\]shared[/\\]src[/\\]encounters\.ts$/ }, () => ({ loader: 'js', contents: `
+        export class EncounterField {
+          revision = 0; regions = []; pois = [];
+          stats = { cached: 0, wanted: 1, pending: 'cold' };
+          constructor(world, base) { this.pads = base; }
+          update(points, budget, steps) {
+            globalThis.recordSlice(points, budget, steps);
+            this.revision++;
+            if (this.revision >= 2) {
+              this.regions = [{}]; this.stats = { cached: 1, wanted: 1, pending: null };
+            }
+          }
+        }` }));
+    } }] });
+  for (const hostname of ['localhost', 'game.example']) {
+    let now = 0, timerId = 0;
+    const pending = new Map<number, { callback: () => void; due: number }>();
+    const messages: EncounterWorkerState[] = [], calls: { points: unknown; budget: number; steps: number }[] = [];
+    const self = { onmessage: null as ((event: { data: EncounterWorkerRequest }) => void) | null,
+      postMessage: (message: EncounterWorkerState) => messages.push(structuredClone(message)) };
+    runInNewContext(result.outputFiles[0].text, { self, location: { hostname }, performance: { now: () => now },
+      recordSlice: (points: unknown, budget: number, steps: number) => {
+        calls.push({ points: structuredClone(points), budget, steps }); now += 100;
+      },
+      setTimeout: (callback: () => void, delay: number) => {
+        pending.set(++timerId, { callback, due: now + delay }); return timerId;
+      }, clearTimeout: (id: number) => pending.delete(id) });
+    const send = (data: EncounterWorkerRequest) => self.onmessage!({ data });
+    const runNext = () => {
+      assert.equal(pending.size, 1);
+      const [id, timer] = pending.entries().next().value!;
+      pending.delete(id); now = timer.due; timer.callback();
+    };
+    send({ type: 'init', seed: 1337, base });
+    send({ type: 'select', request: 1, points: [{ x: 1, z: 1 }] });
+    assert.equal(pending.values().next().value!.due, 8, 'first selection keeps its original eight-ms wake');
+    runNext();
+    assert.equal(now, 108);
+    const rest = hostname === 'localhost' ? 300 : 8;
+    const deadline = 108 + rest;
+    assert.equal(pending.values().next().value!.due, deadline, 'rest accounts for the entire cold overrun');
+    now++;
+    send({ type: 'select', request: 2, points: [{ x: 2, z: 2 }] });
+    send({ type: 'select', request: 3, points: [{ x: 3, z: 3 }] });
+    assert.equal(pending.size, 1);
+    assert.equal(pending.values().next().value!.due, deadline, 'travel cannot reset the existing rest deadline');
+    runNext();
+    assert.deepEqual(calls, [
+      { points: [{ x: 1, z: 1 }], budget: 4, steps: 12 },
+      { points: [{ x: 3, z: 3 }], budget: 4, steps: 12 },
+    ], 'the generator retains its canonical limits and receives the newest selection');
+    assert.equal(messages.at(-1)!.request, 3);
+    assert.equal(pending.size, 0, 'completed districts go idle');
+    const completedAt = now;
+    now++;
+    send({ type: 'select', request: 4, points: [] });
+    assert.ok(pending.values().next().value!.due >= completedAt + rest,
+      'a new selection also respects the last completed slice\'s rest');
+    send({ type: 'init', seed: 7331, base });
+    assert.equal(pending.size, 0, 'world replacement cancels the old rest timer');
+    send({ type: 'select', request: 1, points: [{ x: 9, z: 9 }] });
+    assert.equal(pending.values().next().value!.due, now + 8, 'the replacement world starts with a fresh deadline');
+  }
+});
+
 test('bundled encounter worker coalesces travel, yields between slices and matches canonical pads', async () => {
   const result = await build({ entryPoints: [fileURLToPath(new URL('../src/render/encounters.worker.ts', import.meta.url))],
     bundle: true, format: 'iife', platform: 'browser', target: 'es2020', write: false, logLevel: 'silent' });
@@ -109,7 +193,7 @@ test('bundled encounter worker coalesces travel, yields between slices and match
   self.onmessage!({ data: { type: 'select', request: 3, points: [] } });
   assert.equal(pending.size, 1, 'an idle worker wakes for new selection');
   const [id, callback] = pending.entries().next().value!;
-  pending.delete(id); callback();
+  pending.delete(id); now += 8; callback();
   assert.equal(pending.size, 0);
   assert.deepEqual(messages.at(-1)!.pads, base, 'leaving all active districts releases regional pad data');
   assert.deepEqual(messages.at(-1)!.pois, []);

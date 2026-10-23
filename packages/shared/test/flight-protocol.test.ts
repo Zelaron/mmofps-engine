@@ -49,8 +49,23 @@ test('jet snapshots preserve full rotations past vertical and upside down at a b
     assert.equal(result.decoded.creatures![0].id, 19);
     const ground = roundtrip({ ...snapshot, you: { ...snapshot.you, vehicle: VEHICLE.TANK },
       ents: snapshot.ents.map(e => e.kind === ENT_PLAYER ? { ...e, vehicle: VEHICLE.TANK } : e) });
-    assert.equal(result.bytes - ground.bytes, 16 + 8,
-      'only jets add16 owner bytes and8 remote bytes; ordinary player/ground snapshots stay unchanged');
+    assert.equal(result.bytes - ground.bytes, 16 + 8 + 1,
+      'jets add 16 owner rotation bytes, 8 remote rotation bytes and 1 threat flag; ground snapshots stay unchanged');
     assert.equal(ground.decoded.you.vehicleRotation, undefined);
+  }
+});
+
+test('each aircraft seat round-trips tracking, lock and incoming warnings without disturbing trailing entities',()=>{
+  for(const seat of [0,1]) for(const stage of [1,2,3] as const) {
+    const snapshot:Snapshot={tick:90,lastSeq:80,you:{px:0,py:100,pz:0,vx:0,vy:0,vz:-132,
+      grounded:false,alive:true,dodgeCd:0,health:100,weapon:1,cooldown:0,ammo:createFullAmmoLoadout(),
+      reloadWeapon:-1,reloadCooldown:0,reloadHeld:false,vehicle:VEHICLE.JET,vehicleId:40,seat,
+      heading:0,boostFuel:1,vehicleHealth:600,lockState:0,aircraftThreat:{stage,bearing:Math.PI/2,eta:stage===3?1.25:0}},
+      ents:[{kind:ENT_PROJECTILE,id:900,owner:51,weapon:3,x:0,y:100,z:180,vx:0,vy:0,vz:-300}]};
+    const {decoded}=roundtrip(snapshot);
+    assert.deepEqual(decoded.you.aircraftThreat,snapshot.you.aircraftThreat);
+    assert.deepEqual(decoded.ents,snapshot.ents);
+    const quiet=roundtrip({...snapshot,you:{...snapshot.you,aircraftThreat:undefined}});
+    assert.equal(quiet.decoded.you.aircraftThreat,undefined);
   }
 });

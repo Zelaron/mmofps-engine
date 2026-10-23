@@ -156,7 +156,8 @@ export interface UndergroundStructure { site: StructureSite; solids: Box[] }
  * outposts cannot recurse through their own collision broad phase. */
 export function generateUndergroundStructure(seed: number, cellX: number, cellZ: number,
   terrain: (x: number, y: number, z: number) => number,
-  height: (x: number, z: number) => number): UndergroundStructure | null {
+  height: (x: number, z: number) => number,
+  placementAllowed?: (structure: UndergroundStructure) => boolean): UndergroundStructure | null {
   const key = hash2i(seed ^ 0x71095, cellX, cellZ);
   if (unit(key) > 0.32) return null;
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -217,8 +218,10 @@ export function generateUndergroundStructure(seed: number, cellX: number, cellZ:
       add(side * 5.5, 4.5, -5.5, 2.8, 0.2, 2.5);
       add(side * 5.5, 2.2, -3.3, 0.35, 2.2, 0.35);
     }
-    return { site: { kind: STRUCTURE_KIND.RESEARCH_STATION, x, z, top,
+    const result: UndergroundStructure = { site: { kind: STRUCTURE_KIND.RESEARCH_STATION, x, z, top,
       hx: 8.5, hz: 8.5, rotated: false, underground: true }, solids };
+    if (placementAllowed && !placementAllowed(result)) continue;
+    return result;
   }
   return null;
 }

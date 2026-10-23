@@ -1,7 +1,9 @@
-import { clamp, lerp, smoothstep } from './math.js';
+import { clamp, lerp, smoothstep, hypot2 } from './math.js';
 import { hash2i, unit } from './rng.js';
 import { generateCities, type CityDistrict } from './cities.js';
 import { capitalBoundary } from './capital-geometry.js';
+import { gradeLiquidTerrain, liquidFootprint, surfaceLiquidVolumes } from './liquids.js';
+import { detourRoad } from './road-routing.js';
 
 export const LANDSCAPE_CELL = 1024;
 const ROAD_TILE = 128;
@@ -25,6 +27,40 @@ export interface RoadSample {
   dx: number; dz: number;
   gradeWeight: number;
 }
+
+/** Constant work shared by every terrain sample in a road tile. */
+interface RoadTileSegment {
+  readonly segment: RoadSegment;
+  readonly dx: number; readonly dz: number;
+  readonly length2: number; readonly length: number;
+  readonly chordWeight: number;
+  readonly minX: number; readonly maxX: number;
+  readonly minZ: number; readonly maxZ: number;
+}
+interface RoadTile {
+  segments: readonly RoadTileSegment[];
+  cells: Map<number, readonly RoadTileSegment[]>;
+}
+
+function prepareRoadSegment(segment: RoadSegment): RoadTileSegment {
+  const dx = segment.b.x - segment.a.x, dz = segment.b.z - segment.a.z;
+  const length2 = dx * dx + dz * dz;
+  const reach = segment.dramatic ? 180 : 90;
+  // Keep the broad phase conservative even when endpoint interpolation
+  // rounds past an endpoint by a few ulps. The exact distance check below
+  // still decides the original 90/180m cutoff, including its boundary.
+  const padding = Number.EPSILON * 8 * (Math.abs(segment.a.x) + Math.abs(segment.b.x) +
+    Math.abs(segment.a.z) + Math.abs(segment.b.z) + reach);
+  const extent = length2 > 0 ? reach + padding : Infinity;
+  const length = Math.sqrt(length2);
+  return { segment, dx, dz, length2, length, chordWeight: Math.min(1, length / 24),
+    minX: Math.min(segment.a.x, segment.b.x) - extent,
+    maxX: Math.max(segment.a.x, segment.b.x) + extent,
+    minZ: Math.min(segment.a.z, segment.b.z) - extent,
+    maxZ: Math.max(segment.a.z, segment.b.z) + extent };
+}
+
+interface LandscapeColumn { h: number; volc: number; lavaBasin?: { level: number; channel: number } }
 
 /** Round hairpins with short quadratic chords while preserving both ends. */
 export function roundedRoadPoints(points: RoadPoint[], radius: number): RoadPoint[] {
@@ -52,18 +88,65 @@ export class Landscape {
   private nodes = new Map<string, RoadPoint>();
   private edges = new Map<string, RoadSegment[]>();
   private trails = new Map<string, RoadSegment[]>();
-  private tiles = new Map<string, RoadSegment[]>();
+  private tiles = new Map<string, RoadTile>();
+  private lastRoadTile: { x: number; z: number; tile: RoadTile } | undefined;
   private cityList: CityDistrict[] | null = null;
   private cityRoads: RoadSegment[] | null = null;
   private highlights: Set<string> | null = null;
   constructor(readonly seed: number, private naturalHeight: (x: number, z: number) => number,
-    private base: (x: number, z: number) => { h: number; volc: number }) {}
+    private base: (x: number, z: number) => LandscapeColumn) {}
+
+  /** Keep the lane and a dry verge outside both flooded basins and cuts that
+   * would expose lava. Heights refer to the planned road, not just the hill. */
+  private roadClear(x: number, z: number, y: number, margin = 18, avoidBasins = true, summitTrail = false): boolean {
+    for (const [dx, dz] of [[0, 0], [-margin, 0], [margin, 0], [0, -margin], [0, margin]]) {
+      // Inland lake/river excavation also runs after roads. Keep ordinary
+      // roads outside its graded bank; ferries have their own dock approaches.
+      for (const volume of surfaceLiquidVolumes()) {
+        if (volume.shape === 'ocean' || Math.abs(x + dx - volume.x) > volume.rx + 180 ||
+          Math.abs(z + dz - volume.z) > volume.rz + 180) continue;
+        if (liquidFootprint(volume, this.seed, x + dx, z + dz).distance < 150) return false;
+      }
+      const col = this.base(x + dx, z + dz), basin = col.lavaBasin;
+      if (basin && basin.channel > .18 &&
+        gradeLiquidTerrain(this.seed, x + dx, z + dz, avoidBasins ? Math.min(col.h, y) : y) < basin.level + 12) return false;
+      // Trunk detours must go around dramatic peaks. Cutting straight across
+      // their switchbacks can exceed the collision field's slope envelope.
+      if (!summitTrail && this.mountain(Math.floor((x + dx) / LANDSCAPE_CELL), Math.floor((z + dz) / LANDSCAPE_CELL)).dramatic &&
+        Math.abs(this.naturalHeight(x + dx, z + dz) - y) > 40) return false;
+    }
+    return true;
+  }
+
+  private dryRoute(points: RoadPoint[], avoidBasins = true, summitTrail = false): boolean {
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.z - a.z) / 12));
+      for (let j = 0; j <= steps; j++) {
+        const t = j / steps;
+        if (!this.roadClear(lerp(a.x, b.x, t), lerp(a.z, b.z, t), lerp(a.y, b.y, t), 18, avoidBasins, summitTrail)) return false;
+      }
+    }
+    return true;
+  }
 
   cities(): readonly CityDistrict[] {
     return this.cityList ??= generateCities(this.seed, this.naturalHeight, (x, z) => this.base(x, z).volc < .2);
   }
   cityAt(x: number, z: number, margin = 0): CityDistrict | undefined {
-    return this.cities().find(city => capitalBoundary(city, x, z) <= margin);
+    for (const city of this.cities()) {
+      // Every authored outline lies between .85r and 1.03r. Most terrain
+      // probes are nowhere near a city; only the narrow edge band needs its
+      // trigonometric boundary. Padding leaves all numerical ties to it.
+      const dx=x-city.x,dz=z-city.z;
+      if(!city.theme){if(Math.max(Math.abs(dx),Math.abs(dz))-city.radius<=margin)return city;continue;}
+      const epsilon=Number.EPSILON*16*Math.max(1,Math.abs(x),Math.abs(z),city.radius),outer=city.radius*1.03+margin+epsilon;
+      if(outer<0||Math.abs(dx)>outer||Math.abs(dz)>outer)continue;
+      const distance2=dx*dx+dz*dz;if(distance2>outer*outer)continue;
+      const inner=city.radius*.85+margin-epsilon;
+      if(inner>=0&&distance2<inner*inner||capitalBoundary(city,x,z)<=margin)return city;
+    }
+    return undefined;
   }
   private highMountainCells(): Set<string> {
     if (this.highlights) return this.highlights;
@@ -125,9 +208,20 @@ export class Landscape {
     const key = `${ix},${iz}`, found = this.nodes.get(key);
     if (found) return found;
     const s = this.seed ^ 0x4481acc;
-    const x = ix * LANDSCAPE_CELL + (unit(hash2i(s, ix, iz)) - 0.5) * 54;
-    const z = iz * LANDSCAPE_CELL + (unit(hash2i(s + 7, ix, iz)) - 0.5) * 54;
-    return cacheSet(this.nodes, key, { x, z, y: this.naturalHeight(x, z) });
+    let x = ix * LANDSCAPE_CELL + (unit(hash2i(s, ix, iz)) - 0.5) * 54;
+    let z = iz * LANDSCAPE_CELL + (unit(hash2i(s + 7, ix, iz)) - 0.5) * 54;
+    let y = this.naturalHeight(x, z);
+    if (!this.roadClear(x, z, y, 40)) {
+      // Relocate the shared junction once, so every connecting road agrees.
+      search: for (let radius = 32; radius <= 512; radius += 32) {
+        for (let i = 0; i < 16; i++) {
+          const angle = i * Math.PI / 8, nx = x + Math.cos(angle) * radius, nz = z + Math.sin(angle) * radius;
+          const ny = this.naturalHeight(nx, nz);
+          if (this.roadClear(nx, nz, ny, 40)) { x = nx; z = nz; y = ny; break search; }
+        }
+      }
+    }
+    return cacheSet(this.nodes, key, { x, z, y });
   }
 
   private edge(ix: number, iz: number, axis: number): RoadSegment[] {
@@ -137,20 +231,40 @@ export class Landscape {
     const bend = (unit(hash2i(this.seed ^ (axis ? 0x821af : 0x90aba), ix, iz)) - 0.5) * 130;
     const variation = unit(hash2i(this.seed ^ 0x639ba, ix + axis * 73, iz));
     const curve = (variation < .5 ? -1 : 1) * (55 + Math.abs(variation - .5) * 80);
-    const segments: RoadSegment[] = [];
-    let previous = a;
-    for (let i = 1; i <= 32; i++) {
-      // Broad curves on every rural link, with flat tangents at shared nodes.
+    const curvePoints = (detour: number): RoadPoint[] => Array.from({ length: 33 }, (_, i) => {
+      if (i === 0) return a;
+      if (i === 32) return b;
+      // Detours retain the same smooth approach and exact shared junctions.
       const t = i / 32, envelope = Math.sin(Math.PI * t) ** 2;
-      const offset = (bend + curve * Math.sin(Math.PI * 2 * t)) * envelope;
-      const next = i === 32 ? b : {
-        x: lerp(a.x, b.x, t) + (axis === 1 ? offset : 0),
-        z: lerp(a.z, b.z, t) + (axis === 0 ? offset : 0),
-        y: lerp(a.y, b.y, t),
-      };
-      segments.push({ a: previous, b: next, width: 5.8, trail: false, id: key });
-      previous = next;
+      const offset = (bend + detour + curve * Math.sin(Math.PI * 2 * t)) * envelope;
+      return { x: lerp(a.x, b.x, t) + (axis === 1 ? offset : 0),
+        z: lerp(a.z, b.z, t) + (axis === 0 ? offset : 0), y: lerp(a.y, b.y, t) };
+    });
+    let points = curvePoints(0);
+    if (!this.dryRoute(points)) {
+      for (const detour of [96, -96, 192, -192, 320, -320, 448, -448]) {
+        const candidate = curvePoints(detour);
+        if (this.dryRoute(candidate)) { points = candidate; break; }
+      }
+      if (!this.dryRoute(points)) {
+        const detour = detourRoad(a, b, (p, q) => this.dryRoute([p, q]));
+        if (detour) {
+          const rounded = roundedRoadPoints(detour, 24);
+          points = this.dryRoute(rounded) ? rounded : detour;
+        }
+      }
+      // A high embankment is safe when its full verge clears the lava. If
+      // neither banks nor an elevated route can connect these two junctions,
+      // leave this link out; the surrounding grid supplies alternative links.
+      if (!this.dryRoute(points, false)) {
+        const detour = detourRoad(a, b, (p, q) => this.dryRoute([p, q], false));
+        if (!detour) return cacheSet(this.edges, key, []);
+        const rounded = roundedRoadPoints(detour, 24);
+        points = this.dryRoute(rounded, false) ? rounded : detour;
+      }
     }
+    const segments: RoadSegment[] = [];
+    for (let i = 1; i < points.length; i++) segments.push({ a: points[i - 1], b: points[i], width: 5.8, trail: false, id: key });
     return cacheSet(this.edges, key, segments);
   }
 
@@ -158,10 +272,14 @@ export class Landscape {
     const key = `${ix},${iz}`, found = this.trails.get(key);
     if (found) return found;
     const s = this.mountain(ix, iz);
-    // Join the existing west/south trunk at its exact midpoint, including
-    // the shared interpolated elevation. No dead ends at road junctions.
+    // These switchbacks climb the added mountain system, which fades out in
+    // volcanic country. Do not draw a summit trail into a flooded crater.
+    if (this.base(s.x, s.z).volc > .35) return cacheSet(this.trails, key, []);
+    // Join an existing west/south trunk vertex at its exact elevation.
+    // Detours may have a different number of chords from ordinary links.
     const edge = this.edge(ix, iz, s.dx === 1 ? 1 : 0);
-    const points: RoadPoint[] = [edge[edge.length / 2 - 1].b];
+    if (!edge.length) return cacheSet(this.trails, key, []);
+    const points: RoadPoint[] = [edge[Math.max(0, Math.floor(edge.length / 2) - 1)].b];
     const steps = s.dramatic ? [[-.96, 0], [-.90, -.43], [-.81, .43], [-.72, -.39],
       [-.63, .35], [-.54, -.31], [-.45, .26], [-.36, -.21], [-.27, .16], [-.18, -.10], [-.09, .05], [0, 0]] : [[-0.94, 0], [-0.80, -0.40], [-0.65, 0.40],
       [-0.50, -0.31], [-0.35, 0.24], [-0.20, -0.13], [-0.08, 0.06], [0, 0]];
@@ -173,6 +291,7 @@ export class Landscape {
     }
     const segments: RoadSegment[] = [];
     const rounded = roundedRoadPoints(points, s.dramatic ? 14 : 18);
+    if (!this.dryRoute(rounded, true, true)) return cacheSet(this.trails, key, []);
     for (let i = 0; i + 1 < rounded.length; i++) {
       segments.push({ a: rounded[i], b: rounded[i + 1], width: 2.7, trail: true, dramatic: s.dramatic, id: `trail:${key}` });
     }
@@ -190,10 +309,11 @@ export class Landscape {
           b: point(axis ? lane : city.radius, axis ? city.radius : lane), width: lane === 0 ? 9 : 5.8, trail: false, id: `city:${city.id}` });
       }
       const ix = city.x / 1024, iz = city.z / 1024;
-      const ends = [this.edge(ix - 1, iz, 0)[15].b, this.edge(ix, iz, 0)[15].b,
-        this.edge(ix, iz - 1, 1)[15].b, this.edge(ix, iz, 1)[15].b];
+      const middle = (roads: RoadSegment[]): RoadPoint | undefined => roads[Math.max(0, Math.floor(roads.length / 2) - 1)]?.b;
+      const ends = [middle(this.edge(ix - 1, iz, 0)), middle(this.edge(ix, iz, 0)),
+        middle(this.edge(ix, iz - 1, 1)), middle(this.edge(ix, iz, 1))];
       const starts = [point(-city.radius, 0), point(city.radius, 0), point(0, -city.radius), point(0, city.radius)];
-      for (let i = 0; i < 4; i++) roads.push({ a: starts[i], b: ends[i], width: 9, trail: false, id: `city-access:${city.id}` });
+      for (let i = 0; i < 4; i++) if (ends[i]) roads.push({ a: starts[i], b: ends[i]!, width: 9, trail: false, id: `city-access:${city.id}` });
     }
     return this.cityRoads = roads;
   }
@@ -230,20 +350,128 @@ export class Landscape {
     return out;
   }
 
+  /** Exact full-road collection with checkpoints between canonical jobs.
+   * Generate both edges and the trail before filtering, as collectRoads does.
+   * A cold edge/trail remains indivisible; injected providers stay synchronous. */
+  *collectRoadSteps(minX: number, maxX: number, minZ: number, maxZ: number): Generator<void, RoadSegment[], void> {
+    if (this.collectRoads !== canonicalMapRoadCollector || this.trail !== canonicalMapTrailCollector ||
+        this.edge !== canonicalMapEdgeCollector || this.urbanRoads !== canonicalMapUrbanCollector)
+      return this.collectRoads(minX, maxX, minZ, maxZ);
+    const out: RoadSegment[] = [];
+    for (let iz = Math.floor(minZ / LANDSCAPE_CELL) - 1; iz <= Math.floor(maxZ / LANDSCAPE_CELL) + 1; iz++) {
+      for (let ix = Math.floor(minX / LANDSCAPE_CELL) - 1; ix <= Math.floor(maxX / LANDSCAPE_CELL) + 1; ix++) {
+        const along = this.edge(ix, iz, 0); yield;
+        const across = this.edge(ix, iz, 1); yield;
+        const trail = this.trail(ix, iz); yield;
+        for (const segment of [...along, ...across, ...trail]) {
+          const reach = segment.dramatic ? 180 : 96;
+          if (Math.max(segment.a.x, segment.b.x) < minX - reach || Math.min(segment.a.x, segment.b.x) > maxX + reach ||
+              Math.max(segment.a.z, segment.b.z) < minZ - reach || Math.min(segment.a.z, segment.b.z) > maxZ + reach) continue;
+          if (this.cities().some(city => capitalBoundary(city, (segment.a.x + segment.b.x) / 2,
+            (segment.a.z + segment.b.z) / 2) < (city.theme ? 100 : !segment.trail ? 106 : -10000))) continue;
+          out.push(segment);
+        }
+      }
+    }
+    const urban = this.urbanRoads(); yield;
+    for (const segment of urban) {
+      if (Math.max(segment.a.x, segment.b.x) < minX - 96 || Math.min(segment.a.x, segment.b.x) > maxX + 96 ||
+          Math.max(segment.a.z, segment.b.z) < minZ - 96 || Math.min(segment.a.z, segment.b.z) > maxZ + 96) continue;
+      out.push(segment);
+    }
+    return out;
+  }
+
+  /** Tactical maps discard summit trails. Keep the canonical cell, edge and
+   * city order without generating those unused switchbacks. The hot terrain
+   * collector above remains unchanged; custom collectors retain its behavior. */
+  collectMajorRoads(minX: number, maxX: number, minZ: number, maxZ: number): RoadSegment[] {
+    if (this.collectRoads !== canonicalMapRoadCollector || this.trail !== canonicalMapTrailCollector)
+      return this.collectRoads(minX, maxX, minZ, maxZ).filter(road => !road.trail);
+    const out: RoadSegment[] = [];
+    for (let iz = Math.floor(minZ / LANDSCAPE_CELL) - 1; iz <= Math.floor(maxZ / LANDSCAPE_CELL) + 1; iz++) {
+      for (let ix = Math.floor(minX / LANDSCAPE_CELL) - 1; ix <= Math.floor(maxX / LANDSCAPE_CELL) + 1; ix++) {
+        for (const segment of [...this.edge(ix, iz, 0), ...this.edge(ix, iz, 1)]) {
+          const reach = segment.dramatic ? 180 : 96;
+          if (Math.max(segment.a.x, segment.b.x) < minX - reach || Math.min(segment.a.x, segment.b.x) > maxX + reach ||
+              Math.max(segment.a.z, segment.b.z) < minZ - reach || Math.min(segment.a.z, segment.b.z) > maxZ + reach) continue;
+          if (this.cities().some(city => capitalBoundary(city, (segment.a.x + segment.b.x) / 2,
+            (segment.a.z + segment.b.z) / 2) < (city.theme ? 100 : !segment.trail ? 106 : -10000))) continue;
+          if (!segment.trail) out.push(segment);
+        }
+      }
+    }
+    for (const segment of this.urbanRoads()) {
+      if (Math.max(segment.a.x, segment.b.x) < minX - 96 || Math.min(segment.a.x, segment.b.x) > maxX + 96 ||
+          Math.max(segment.a.z, segment.b.z) < minZ - 96 || Math.min(segment.a.z, segment.b.z) > maxZ + 96) continue;
+      if (!segment.trail) out.push(segment);
+    }
+    return out;
+  }
+
+  /** Worker-only checkpoints around complete canonical edge jobs. Keep both
+   * edge calls ahead of filtering, and preserve cell/cache/urban-road order.
+   * Cold nested route generation remains indivisible within one edge. */
+  *collectMajorRoadSteps(minX: number, maxX: number, minZ: number, maxZ: number): Generator<void, RoadSegment[], void> {
+    if (this.collectMajorRoads !== canonicalMapMajorCollector ||
+        this.collectRoads !== canonicalMapRoadCollector || this.trail !== canonicalMapTrailCollector ||
+        this.edge !== canonicalMapEdgeCollector || this.urbanRoads !== canonicalMapUrbanCollector)
+      return this.collectMajorRoads(minX, maxX, minZ, maxZ);
+    const out: RoadSegment[] = [];
+    for (let iz = Math.floor(minZ / LANDSCAPE_CELL) - 1; iz <= Math.floor(maxZ / LANDSCAPE_CELL) + 1; iz++) {
+      for (let ix = Math.floor(minX / LANDSCAPE_CELL) - 1; ix <= Math.floor(maxX / LANDSCAPE_CELL) + 1; ix++) {
+        const along = this.edge(ix, iz, 0); yield;
+        const across = this.edge(ix, iz, 1); yield;
+        for (const segment of [...along, ...across]) {
+          const reach = segment.dramatic ? 180 : 96;
+          if (Math.max(segment.a.x, segment.b.x) < minX - reach || Math.min(segment.a.x, segment.b.x) > maxX + reach ||
+              Math.max(segment.a.z, segment.b.z) < minZ - reach || Math.min(segment.a.z, segment.b.z) > maxZ + reach) continue;
+          if (this.cities().some(city => capitalBoundary(city, (segment.a.x + segment.b.x) / 2,
+            (segment.a.z + segment.b.z) / 2) < (city.theme ? 100 : !segment.trail ? 106 : -10000))) continue;
+          if (!segment.trail) out.push(segment);
+        }
+      }
+    }
+    const urban = this.urbanRoads(); yield;
+    for (const segment of urban) {
+      if (Math.max(segment.a.x, segment.b.x) < minX - 96 || Math.min(segment.a.x, segment.b.x) > maxX + 96 ||
+          Math.max(segment.a.z, segment.b.z) < minZ - 96 || Math.min(segment.a.z, segment.b.z) > maxZ + 96) continue;
+      if (!segment.trail) out.push(segment);
+    }
+    return out;
+  }
+
   roadAt(x: number, z: number, naturalHeight?: number): RoadSample | undefined {
-    const ix = Math.floor(x / ROAD_TILE), iz = Math.floor(z / ROAD_TILE), key = `${ix},${iz}`;
-    let segments = this.tiles.get(key);
-    if (!segments) segments = cacheSet(this.tiles, key,
-      this.collectRoads(ix * ROAD_TILE, (ix + 1) * ROAD_TILE, iz * ROAD_TILE, (iz + 1) * ROAD_TILE));
-    let result: RoadSample | undefined;
+    const ix = Math.floor(x / ROAD_TILE), iz = Math.floor(z / ROAD_TILE);
+    let tile = this.lastRoadTile?.x === ix && this.lastRoadTile.z === iz ? this.lastRoadTile.tile : undefined;
+    if (!tile) {
+      const key = `${ix},${iz}`;
+      tile = this.tiles.get(key);
+      if (!tile) tile = cacheSet(this.tiles, key, {
+        segments: this.collectRoads(ix * ROAD_TILE, (ix + 1) * ROAD_TILE, iz * ROAD_TILE, (iz + 1) * ROAD_TILE).map(prepareRoadSegment),
+        cells: new Map(),
+      });
+      this.lastRoadTile = { x: ix, z: iz, tile };
+    }
+    // Contact/gradient probes stay in tiny neighborhoods. Cache a conservative
+    // subcell list, preserving the parent tile's exact blend and tie order.
+    const cellX = Math.floor(x / 32), cellZ = Math.floor(z / 32);
+    const cellKey = cellX - ix * 4 + (cellZ - iz * 4) * 4;
+    let segments = tile.cells.get(cellKey);
+    if (!segments) {
+      segments = tile.segments.filter(s => s.maxX >= cellX * 32 && s.minX <= (cellX + 1) * 32 &&
+        s.maxZ >= cellZ * 32 && s.minZ <= (cellZ + 1) * 32);
+      tile.cells.set(cellKey, segments);
+    }
+    let winner: RoadTileSegment | undefined, winnerDistance = 0, winnerHeight = 0;
     let best = Infinity;
     let sumWeight = 0, sumHeight = 0, gradeWeight = 0;
     let dramatic = false, corridorLow = -Infinity, corridorHigh = Infinity;
-    for (const segment of segments) {
-      const dx = segment.b.x - segment.a.x, dz = segment.b.z - segment.a.z;
-      const length2 = dx * dx + dz * dz;
+    for (const prepared of segments) {
+      if (x < prepared.minX || x > prepared.maxX || z < prepared.minZ || z > prepared.maxZ) continue;
+      const { segment, dx, dz, length2 } = prepared;
       const t = clamp(((x - segment.a.x) * dx + (z - segment.a.z) * dz) / length2, 0, 1);
-      const distance = Math.hypot(x - lerp(segment.a.x, segment.b.x, t), z - lerp(segment.a.z, segment.b.z, t));
+      const distance = hypot2(x - lerp(segment.a.x, segment.b.x, t), z - lerp(segment.a.z, segment.b.z, t));
       if (distance > (segment.dramatic ? 180 : 90)) continue;
       const height = lerp(segment.a.y, segment.b.y, t);
       dramatic ||= !!segment.dramatic;
@@ -255,7 +483,7 @@ export class Landscape {
       // The long summit switchbacks overlap. A fixed broad shoulder keeps a
       // nearly level leg from abruptly losing all weight beside a higher one.
       const shoulder = segment.dramatic ? 56 : Math.min(82, (segment.trail ? 16 : 26) + Math.abs(height - (naturalHeight ?? height)) * 1.2);
-      const influence = smoothstep(segment.width + shoulder, segment.width, distance);
+      const influence = distance >= segment.width + shoulder ? 0 : smoothstep(segment.width + shoulder, segment.width, distance);
       // Blend overlapping shoulders instead of switching abruptly between
       // a high switchback and a low trunk road at their Voronoi boundary.
       const edgeDistance = Math.max(0, distance - segment.width);
@@ -263,7 +491,7 @@ export class Landscape {
       // Short curve chords must not outweigh an entire neighboring lane just
       // because the corner was tessellated into more segments.
       const weight = segment.dramatic ? influence / (1 + edgeDistance * edgeDistance * .05)
-        : influence / falloff * Math.min(1, Math.sqrt(length2) / 24);
+        : influence / falloff * prepared.chordWeight;
       if (!segment.dramatic) {
         sumWeight += weight;
         sumHeight += height * weight;
@@ -271,11 +499,13 @@ export class Landscape {
       }
       if (distance - segment.width >= best) continue;
       best = distance - segment.width;
-      const length = Math.sqrt(length2);
-      result = { distance, height, width: segment.width,
-        trail: segment.trail, dx: dx / length, dz: dz / length, gradeWeight: 0 };
+      // Materialize only the final nearest lane. Capsule/normal queries used
+      // to allocate a throwaway object for every increasingly close chord.
+      winner=prepared;winnerDistance=distance;winnerHeight=height;
     }
-    if (result) {
+    if (winner) {
+      const result:RoadSample={distance:winnerDistance,height:winnerHeight,width:winner.segment.width,
+        trail:winner.segment.trail,dx:winner.dx/winner.length,dz:winner.dz/winner.length,gradeWeight:0};
       result.height = sumWeight > 0 ? sumHeight / sumWeight : result.height;
       result.gradeWeight = gradeWeight;
       if (dramatic && naturalHeight !== undefined) {
@@ -286,7 +516,14 @@ export class Landscape {
         result.height = corridorLow <= corridorHigh ? clamp(baseline, corridorLow, corridorHigh) : (corridorLow + corridorHigh) * .5;
         result.gradeWeight = 1;
       }
+      return result;
     }
-    return result;
+    return undefined;
   }
 }
+
+const canonicalMapRoadCollector = Landscape.prototype.collectRoads;
+const canonicalMapMajorCollector = Landscape.prototype.collectMajorRoads;
+const canonicalMapTrailCollector = (Landscape.prototype as unknown as { trail: unknown }).trail;
+const canonicalMapEdgeCollector = (Landscape.prototype as unknown as { edge: unknown }).edge;
+const canonicalMapUrbanCollector = (Landscape.prototype as unknown as { urbanRoads: unknown }).urbanRoads;

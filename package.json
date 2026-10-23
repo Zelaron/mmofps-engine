@@ -30,7 +30,18 @@
     "test:shaders:browser": "node --import tsx scripts/shader-preparation-browser-check.ts",
     "test:flora:browser": "node --experimental-sqlite --import tsx scripts/flora-browser-check.ts",
     "test:resources:browser": "node --experimental-sqlite --import tsx scripts/resource-browser-check.ts",
-    "test:scenery:browser": "node --experimental-sqlite --import tsx scripts/scenery-browser-check.ts"
+    "test:scenery:browser": "node --experimental-sqlite --import tsx scripts/scenery-browser-check.ts",
+    "test:capture:browser": "node --experimental-sqlite --import tsx scripts/capture-browser-check.ts",
+    "test:terrain:browser": "node --experimental-sqlite --import tsx scripts/terrain-browser-check.ts",
+    "test:campaign:browser": "node --experimental-sqlite --import tsx scripts/campaign-browser-check.ts",
+    "test:aircraft:browser": "node --experimental-sqlite --import tsx scripts/aircraft-warning-browser-check.ts",
+    "test:vehicles:browser": "node --experimental-sqlite --import tsx scripts/vehicle-presence-browser-check.ts",
+    "test:creatures:browser": "node --import tsx scripts/creature-model-browser-check.ts",
+    "test:tactical-boss:browser": "node --experimental-sqlite --import tsx scripts/tactical-boss-browser-check.ts",
+    "test:maps:browser": "node --import tsx scripts/map-readability-browser-check.ts",
+    "test:orbital-campaign:browser": "node --import tsx scripts/orbital-campaign-browser-check.ts",
+    "test:campaign:simulation": "node --import tsx scripts/campaign-simulation-check.ts",
+    "test:campaign:realtime": "node --no-warnings --experimental-sqlite scripts/campaign-realtime-check.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

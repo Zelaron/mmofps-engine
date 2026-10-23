@@ -28,7 +28,18 @@ function texture(data: Uint8Array<ArrayBuffer>, size: number): THREE.DataTexture
   map.minFilter=map.magFilter=THREE.LinearFilter;map.generateMipmaps=false;map.needsUpdate=true;
   return map;
 }
-type Layer = { grid?: RoadGrid; texture: THREE.DataTexture; job?: { grid: RoadGrid; data: Uint8Array<ArrayBuffer>; roads: RoadSegment[]; index: number } };
+type RoadWorld = Pick<World, 'collectRoadSegments'> & Partial<Pick<World, 'collectRoadSegmentSteps'>>;
+type Layer = { grid?: RoadGrid; texture: THREE.DataTexture; job?: {
+  grid: RoadGrid; data: Uint8Array<ArrayBuffer>; roads?: RoadSegment[]; index: number;
+  collection?: Generator<void, RoadSegment[], void>;
+} };
+
+function* collectRoads(world: RoadWorld, grid: RoadGrid): Generator<void, RoadSegment[], void> {
+  const span = grid.size * grid.step;
+  if (typeof world.collectRoadSegmentSteps === 'function')
+    return yield* world.collectRoadSegmentSteps(grid.x, grid.x + span, grid.z, grid.z + span);
+  return world.collectRoadSegments(grid.x, grid.x + span, grid.z, grid.z + span);
+}
 
 /** Two bounded maps survive terrain replacement. New maps are rasterized in
  * small batches, then swapped atomically; travelling fast retains far coverage. */
@@ -40,10 +51,12 @@ export class RoadField {
     roadFarBounds: {value:new THREE.Vector3(0,0,1)},
   };
   private layers: Layer[] = [{texture:this.uniforms.roadNearMap.value},{texture:this.uniforms.roadFarMap.value}];
-  constructor(private world: Pick<World,'collectRoadSegments'>) {}
+  private disposed = false;
+  constructor(private world: RoadWorld) {}
   update(x: number,z: number): void {
-    if(!Number.isFinite(x+z))return;
+    if(this.disposed || !Number.isFinite(x+z))return;
     for(let i=0;i<2;i++) {
+      const deadline=performance.now()+1.5;
       const layer=this.layers[i], size=i?2048:1024, step=i?6:2, span=size*step, quantum=i?1536:512;
       const grid={x:Math.floor(x/quantum)*quantum-span/2,z:Math.floor(z/quantum)*quantum-span/2,size,step};
       const current=layer.grid;
@@ -52,22 +65,32 @@ export class RoadField {
       // never publish any roads. Its wide footprint remains useful on arrival.
       if(!layer.job&&(!current||current.x!==grid.x||current.z!==grid.z)) {
         const data=new Uint8Array(size*size*4); data.fill(255);
-        layer.job={grid,data,roads:this.world.collectRoadSegments(grid.x,grid.x+span,grid.z,grid.z+span),index:0};
+        layer.job={grid,data,collection:collectRoads(this.world,grid),index:0};
       }
       const job=layer.job;if(!job)continue;
-      const deadline=performance.now()+1.5;
+      // Collection and rasterization share one budget. In particular, the
+      // cold far-map route search must not precede the deadline unbounded.
+      while(job.collection && performance.now()<deadline) {
+        const next=job.collection.next();
+        if(next.done) {job.roads=next.value;job.collection=undefined;}
+      }
+      if(job.collection || performance.now()>=deadline)continue;
+      const roads=job.roads!;
       do {
-        const end=Math.min(job.index+16,job.roads.length);
-        while(job.index<end)rasterRoadSegment(job.data,job.grid,job.roads[job.index++]);
-      }while(job.index<job.roads.length&&performance.now()<deadline);
-      if(job.index<job.roads.length)continue;
+        const end=Math.min(job.index+16,roads.length);
+        while(job.index<end)rasterRoadSegment(job.data,job.grid,roads[job.index++]);
+      }while(job.index<roads.length&&performance.now()<deadline);
+      if(job.index<roads.length)continue;
       const map=texture(job.data,job.grid.size);
       layer.texture.dispose();layer.texture=map;layer.grid=job.grid;layer.job=undefined;
       const prefix=i?'roadFar':'roadNear';this.uniforms[`${prefix}Map`].value=map;
       this.uniforms[`${prefix}Bounds`].value.set(job.grid.x,job.grid.z,job.grid.size*job.grid.step);
     }
   }
-  dispose(): void {for(const layer of this.layers){layer.texture.dispose();layer.job=undefined;}}
+  dispose(): void {
+    this.disposed=true;
+    for(const layer of this.layers){layer.job?.collection?.return([]);layer.texture.dispose();layer.job=undefined;}
+  }
 }
 
 export const ROAD_GLSL = `

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { ScenerySource } from './scenery-stream.js';
+import { sceneryPlacementReady, type SceneryTerrain } from './scenery-readiness.js';
 import {
   WORLD,
   VEGETATION_KIND,
@@ -148,6 +149,8 @@ type VegetationSource = Pick<World, 'collectVegetation'>;
  * placements arrive distance-sorted, so the budget always trims the farthest)
  * are emitted into three cheap far pools instead: a solid stem plus open
  * clustered membranes or whorls, tinted to match their detailed hues.
+ * An optional installed-terrain gate delays only unprotected far placements;
+ * their canonical positions and pool detail rules are unchanged on arrival.
  */
 export class VegetationRenderer {
   readonly group = new THREE.Group();
@@ -218,12 +221,18 @@ export class VegetationRenderer {
   private activeCellX: number | null = null;
   private activeCellZ: number | null = null;
   private activeBounds: VegetationRenderBounds | null = null;
+  private visibleCellX: number | null = null;
+  private visibleCellZ: number | null = null;
+  private terrainRevision = -1;
+  private candidates: VegetationPlacement[] = [];
+  private visible: VegetationPlacement[] = [];
   private disposed = false;
 
   constructor(
     world: VegetationSource,
     options: VegetationRendererOptions = {},
     private readonly scenery?: ScenerySource,
+    private readonly terrain?: SceneryTerrain,
   ) {
     this.world = world;
     this.farStemGeometry.setAttribute('color', new THREE.Float32BufferAttribute(
@@ -389,7 +398,10 @@ export class VegetationRenderer {
 
     const cellX = Math.floor(cameraX / this.cellSize);
     const cellZ = Math.floor(cameraZ / this.cellSize);
-    if (cellX === this.activeCellX && cellZ === this.activeCellZ) return false;
+    const sameCell = cellX === this.activeCellX && cellZ === this.activeCellZ;
+    const revision = this.terrain?.sceneryCoverageRevision ?? 0;
+    const sameVisibility = cellX === this.visibleCellX && cellZ === this.visibleCellZ && revision === this.terrainRevision;
+    if (sameCell && sameVisibility) return false;
 
     const bounds = {
       minX: (cellX - this.radiusCells) * this.cellSize,
@@ -397,26 +409,31 @@ export class VegetationRenderer {
       minZ: (cellZ - this.radiusCells) * this.cellSize,
       maxZ: (cellZ + this.radiusCells + 1) * this.cellSize,
     };
-    const placements = this.scenery && !this.scenery.failed ? this.scenery.read('vegetation', bounds) : this.world.collectVegetation(
-      bounds.minX,
-      bounds.maxX,
-      bounds.minZ,
-      bounds.maxZ,
-    );
-    if (!placements) return false;
-    this.activeCellX = cellX;
-    this.activeCellZ = cellZ;
-    this.activeBounds = bounds;
-    const visible = placements
-      .filter((placement) => validPlacement(placement, bounds))
-      .sort((a, b) => (
-        distanceSq(a, cameraX, cameraZ) -
-        distanceSq(b, cameraX, cameraZ) ||
-        a.x - b.x ||
-        a.z - b.z ||
-        String(a.kind).localeCompare(String(b.kind))
-      ))
-      .slice(0, this.maxInstances);
+    let refreshed = false;
+    if (!sameCell) {
+      const placements = this.scenery && !this.scenery.failed ? this.scenery.read('vegetation', bounds) : this.world.collectVegetation(
+        bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ);
+      if (placements) {
+        this.activeCellX = cellX;
+        this.activeCellZ = cellZ;
+        this.activeBounds = bounds;
+        this.candidates = placements
+          .filter((placement) => validPlacement(placement, bounds))
+          .sort((a, b) => (
+            distanceSq(a, cameraX, cameraZ) - distanceSq(b, cameraX, cameraZ) ||
+            a.x - b.x || a.z - b.z || String(a.kind).localeCompare(String(b.kind))))
+          .slice(0, this.maxInstances);
+        refreshed = true;
+      }
+    }
+    if (!refreshed && sameVisibility) return false;
+    const visible = this.candidates.filter(placement => sceneryPlacementReady(this.terrain,
+      placement.x, placement.z, Math.max(placement.radius, placement.canopyRadius),
+      Math.max(placement.radius, placement.canopyRadius), cellX, cellZ, this.cellSize));
+    this.terrainRevision = revision;
+    this.visibleCellX = cellX; this.visibleCellZ = cellZ;
+    if (!refreshed && visible.length === this.visible.length && visible.every((placement, i) => placement === this.visible[i])) return false;
+    this.visible = visible;
     this.rebuild(visible, cameraX, cameraZ);
     return true;
   }
@@ -446,6 +463,7 @@ export class VegetationRenderer {
     this.farMaterial.dispose();
     this.foliageDepth.dispose();
     this.activeBounds = null;
+    this.candidates.length = 0; this.visible.length = 0;
     this.resetStats();
   }
 

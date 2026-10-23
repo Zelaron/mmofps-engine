@@ -219,7 +219,7 @@ test('a boosting jeep launches off a ramp lip with real upward inertia', () => {
   const height = (z: number) => Math.max(0, z >= 0 ? 24 - z * .34 : 24 + z * .3);
   const slope = (z: number) => height(z) <= 0 ? 0 : z >= 0 ? -.34 : .3;
   world.sdf = (_x, y, z) => (y - height(z)) / Math.hypot(1, slope(z));
-  world.sdfCol = world.sdf;
+  world.sdfCol = (x, y, z) => world.sdf(x, y, z);
   world.groundY = (_x, z) => height(z);
   world.liquidAt = () => undefined;
   world.collectCityLifts = () => [];

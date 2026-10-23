@@ -106,3 +106,49 @@ test('selected trunk roads use gradual S-bends while preserving connected graded
     assert.ok(curved >= 3, `seed${seed} has only${curved} curved trunk roads`);
   }
 });
+
+test('planetary roads keep their entire lane and verge out of lava after all terrain grading', () => {
+  for (const seed of [1337, 7331, 20077]) {
+    const world = new World(seed);
+    let volcanic = 0;
+    for (const road of world.collectRoadSegments(-8704, 8704, -8704, 8704)) {
+      const dx = road.b.x - road.a.x, dz = road.b.z - road.a.z, length = Math.hypot(dx, dz);
+      const steps = Math.max(1, Math.ceil(length / 8));
+      for (let i = 0; i <= steps; i++) {
+        const x = road.a.x + dx * i / steps, z = road.a.z + dz * i / steps;
+        const center = world.column(x, z);
+        if (center.volc < .3) continue;
+        volcanic++;
+        for (const offset of [0, -road.width - 2, road.width + 2]) {
+          const px = x - dz / length * offset, pz = z + dx / length * offset, col = world.column(px, pz);
+          assert.ok(col.lavaY < -999 || col.h >= col.lavaY,
+            `seed ${seed}: ${road.id} flooded at ${px},${pz}: road ${col.h}, lava ${col.lavaY}`);
+          assert.notEqual(world.liquidAt(px, col.h + .05, pz)?.kind, 'lava');
+        }
+      }
+    }
+    assert.ok(volcanic > 1000, `seed ${seed}: real volcanic routes must remain available`);
+  }
+});
+
+test('players can follow the rerouted lava crossings from junction to junction', () => {
+  for (const [seed, id, x, z] of [[1337, '3,4,1', 3072, 4608], [7331, '5,0,1', 5120, 512]] as const) {
+    const world = new World(seed);
+    const route = world.collectRoadSegments(x - 1600, x + 1600, z - 1600, z + 1600).filter(r => r.id === id);
+    assert.ok(route.length > 0, `seed ${seed}: the detour retains a complete link`);
+    const other = new World(seed);
+    assert.deepEqual(route, other.collectRoadSegments(x - 1600, x + 1600, z - 1600, z + 1600).filter(r => r.id === id));
+    for (let i = 1; i < route.length; i++) assert.deepEqual(route[i].a, route[i - 1].b);
+    const first = route[0].a, state = createMoveState(first.x, world.column(first.x, first.z).h + .05, first.z);
+    let waypoint = 0;
+    for (let tick = 0; tick < 22000 && waypoint < route.length; tick++) {
+      const target = route[waypoint].b;
+      if (Math.hypot(target.x - state.px, target.z - state.pz) < 2) { waypoint++; continue; }
+      stepMove(world, state, { seq: tick, buttons: BTN.FORWARD, weapon: 0,
+        yaw: Math.atan2(state.px - target.x, state.pz - target.z), pitch: 0, renderTick: 0, renderFrac: 0 }, TICK_DT);
+      assert.notEqual(world.liquidAt(state.px, state.py + .05, state.pz)?.kind, 'lava');
+      assert.equal(state.swimming, false, 'detours remain walkable on solid ground');
+    }
+    assert.equal(waypoint, route.length, `seed ${seed}: stuck at ${state.px},${state.py},${state.pz} before waypoint ${waypoint}`);
+  }
+});

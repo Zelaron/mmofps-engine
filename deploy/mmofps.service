@@ -11,7 +11,7 @@ ExecStart=/usr/bin/node --experimental-sqlite packages/server/dist/server.cjs
 Restart=always
 RestartSec=3
 Environment=PORT=8080
-Environment=BOTS=15
+Environment=BOTS=192
 Environment=HOST=127.0.0.1
 Environment=DATA_DIR=/opt/mmofps/app/data
 Environment=MAX_PLAYERS=64

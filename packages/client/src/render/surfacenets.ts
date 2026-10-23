@@ -1,3 +1,5 @@
+import { captureAuthoredSeamsSteps, finishAuthoredSeamsSteps } from './terrain-authored-seams-worker.js';
+import type { AuthoredSeamPayload } from './terrain-authored-seams.js';
 import {
   World, CHUNK_SIZE, WORLD, LOD1_STEP, LOD2_STEP,
   CAVE_SHAFT_BREACH_ENTR, CAVE_MIN_ROOF,
@@ -46,6 +48,15 @@ export interface EntrancePortalMesh {
 export interface ColumnMeshBundle {
   chunks: ChunkMesh[];
   portals: EntrancePortalMesh;
+  authoredSeams?: AuthoredSeamPayload;
+}
+
+/** Synchronous callers retain the same completed result. Workers can instead
+ * pause the iterator at its row/cell boundaries without changing mesh order. */
+function finishMesh<T>(steps: Generator<void, T, void>): T {
+  let result = steps.next();
+  while (!result.done) result = steps.next();
+  return result.value;
 }
 
 const N = CHUNK_SIZE;      // 32 cells
@@ -207,11 +218,18 @@ function clipPolygon(
  * terrain outside the plinth keeps its original slope and attributes.
  */
 export function clipTerrainFoundations(chunks: readonly ChunkMesh[], foundations: readonly StructureFoundation[]): ChunkMesh[] {
+  return finishMesh(clipTerrainFoundationsSteps(chunks, foundations));
+}
+
+function* clipTerrainFoundationsSteps(
+  chunks: readonly ChunkMesh[], foundations: readonly StructureFoundation[],
+): Generator<void, ChunkMesh[], void> {
   if (foundations.length === 0) return [...chunks];
   const out: ChunkMesh[] = [];
   for (const chunk of chunks) {
     const positions: number[] = [], normals: number[] = [], colors: number[] = [], depth: number[] = [];
     for (let i = 0; i < chunk.positions.length; i += 9) {
+      if (i % (64 * 9) === 0) yield;
       const tri: ClipVertex[] = [];
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
       for (let v = 0; v < 3; v++) {
@@ -273,11 +291,12 @@ export function clipTerrainFoundations(chunks: readonly ChunkMesh[], foundations
 
 /** Exact plinths travel with their terrain leaf, so their coverage extends
  * through every horizon LOD without a global structure instance pool. */
-function appendFoundationMeshes(
+function* appendFoundationMeshesSteps(
   chunks: ChunkMesh[], foundations: readonly StructureFoundation[], world: World, step: number,
-): ChunkMesh[] {
+): Generator<void, ChunkMesh[], void> {
   const additions = new Map<number, { p: number[]; n: number[]; c: number[]; d: number[] }>();
   for (const box of foundations) {
+    yield;
     const cy = Math.floor(box.y / (N * step));
     let target = additions.get(cy);
     if (!target) { target = { p: [], n: [], c: [], d: [] }; additions.set(cy, target); }
@@ -306,17 +325,20 @@ function appendFoundationMeshes(
           const lane = Math.round((p - origin) / 64) * 64;
           return Math.abs(p - origin - lane) < (lane === 0 ? 9 : 5.8);
         };
-        for (let zi = 0; zi + 1 < zs.length; zi++) for (let xi = 0; xi + 1 < xs.length; xi++) {
-          const road = laneAt((xs[xi] + xs[xi + 1]) * .5, city.x) || laneAt((zs[zi] + zs[zi + 1]) * .5, city.z);
-          const parcel = cityParcelKind(city, Math.floor(((xs[xi] + xs[xi + 1]) * .5 - city.x) / 64),
-            Math.floor(((zs[zi] + zs[zi + 1]) * .5 - city.z) / 64));
-          const color = city.theme === 'vesper' ? (road ? [37, 43, 54] : parcel === 'park' ? [59, 87, 82] : [86, 76, 102]) :
-            city.theme === 'aurelia' ? (road ? [100, 104, 95] : parcel === 'park' ? [94, 123, 71] : [188, 182, 160]) :
-            road ? [62, 70, 73] : parcel === 'park' ? [92, 124, 69] : [161, 160, 148];
-          for (const [ix, iz] of [[0, 0], [0, 1], [1, 1], [0, 0], [1, 1], [1, 0]]) {
-            target.p.push(xs[xi + ix], box.y + box.hy, zs[zi + iz]);
-            target.n.push(0, 1, 0); target.c.push(...color); target.d.push(0);
+        for (let zi = 0; zi + 1 < zs.length; zi++) {
+          for (let xi = 0; xi + 1 < xs.length; xi++) {
+            const road = laneAt((xs[xi] + xs[xi + 1]) * .5, city.x) || laneAt((zs[zi] + zs[zi + 1]) * .5, city.z);
+            const parcel = cityParcelKind(city, Math.floor(((xs[xi] + xs[xi + 1]) * .5 - city.x) / 64),
+              Math.floor(((zs[zi] + zs[zi + 1]) * .5 - city.z) / 64));
+            const color = city.theme === 'vesper' ? (road ? [37, 43, 54] : parcel === 'park' ? [59, 87, 82] : [86, 76, 102]) :
+              city.theme === 'aurelia' ? (road ? [100, 104, 95] : parcel === 'park' ? [94, 123, 71] : [188, 182, 160]) :
+              road ? [62, 70, 73] : parcel === 'park' ? [92, 124, 69] : [161, 160, 148];
+            for (const [ix, iz] of [[0, 0], [0, 1], [1, 1], [0, 0], [1, 1], [1, 0]]) {
+              target.p.push(xs[xi + ix], box.y + box.hy, zs[zi + iz]);
+              target.n.push(0, 1, 0); target.c.push(...color); target.d.push(0);
+            }
           }
+          yield;
         }
         continue;
       }
@@ -337,6 +359,7 @@ function appendFoundationMeshes(
   }
   const byCy = new Map(chunks.map((chunk) => [chunk.cy, chunk]));
   for (const [cy, addition] of additions) {
+    yield;
     const old = byCy.get(cy);
     const positions = new Float32Array((old?.positions.length ?? 0) + addition.p.length);
     const normals = new Float32Array(positions.length), colors = new Uint8Array(positions.length);
@@ -360,6 +383,12 @@ export function partitionChunkMeshes(
   tileSize: number,
   grid: number,
 ): ChunkMesh[] {
+  return finishMesh(partitionChunkMeshesSteps(chunks, baseX, baseZ, tileSize, grid));
+}
+
+function* partitionChunkMeshesSteps(
+  chunks: readonly ChunkMesh[], baseX: number, baseZ: number, tileSize: number, grid: number,
+): Generator<void, ChunkMesh[], void> {
   if (chunks.length === 0) return [];
   const partSize = tileSize / grid;
   const positions: number[][] = Array.from({ length: grid * grid }, () => []);
@@ -372,6 +401,7 @@ export function partitionChunkMeshes(
   for (const chunk of chunks) {
     const p = chunk.positions, n = chunk.normals, c = chunk.colors;
     for (let i = 0; i + 8 < p.length; i += 9) {
+      if (i % (64 * 9) === 0) yield;
       let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
       for (let v = 0; v < 3; v++) {
         const j = i + v * 3;
@@ -461,6 +491,7 @@ export function partitionChunkMeshes(
   const packedCaveDepth = hasCaveDepth ? new Uint8Array(total / 3) : undefined;
   let offset = 0;
   for (let i = 0; i < positions.length; i++) {
+    yield;
     packedPositions.set(positions[i], offset);
     packedNormals.set(normals[i], offset);
     packedColors.set(colors[i], offset);
@@ -483,15 +514,15 @@ export function partitionChunkMeshes(
  * to. The returned protocol intentionally remains ordinary LOD0: one mesh per
  * vertical chunk with no coarse partGrid/partOffsets metadata.
  */
-function clipChunkMeshesToFootprint(
+function* clipChunkMeshesToFootprintSteps(
   chunks: readonly ChunkMesh[],
   baseX: number,
   baseZ: number,
   tileSize: number,
-): ChunkMesh[] {
+): Generator<void, ChunkMesh[], void> {
   const result: ChunkMesh[] = [];
   for (const chunk of chunks) {
-    const [clipped] = partitionChunkMeshes([chunk], baseX, baseZ, tileSize, 1);
+    const [clipped] = yield* partitionChunkMeshesSteps([chunk], baseX, baseZ, tileSize, 1);
     if (!clipped || clipped.positions.length === 0) continue;
     result.push({
       cy: chunk.cy,
@@ -526,7 +557,7 @@ const EDGE: readonly [number, number][] = [
  * worker: all 16 columns of a tile share one scan.
  */
 const tileEntrHotCache = new WeakMap<World, Map<string, boolean>>();
-function lod1TileEntrHot(world: World, tx: number, tz: number): boolean {
+function* lod1TileEntrHotSteps(world: World, tx: number, tz: number): Generator<void, boolean, void> {
   let cache = tileEntrHotCache.get(world);
   if (!cache) {
     cache = new Map();
@@ -550,7 +581,9 @@ function lod1TileEntrHot(world: World, tx: number, tz: number): boolean {
         hot = true;
         break outer;
       }
+      if ((ix & 7) === 7) yield;
     }
+    yield;
   }
   cache.set(key, hot);
   return hot;
@@ -561,7 +594,7 @@ export function meshColumnChunks(
   world: World, cx: number, cz: number, caveDetail: boolean,
   step = 1,
 ): ChunkMesh[] {
-  return meshColumnBundle(world, cx, cz, caveDetail, step, false).chunks;
+  return finishMesh(meshColumnBundleSteps(world, cx, cz, caveDetail, step, false)).chunks;
 }
 
 /**
@@ -573,15 +606,23 @@ export function meshColumnWithPortals(
   world: World, cx: number, cz: number, caveDetail: boolean,
   step = 1,
 ): ColumnMeshBundle {
-  return meshColumnBundle(
-    world, cx, cz, caveDetail, step, step < LOD2_STEP,
-  );
+  return finishMesh(meshColumnWithPortalsSteps(world, cx, cz, caveDetail, step));
 }
 
-function meshColumnBundle(
+/** Exact worker coroutine. Yielding never publishes a partial mesh, reorders
+ * queries, or changes geometry. Individual cold world queries and typed-array
+ * allocations are synchronous; the caller owns the time budget and rests. */
+export function* meshColumnWithPortalsSteps(
+  world: World, cx: number, cz: number, caveDetail: boolean, step = 1,
+): Generator<void, ColumnMeshBundle, void> {
+  return yield* meshColumnBundleSteps(world, cx, cz, caveDetail, step, step < LOD2_STEP);
+}
+
+function* meshColumnBundleSteps(
   world: World, cx: number, cz: number, caveDetail: boolean,
   step: number, includePortals: boolean,
-): ColumnMeshBundle {
+): Generator<void, ColumnMeshBundle, void> {
+  yield;
   const chunkW = N * step;
   const baseX = cx * chunkW;
   const baseZ = cz * chunkW;
@@ -599,16 +640,20 @@ function meshColumnBundle(
       if (c.h > maxH) maxH = c.h;
       if (c.entr > maxEntr) maxEntr = c.entr;
       if (c.cave !== undefined) hasCaveSite = true;
+      if ((ix & 7) === 7) yield;
     }
+    yield;
   }
   const portals = includePortals
     ? meshEntrancePortalsFromColumns(cols, baseX, baseZ, step)
     : { positions: new Float32Array() };
+  yield;
   let region = world.collectRegion(
     baseX - 2 * step, baseX + chunkW + 2 * step,
     baseZ - 2 * step, baseZ + chunkW + 2 * step,
     false,
   );
+  yield;
   // Exact structure plinths own their top and sides. Mask the sampled
   // terrain precisely at that footprint, so coarse foundation triangles
   // cannot flash through a floor only centimetres above the analytic pad.
@@ -650,9 +695,9 @@ function meshColumnBundle(
   // Bounded step-4 caves extend behind an opaque underground fog horizon.
   const pits = step < LOD2_STEP && (
     hasCaveSite || maxEntr > CAVE_SHAFT_BREACH_ENTR ||
-    (step === 1 && lod1TileEntrHot(
+    (step === 1 && (yield* lod1TileEntrHotSteps(
       world, Math.floor(cx / LOD1_STEP), Math.floor(cz / LOD1_STEP),
-    ))
+    )))
   );
   if (pits || caveDetail) lo = Math.min(lo, WORLD.MIN_CAVE_Y - 2);
 
@@ -709,7 +754,9 @@ function meshColumnBundle(
         const seal = sealLevel(cols[iz * G + ix], wx, wz);
         sealBelow[iz * G + ix] = seal;
         if (seal < minSeal) minSeal = seal;
+        if ((ix & 7) === 7) yield;
       }
+      yield;
     }
   } else if (pits && !caveDetail) {
     for (let iz = 0; iz < G; iz++) {
@@ -731,6 +778,7 @@ function meshColumnBundle(
         sealBelow[iz * G + ix] = seal;
         if (seal < minSeal) minSeal = seal;
       }
+      yield;
     }
   }
   // The band must reach below the deepest seal: carved entrance basins put
@@ -751,24 +799,30 @@ function meshColumnBundle(
   const cy0 = Math.floor(lo / chunkH);
   const cy1 = Math.floor(hi / chunkH);
   for (let cy = cy0; cy <= cy1; cy++) {
-    const mesh = meshChunk(world, cols, region, cx, cy, cz, step, sealBelow);
+    yield;
+    const mesh = yield* meshChunkSteps(world, cols, region, cx, cy, cz, step, sealBelow);
     if (mesh) out.push(mesh);
   }
   // Coarse clipping is intentionally done in this worker-side path. The
   // render thread receives packed, part-ordered buffers and never performs a
   // large triangle-clipping pass when a streamed tile completes.
-  const ownedTerrain = appendFoundationMeshes(clipTerrainFoundations(out, foundations), foundations, world, step);
+  yield;
+  const authoredCapture = yield* captureAuthoredSeamsSteps(out, foundations,
+    { cx, cz, step, bandFloor: cy0 * chunkH, sealBelow }, partitionChunkMeshesSteps);
+  const clippedTerrain = yield* clipTerrainFoundationsSteps(out, foundations);
+  const ownedTerrain = yield* appendFoundationMeshesSteps(clippedTerrain, foundations, world, step);
   const chunks = step === 1
-    ? clipChunkMeshesToFootprint(ownedTerrain, baseX, baseZ, chunkW)
-    : partitionChunkMeshes(ownedTerrain, baseX, baseZ, chunkW, step);
-  return { chunks, portals };
+    ? yield* clipChunkMeshesToFootprintSteps(ownedTerrain, baseX, baseZ, chunkW)
+    : yield* partitionChunkMeshesSteps(ownedTerrain, baseX, baseZ, chunkW, step);
+  const authoredSeams = yield* finishAuthoredSeamsSteps(authoredCapture, chunks);
+  return { chunks, portals, authoredSeams };
 }
 
-function meshChunk(
+function* meshChunkSteps(
   world: World, cols: ColumnData[], region: Region,
   cx: number, cy: number, cz: number, step: number,
   sealBelow: Float32Array,
-): ChunkMesh | null {
+): Generator<void, ChunkMesh | null, void> {
   const chunkW = N * step;
   const baseX = cx * chunkW, baseY = cy * chunkW, baseZ = cz * chunkW;
   // The pad field supports a small earthen shoulder outside the plinth.
@@ -805,6 +859,7 @@ function meshChunk(
         if (v > maxD) maxD = v;
       }
     }
+    yield;
   }
   if (minD > 0 || maxD < 0) return null; // fully empty / fully solid
 
@@ -939,6 +994,7 @@ function meshChunk(
         verts.push(vx, vy, vz);
         fieldNormals.push(gx, gy, gz);
       }
+      yield;
     }
   }
   if (verts.length === 0) return null;
@@ -1030,6 +1086,7 @@ function meshChunk(
           d0 < 0,
         );
       }
+      yield;
     }
   }
   // Y-edges.
@@ -1048,6 +1105,7 @@ function meshChunk(
           d0 < 0,
         );
       }
+      yield;
     }
   }
   // Z-edges.
@@ -1066,6 +1124,7 @@ function meshChunk(
           d0 < 0,
         );
       }
+      yield;
     }
   }
 

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { rockProfile, type World, type RBox } from '@shared/index';
 import { boulderGeometry, RockRenderer, ROCK_NEAR_BUDGET, ROCK_RENDER_RADIUS } from '../src/render/rocks.js';
+import type { ScenerySource } from '../src/render/scenery-stream.js';
 
 function projectGranite(point: THREE.Vector3, variation: number): THREE.Vector3 {
   let low = 0, high = 2;
@@ -136,4 +137,51 @@ test('rock detail budget preserves all distant gameplay cover and does no same-c
   assert.equal(disposed, 8);
   assert.equal(renderer.count, 0);
   assert.equal(renderer.update(0, 0), false);
+});
+
+test('far rocks wait for terrain while protected footprints and stationary arrivals keep exact heights', () => {
+  const rocks: RBox[] = [
+    { x: 190, y: 7.25, z: 32, hx: 4, hy: 3, hz: 4, r: .2 },
+    { x: 202, y: 11.5, z: 32, hx: 11, hy: 4, hz: 3, r: .2 },
+    { x: 350, y: 23.125, z: 32, hx: 5, hy: 6, hz: 7, r: .2 },
+  ];
+  let reads = 0, checks = 0, ready = false, pending = false;
+  const terrain = { sceneryCoverageRevision: 0,
+    sceneryGroundReady(x: number, z: number, hx: number, hz: number) {
+      checks++; assert.deepEqual([x, z, hx, hz], [350, 32, 5, 7]); return ready;
+    } };
+  const scenery = { failed: false, read: () => { reads++; return pending ? null : rocks.map(rock => ({ rock, desert: false })); } } as unknown as ScenerySource;
+  const world = { collectBoulders() { throw new Error('unexpected world query'); },
+    column() { throw new Error('unexpected terrain sample'); } } as unknown as Pick<World, 'collectBoulders' | 'column'>;
+  const renderer = new RockRenderer(world, scenery, terrain);
+  const version = () => renderer.group.children.map(mesh => (mesh as THREE.InstancedMesh).instanceMatrix.version);
+  try {
+    assert.equal(renderer.update(0, 32), true);
+    assert.equal(renderer.count, 2, 'the entire camera cell plus128 m and each rock footprint is protected');
+    const before = version();
+    assert.equal(renderer.update(63.9, 32), false, 'same-cell approach needs no rebuild to preserve near collision cover');
+    assert.equal(checks, 1);
+    terrain.sceneryCoverageRevision++;
+    assert.equal(renderer.update(63.9, 32), false, 'an unrelated terrain completion does not upload unchanged instances');
+    assert.deepEqual(version(), before);
+    ready = true; terrain.sceneryCoverageRevision++;
+    assert.equal(renderer.update(63.9, 32), true);
+    assert.equal(renderer.count, 3, 'terrain completion releases the cached far rock without moving the camera');
+    assert.equal(reads, 1, 'terrain revisions reuse scenery data without another query');
+    const matrix = new THREE.Matrix4();
+    for (const mesh of renderer.group.children as THREE.InstancedMesh[]) for (let i = 0; i < mesh.count; i++) {
+      mesh.getMatrixAt(i, matrix);
+      const original = rocks.find(rock => rock.x === matrix.elements[12])!;
+      assert.equal(matrix.elements[13], Math.fround(original.y));
+    }
+    ready = false; terrain.sceneryCoverageRevision++;
+    assert.equal(renderer.update(63.9, 32), true);
+    assert.equal(renderer.count, 2, 'terrain eviction defers only the far rock');
+    pending = true;
+    assert.equal(renderer.update(256, 32), true);
+    assert.equal(renderer.count, 3, 'cached approaching colliders become visible even while the next worker footprint is pending');
+    const settledChecks = checks;
+    for (let i = 0; i < 100; i++) assert.equal(renderer.update(256, 32), false);
+    assert.equal(checks, settledChecks, 'stationary frames do not repeat readiness work');
+  } finally { renderer.dispose(); }
 });

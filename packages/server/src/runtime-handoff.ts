@@ -1,5 +1,6 @@
 import { TICK_RATE, NET } from '@shared/constants';
 import { isEntityId } from '@shared/entity-id';
+import { createMoveState } from '@shared/movement';
 import { ServerPlayer, type Game, type PlayerSink, type ServerVehicle, type Projectile } from './game.js';
 
 /** Full simulation state. SavedPlayer is deliberately smaller and is only for
@@ -102,6 +103,9 @@ function validateRecord(record: RuntimeHandoff): void {
       if (['number', 'boolean', 'string'].includes(typeof value) && typeof (p as unknown as Record<string, unknown>)[key] !== typeof value) throw new Error('Incomplete handoff player');
     }
     for (const [key, value] of Object.entries(template.state)) {
+      // Factory-owned undefined slots are optional on the wire. Keep the
+      // original required movement-field checks compatible with older peers.
+      if (value === undefined) continue;
       if (typeof (p.state as unknown as Record<string, unknown>)[key] !== typeof value) throw new Error('Incomplete handoff movement');
     }
     if (p.ammo.length !== template.ammo.length || p.ammo.some(a => typeof a.magazine !== 'number' || typeof a.reserve !== 'number') ||
@@ -142,7 +146,7 @@ export function validateHandoff(record: RuntimeHandoff): void { validateRecord(c
 function rebasePlayer(p: HandoffPlayer, delta: number): void {
   p.lastInputAtTick += delta;
   for (const key of ['regenBlockUntil', 'respawnAtTick', 'factionChangeAt', 'fallCreditUntilTick',
-    'ranOverUntilTick', 'teleportCdUntil', 'recallSince', 'trapCooldownUntil', 'transitDamageUntil'] as const) {
+    'ranOverUntilTick', 'teleportCdUntil', 'recallSince', 'trapCooldownUntil', 'transitDamageUntil', 'spawnProtectedUntil'] as const) {
     if (p[key] >= 0) p[key] += delta;
   }
   if (p.airlift) p.airlift.start += delta;
@@ -164,8 +168,17 @@ export function prepareArrival(game: Game, incoming: RuntimeHandoff, sinks: Read
   const players = record.players.map(p => {
     rebasePlayer(p, delta);
     const player = originals?.get(p.id) ?? new ServerPlayer(p.id, p.name, sinks.get(p.id) ?? null, p.isBot, { x: p.state.px, y: p.state.py, z: p.state.pz });
-    const { id: _id, name: _name, isBot: _bot, discoveries, fullPickupContacts, ...runtime } = p;
-    Object.assign(player, runtime, { discoveries: new Set(discoveries), fullPickupContacts: new Set(fullPickupContacts) });
+    const { id: _id, name: _name, isBot: _bot, state, discoveries, fullPickupContacts, ...runtime } = p;
+    const movement = createMoveState(state.px, state.py, state.pz);
+    // JSON can carry an own __proto__ data key. Preserve accepted extra data
+    // without invoking Object.assign's inherited prototype setter.
+    if (Object.prototype.hasOwnProperty.call(state, '__proto__'))
+      Object.defineProperties(movement, Object.getOwnPropertyDescriptors(state));
+    else Object.assign(movement, state);
+    Object.assign(player, runtime, {
+      state: movement,
+      discoveries: new Set(discoveries), fullPickupContacts: new Set(fullPickupContacts),
+    });
     return player;
   });
   for (const v of record.vehicles) if (v.respawnAtTick >= 0) v.respawnAtTick += delta;
