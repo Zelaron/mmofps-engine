@@ -820,7 +820,7 @@ export class Bot {
         // Follow the resource approach, or seek toward the nearest human
         // (fall back to the nearest bot) so fights find the players.
         // NOTE: linear scan is fine at MVP scale; at thousands of players
-        // this becomes a spatial-grid nearest query (see ARCHITECTURE.md).
+        // this becomes a spatial-grid nearest query.
         if (!this.campaign(game).objective && !routePickup && this.vehicleGoal<0 && tick >= this.seekCheckAt) {
           this.seekCheckAt = tick + 150 + Math.floor(this.rng() * 60);
           let best: ServerPlayer | null = null;

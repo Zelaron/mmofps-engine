@@ -27,8 +27,8 @@ interface Worker { planet: PlanetId; process: ChildProcess; port: number }
  * full-population allocation rate. TurboFan's default inlining budget runs out
  * inside the deep world-field queries (sdf -> column -> noise), leaving hot
  * helpers as real calls that box their double arguments and results; a larger
- * budget keeps them inline. These change speed only, never simulation results
- * (docs/PERFORMANCE.md). Start external `MMOFPS_ROLE=world` workers with them too. */
+ * budget keeps them inline. These change speed only, never simulation results.
+ * Start external `MMOFPS_ROLE=world` workers with them too. */
 const WORLD_V8_OPTIONS = [
   '--max-semi-space-size=64',
   '--max-inlined-bytecode-size-cumulative=11040',
