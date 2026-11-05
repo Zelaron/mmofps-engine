@@ -80,7 +80,7 @@ function buildCell(world:World,city:CityDistrict,ix:number,iz:number):CellProof|
   };
   append(region.boulders,early);append(region.pads,early,.6+EPS);append(region.solids,solid);
   for(const v of region.vegetation)if(overlaps(v.x-v.radius-EPS,v.x+v.radius+EPS,v.z-v.radius-EPS,v.z+v.radius+EPS))
-    solid.push({lo:v.y-EPS,hi:v.y+v.height+EPS});
+    solid.push({lo:v.y-(v.sink??0)-EPS,hi:v.y+v.height+EPS});
   for(const {a,b} of region.capitalSegments??[]){
     const r=Math.max(a.radius,b.radius)+EPS;
     if(overlaps(Math.min(a.x,b.x)-r,Math.max(a.x,b.x)+r,Math.min(a.z,b.z)-r,Math.max(a.z,b.z)+r))

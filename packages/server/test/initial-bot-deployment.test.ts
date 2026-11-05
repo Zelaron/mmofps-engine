@@ -51,7 +51,10 @@ test('an unplaced campaign bot does not select Meridian because of its temporary
   const player = game.addPlayer('New soldier', null, true), frontier = game.frontier!;
   assert.deepEqual(seen, [{ alive: false, faction: 1, ordinal: 0, registered: true, x: -2048, z: 2048 }]);
   assert.equal(frontier.order(player)?.baseId, 'far-target', 'the squad uses its home-side front, not placeholder presence');
-  assert.ok(Math.hypot(player.state.px - 6000, player.state.pz - 4096) <= 17, 'deploy at the safe owned supply near that order');
+  // Assaults deploy at forward staging a short run from the target control.
+  const order = frontier.order(player)!;
+  assert.ok(Math.hypot(player.state.px - order.x, player.state.pz - order.z) <= 420, 'deploy at the forward staging near that order');
+  assert.ok(Math.hypot(player.state.px + 2048, player.state.pz - 2048) > 5000, 'never at the placeholder Meridian position');
   assert.equal(player.state.alive, true); assert.equal(player.health, PLAYER.MAX_HEALTH); assert.equal(player.respawnAtTick, -1);
   const point = { x: player.state.px, y: player.state.py, z: player.state.pz };
   assert.equal(frontier.reinforcementPlanner.supported(point), true);

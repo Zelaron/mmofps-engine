@@ -134,8 +134,8 @@ type VegetationSource = Pick<World, 'collectVegetation'>;
 /**
  * Camera-local, low-poly vegetation built from fixed-capacity instance pools.
  *
- * A placement's stem is rendered from exactly `y` to `y + height`, at exactly
- * `radius`, matching the authoritative collider - in the far ring too, since
+ * A placement's stem is rendered from exactly `y - sink` to `y + height`, at
+ * exactly `radius`, matching the authoritative collider - in the far ring too, since
  * weapons out-range the near ring. Crowns, needles, and cactus branches are
  * deliberately cosmetic silhouettes around that clear stem.
  *
@@ -780,12 +780,16 @@ export class VegetationRenderer {
         const root = k < 6, reach = root ? placement.radius * 2.5 : placement.canopyRadius * .72;
         const dx = Math.cos(angle) * reach, dz = Math.sin(angle) * reach;
         const length = root ? placement.height * .14 : placement.height * .37;
-        const base = root ? placement.y : placement.y + placement.height * .44;
-        this.branchDirection.set(root ? -dx : .3, length, root ? -dz : .5);
+        // A root plank runs from the ground where it lands (slightly buried)
+        // up to the trunk, so on a slope the downhill planks reach the ground.
+        const ground = root ? Math.min((placement.roots?.[k - 2] ?? placement.y) - .4, placement.y + length * .6) : 0;
+        const rise = root ? placement.y + length - ground : length;
+        const base = root ? ground : placement.y + placement.height * .44;
+        this.branchDirection.set(root ? -dx : .3, rise, root ? -dz : .5);
         const span = this.branchDirection.length();
         this.partRotation.setFromUnitVectors(UP, this.branchDirection.normalize());
         const radius = root ? placement.radius * .43 : .13;
-        this.compose(placement.x + dx * (root ? .5 : 1), base + length * .5,
+        this.compose(placement.x + dx * (root ? .5 : 1), base + rise * .5,
           placement.z + dz * (root ? .5 : 1), this.partRotation, radius, span, radius);
         this.broadleafBranches.setMatrixAt(index, this.matrix);
         this.barkTint(this.broadleafBranches, index++, placement, false);
@@ -995,13 +999,14 @@ export class VegetationRenderer {
   }
 
   private stemMatrix(placement: VegetationPlacement): void {
+    const sink = placement.sink ?? 0;
     this.compose(
       placement.x,
-      placement.y + placement.height * 0.5,
+      placement.y + (placement.height - sink) * 0.5,
       placement.z,
       this.yawRotation,
       placement.radius,
-      placement.height,
+      placement.height + sink,
       placement.radius,
     );
   }

@@ -1,14 +1,16 @@
 import { DEFAULT_TARGET_POPULATION, startServer } from './server.js';
 import { startCluster } from './cluster.js';
-import { planetById, type PlanetId } from '@shared/universe';
+import { planetById, parseEnabledPlanets, type PlanetId } from '@shared/universe';
 
 // Process entry point. Configuration via environment:
-//   PORT        listen port                     (default 8080)
-//   HOST        bind address                    (default 0.0.0.0)
-//   SEED        world seed                      (default 1337)
-//   BOTS        maximum adaptive population     (default 192)
-//   MAX_PLAYERS max concurrent connections      (default 64)
-//   CLIENT_DIR  override path to built client
+//   PORT          listen port                     (default 8080)
+//   HOST          bind address                    (default 0.0.0.0)
+//   SEED          world seed                      (default 1337)
+//   BOTS          maximum adaptive population     (default 192)
+//   MAX_PLAYERS   max concurrent connections      (default 64)
+//   CLIENT_DIR    override path to built client
+//   PLANETS       worlds in the universe          (default meridian; `all` or a list re-enables Cinder/Nacre)
+//   LOCAL_PLANETS worlds this machine launches    (default: every enabled world)
 
 function envInt(name: string, fallback: number): number {
   const v = process.env[name];
@@ -28,13 +30,15 @@ async function main(): Promise<void> {
   };
   const role = process.env.MMOFPS_ROLE ?? 'cluster';
   if (!['cluster', 'world', 'single'].includes(role)) throw new Error('MMOFPS_ROLE must be cluster, world or single');
+  const enabledPlanets = parseEnabledPlanets(process.env.PLANETS);
   const localPlanets = process.env.LOCAL_PLANETS === undefined ? undefined : process.env.LOCAL_PLANETS.split(',').filter(Boolean);
   if (localPlanets?.some(p => !planetById(p))) throw new Error('LOCAL_PLANETS contains an unknown planet');
+  if (role === 'cluster' && localPlanets?.some(p => !enabledPlanets.includes(p as PlanetId))) throw new Error('LOCAL_PLANETS must be a subset of PLANETS');
   if (role === 'cluster' && process.env.COORDINATOR_HOST && !['127.0.0.1', '::1', 'localhost'].includes(process.env.COORDINATOR_HOST) && !process.env.COORDINATOR_SECRET) throw new Error('A configured COORDINATOR_SECRET is required on a private network interface');
   const planet = planetById(process.env.PLANET_ID ?? 'meridian');
   if (!planet) throw new Error('Unknown PLANET_ID');
   if (role === 'world' && (!process.env.COORDINATOR_URL || !process.env.COORDINATOR_SECRET || !process.env.WORLD_NODE_ID)) throw new Error('World workers require a coordinator URL, secret and unique node ID');
-  const running = role === 'cluster' ? await startCluster({ ...common, dataDir: process.env.DATA_DIR || 'data', localPlanets: localPlanets as PlanetId[] | undefined,
+  const running = role === 'cluster' ? await startCluster({ ...common, dataDir: process.env.DATA_DIR || 'data', localPlanets: localPlanets as PlanetId[] | undefined, enabledPlanets,
       controlHost: process.env.COORDINATOR_HOST, controlPort: envInt('COORDINATOR_PORT', 0), controlSecret: process.env.COORDINATOR_SECRET })
     : await startServer({ ...common, onFailure: error => { console.error('World failed:', error.message); process.exit(1); }, seed: role === 'world' ? planet.seed : envInt('SEED', 1337),
       dataDir: process.env.DATA_DIR || `data/${planet.id}`,

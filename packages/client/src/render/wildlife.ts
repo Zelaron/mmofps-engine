@@ -1,170 +1,171 @@
 import * as THREE from 'three';
 import { MAX_VISIBLE_CREATURES, CREATURE_DEFS, type CreatureState } from '@shared/index';
-import { VehicleGeometry } from './vehicle-geometry.js';
 import { renderProfile } from './device-profile.js';
 import { BossAttackModels } from './boss-attacks.js';
+import { buildSpeciesModel, type GlowPoint } from './creature-models.js';
+import { RigPoser, animateTrackSecondary, deathVariant, hash01, strideLength, type CreatureTrack } from './creature-rigs.js';
 
-interface Track { target: CreatureState; x: number; y: number; z: number; yaw: number; phase: number }
-const COLORS = [0x879674, 0xa7764c, 0x50636f, 0x619696, 0x716352, 0x4f827c,
-  0x82906b, 0x766480, 0x6c8064, 0xc6bea4, 0x493b35, 0x4d4640, 0x4f929a, 0x487c83];
-const CORPSE_REST_HEIGHT = [.46, .40, .60, .32, .55, .5, .3, .3, .5, 2, .5, 2.3, .5, 2];
 const SPECIES = CREATURE_DEFS.length;
+const TAU = Math.PI * 2;
+/** Glow points (eyes, lures, embers) per creature never exceed this. */
+const MAX_GLOW = 12;
+const approach = (step: number, rate: number) => 1 - Math.exp(-step * rate);
 
-/** Only occupied species draw. Creature count and geometry stay bounded;
- * snapshot interpolation stops travel animation when movement stops. */
+interface SpeciesRender {
+  poser: RigPoser;
+  meshes: THREE.InstancedMesh[];
+  /** First pose slot of each part mesh. */
+  bases: number[];
+  glow: GlowPoint[];
+  glowSlots: number[];
+  glowColors: THREE.Color[];
+  /** One conservative sphere shared by every part mesh of the species. */
+  sphere: THREE.Sphere;
+  centerY: number; radius: number;
+  count: number;
+}
+
+/**
+ * Articulated procedural wildlife. Each species owns one InstancedMesh per
+ * body part (torso, neck, head, tail, limb segments...) posed every frame from
+ * a tiny CPU skeleton: planted-foot gaits with two-bone IK, idle breathing and
+ * looking, alert/wind-up postures and a grounded death collapse. Only occupied
+ * species draw; per-frame work allocates nothing.
+ */
 export class WildlifeModels {
   readonly group = new THREE.Group();
   private readonly capacity = renderProfile().touch ? 16 : MAX_VISIBLE_CREATURES;
   private readonly material = new THREE.MeshLambertMaterial({ vertexColors: true });
-  private readonly bodies: THREE.InstancedMesh[] = [];
-  private readonly limbs: THREE.InstancedMesh[] = [];
-  private readonly tracks = new Map<number, Track>();
-  private readonly transform = new THREE.Object3D();
-  private readonly root = new THREE.Object3D();
+  private readonly glowMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  private readonly species: SpeciesRender[] = [];
+  private readonly glow: THREE.InstancedMesh;
+  private readonly tracks = new Map<number, CreatureTrack>();
+  /** Insertion-ordered tracks for allocation-free iteration in update(). */
+  private readonly list: CreatureTrack[] = [];
+  private readonly seen = new Set<number>();
+  private readonly slots: THREE.Matrix4[] = [];
+  private readonly root = new THREE.Matrix4();
   private readonly matrix = new THREE.Matrix4();
+  private readonly transform = new THREE.Object3D();
+  private readonly position = new THREE.Vector3();
+  private readonly rotation = new THREE.Quaternion();
+  private readonly size = new THREE.Vector3();
+  private readonly up = new THREE.Vector3(0, 1, 0);
   private readonly tint = new THREE.Color();
+  private readonly sphere = new THREE.Sphere();
+  private readonly glowSphere = new THREE.Sphere();
   private readonly warningMaterial = new THREE.MeshBasicMaterial({ color: 0xff873d, transparent: true, opacity: .85, depthWrite: false, side: THREE.DoubleSide });
   private readonly warnings = new THREE.InstancedMesh(new THREE.RingGeometry(.93, 1, 48).rotateX(-Math.PI / 2), this.warningMaterial, this.capacity);
   private readonly attacks = new BossAttackModels(this.capacity);
   private readonly labels = new Map<number, { sprite: THREE.Sprite; canvas: HTMLCanvasElement; context: CanvasRenderingContext2D; health: number; status: string }>();
 
   constructor() {
+    let maxSlots = 0;
+    const white = new THREE.Color(1, 1, 1);
     for (let species = 0; species < SPECIES; species++) {
-      const body = new VehicleGeometry(), color = COLORS[species];
-      const ellipsoid = (x: number, y: number, z: number, sx: number, sy: number, sz: number, tint: number) =>
-        body.add(new THREE.IcosahedronGeometry(1, 1).scale(sx, sy, sz), tint, [x, y, z]);
-      if (species === 0) {
-        ellipsoid(0, 0.92, 0, 0.46, 0.46, 0.7, color);
-        body.tube(0.18, [0, 0.94, -0.42], [0, 1.35, -0.62], color, 7, 0.13);
-        ellipsoid(0, 1.32, -0.71, 0.24, 0.18, 0.28, 0xb5b592);
-        for (const side of [-1, 1]) {
-          body.tube(0.085, [side * .14, 1.4, -.65], [side * .27, 1.68, -.5], 0xd5c69d, 6, .015);
-          ellipsoid(side * .18, 1.38, -.85, .055, .04, .06, 0x16211e);
-        }
-        body.tube(.055, [0, .99, .58], [0, .85, .94], color, 6, .018);
-      } else if (species === 1) {
-        ellipsoid(0, .68, 0, .4, .32, .7, color);
-        ellipsoid(0, .79, -.64, .26, .25, .35, 0x694b38);
-        for (const side of [-1, 1]) {
-          ellipsoid(side * .2, .91, -.83, .065, .045, .06, 0xffbc57);
-          body.tube(.07, [side * .15, .66, -.8], [side * .16, .48, -.91], 0xeadab6, 6, .015);
-        }
-        for (let i = 0; i < 5; i++) body.tube(.1, [0, .94, -.25 + i * .2], [0, 1.13, -.1 + i * .2], 0x4f453b, 5, .015);
-        body.tube(.12, [0, .73, .57], [0, .6, 1.17], color, 7, .025);
-      } else if (species === 2) {
-        ellipsoid(0, .49, 0, .57, .32, .6, color);
-        ellipsoid(0, .4, -.49, .28, .19, .22, 0x253b46);
-        for (const side of [-1, 1]) for (let i = 0; i < 3; i++) {
-          ellipsoid(side * (.1 + i * .09), .49, -.61 + i * .045, .042, .045, .04, 0x8debd7);
-        }
-        for (const side of [-1, 1]) body.tube(.07, [side * .17, .34, -.62], [side * .25, .19, -.82], 0xc2d4c7, 6, .015);
-        body.tube(.07, [0, .6, .45], [0, .77, .82], 0x90b2bc, 6, .01);
-      } else if (species === 3) {
-        // A high-necked, two-legged runner reads differently from quadrupeds.
-        ellipsoid(0, .98, .06, .32, .42, .47, color);
-        body.tube(.11, [0, 1.12, -.22], [0, 1.72, -.35], 0x87b5a4, 7, .075);
-        ellipsoid(0, 1.76, -.4, .16, .14, .2, 0xd0d4af);
-        body.tube(.095, [0, 1.74, -.52], [0, 1.70, -.78], 0xc78b45, 6, .005);
-        for (const side of [-1, 1]) {
-          ellipsoid(side * .14, 1.8, -.48, .033, .04, .04, 0x112724);
-          ellipsoid(side * .28, 1.0, .08, .11, .25, .32, 0x385c64);
-        }
-        for (let i = 0; i < 3; i++) {
-          body.tube(.07, [(i - 1) * .07, 1.87, -.31], [(i - 1) * .14, 2.07 - Math.abs(i - 1) * .07, -.22], 0xddb46b, 5, .005);
-          body.tube(.11, [(i - 1) * .1, 1.01, .4], [(i - 1) * .25, 1.28, .87], 0x36656c, 6, .02);
-        }
-      } else if (species === 4) {
-        ellipsoid(0, .59, .03, .53, .45, .68, color);
-        ellipsoid(0, .55, -.61, .32, .3, .4, 0x655044);
-        ellipsoid(0, .48, -.9, .25, .16, .15, 0x9e8a72);
-        for (const side of [-1, 1]) {
-          ellipsoid(side * .28, .69, -.76, .047, .044, .05, 0x181a16);
-          body.tube(.105, [side * .24, .4, -.76], [side * .4, .59, -.98], 0xe0cba4, 7, .015);
-          body.tube(.13, [side * .28, .83, -.5], [side * .34, 1.07, -.39], 0x54433a, 6, .018);
-        }
-        for (let i = 0; i < 4; i++) {
-          ellipsoid(0, .95, -.3 + i * .22, .4, .15, .18, i % 2 ? 0x7e735f : 0x594f45);
-          body.tube(.075, [0, 1.03, -.28 + i * .23], [0, 1.21, -.2 + i * .23], 0xc1ad80, 5, .008);
-        }
-        body.tube(.06, [0, .72, .65], [0, .9, .91], 0x8d7b5e, 6, .02);
-      } else if (species === 5) {
-        // Smooth luminous abdomen, split wing cases and long antennae.
-        ellipsoid(0, .38, .1, .44, .3, .57, 0x4f9b91);
-        for (const side of [-1, 1]) {
-          ellipsoid(side * .2, .49, .1, .23, .18, .46, side < 0 ? 0x87d3a2 : 0x65bdad);
-          body.tube(.035, [side * .14, .39, -.48], [side * .34, .77, -.84], 0xc6e8b0, 6, .01);
-          ellipsoid(side * .35, .78, -.85, .05, .05, .05, 0xddeeb0);
-          ellipsoid(side * .16, .37, -.65, .047, .05, .046, 0xf2d779);
-        }
-        ellipsoid(0, .3, -.43, .24, .18, .24, 0x324f53);
-        for (let i = 0; i < 3; i++) ellipsoid(0, .67 - i * .015, -.12 + i * .18, .055, .035, .055, 0xe3e9a6);
-      } else if (CREATURE_DEFS[species].undead || species === 11) {
-        // Tall skeletal silhouettes, ragged clothing and forward-reaching arms
-        // distinguish infestations from the existing grazing animals.
-        const giant = CREATURE_DEFS[species].boss, brute = species === 8, scale = giant ? species === 11 ? 6 : 5.3 : brute ? 1.5 : species === 7 ? .86 : 1;
-        ellipsoid(0, 1.12 * scale, 0, .29 * scale, .4 * scale, .2 * scale, color);
-        ellipsoid(0, 1.68 * scale, -.08 * scale, .22 * scale, .24 * scale, .2 * scale, giant ? 0xcac1a8 : 0xaaa98b);
-        for (const side of [-1, 1]) {
-          body.tube(.11 * scale, [side * .3 * scale, 1.36 * scale, 0], [side * .45 * scale, 1.05 * scale, -.4 * scale], color, 6, .085 * scale);
-          body.tube(.085 * scale, [side * .45 * scale, 1.05 * scale, -.4 * scale], [side * .35 * scale, .98 * scale, -.74 * scale], giant ? 0xc5b89a : 0x969c7c, 6, .07 * scale);
-          ellipsoid(side * .1 * scale, 1.74 * scale, -.245 * scale, .06 * scale, .055 * scale, .035 * scale, species === 11 ? 0xff681e : 0xe8c468);
-          if (giant) for (let rib = 0; rib < 4; rib++)
-            body.tube(.055 * scale, [side * .04 * scale, (1.05 + rib * .13) * scale, -.2 * scale], [side * .29 * scale, (1.01 + rib * .13) * scale, -.12 * scale], species === 11 ? 0xff9137 : 0xe2d3ae, 5, .03 * scale);
-        }
-        if (giant) for (let spike = -2; spike <= 2; spike++)
-          body.tube(.1 * scale, [spike * .1 * scale, 1.83 * scale, 0], [spike * .2 * scale, (2.1 - Math.abs(spike) * .05) * scale, .1 * scale], species === 11 ? 0xb06937 : 0xddd1ac, 5, .005);
-        else body.box(.52 * scale, .45 * scale, .37 * scale, 0, 1.03 * scale, .02 * scale, species === 7 ? 0x463f4b : 0x485143);
-      } else {
-        // Cinder and Nacre keep distinct mineral/crustacean life; neither world
-        // inherits Meridian's humanoid undead roster.
-        const giant = CREATURE_DEFS[species].boss, scale = giant ? 7 : species === 12 ? 1.2 : 1;
-        ellipsoid(0, .67 * scale, .08 * scale, .63 * scale, .43 * scale, .78 * scale, color);
-        ellipsoid(0, .56 * scale, -.63 * scale, .31 * scale, .25 * scale, .3 * scale, species === 10 ? 0x6c4436 : 0x88afa2);
-        for (const side of [-1, 1]) {
-          body.tube(.14 * scale, [side * .44 * scale, .61 * scale, -.25 * scale], [side * .83 * scale, .5 * scale, -.91 * scale], color, 6, .1 * scale);
-          body.tube(.13 * scale, [side * .83 * scale, .5 * scale, -.91 * scale], [side * .61 * scale, .62 * scale, -1.09 * scale], 0xbcbda0, 6, .015 * scale);
-          ellipsoid(side * .16 * scale, .74 * scale, -.82 * scale, .07 * scale, .075 * scale, .065 * scale, species === 10 ? 0xff9635 : 0xb9f3e2);
-        }
-        for (let spike = 0; spike < 4; spike++)
-          body.tube(.16 * scale, [0, .96 * scale, (-.35 + spike * .3) * scale], [0, (1.2 + spike * .04) * scale, (-.2 + spike * .3) * scale], species === 10 ? 0xd67b3e : 0x9cccc4, 5, .015 * scale);
+      const model = buildSpeciesModel(species), poser = new RigPoser(model.rig);
+      maxSlots = Math.max(maxSlots, poser.slots);
+      const meshes: THREE.InstancedMesh[] = [], bases: number[] = [];
+      let base = 0;
+      for (const part of poser.layout) {
+        const geometry = model.parts[part.name];
+        if (!geometry) throw new Error(`creature ${species} lacks part ${part.name}`);
+        const mesh = new THREE.InstancedMesh(geometry, this.material, this.capacity * part.instances);
+        mesh.name = `creature-${species}-${part.name}`;
+        mesh.count = 0; mesh.visible = false; mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        // Allocate instance colors now; update() only rewrites them.
+        mesh.setColorAt(0, white); mesh.instanceColor!.setUsage(THREE.DynamicDrawUsage);
+        meshes.push(mesh); bases.push(base); base += part.instances;
+        this.group.add(mesh);
       }
-      const bodyMesh = body.mesh(this.material, 'creature-body');
-      const legs = new VehicleGeometry();
-      if (CREATURE_DEFS[species].undead || species === 11) {
-        legs.tube(.105, [0, 0, 0], [0, -.36, .07], 0x68665a, 6, .08);
-        legs.tube(.075, [0, -.36, .07], [0, -.72, -.02], color, 6, .05);
-        legs.box(.19, .11, .3, 0, -.72, -.09, 0x383a33);
-      } else if (species === 3) {
-        legs.tube(.07, [0, 0, 0], [0, -.34, .15], 0xa4ad89, 6, .045);
-        legs.tube(.045, [0, -.34, .15], [0, -.76, -.04], 0xc6b98a, 6, .03);
-        for (const toe of [-1, 0, 1]) legs.tube(.03, [0, -.77, -.03], [toe * .095, -.79, -.26], 0x847557, 5, .01);
-      } else {
-        legs.tube(.09, [0, 0, 0], [0, -.25, .11], color, 6, .065);
-        legs.tube(.06, [0, -.25, .11], [0, -.5, -.02], color, 6, .035);
-        legs.box(.15, .07, .24, 0, -.5, -.08, 0x263530);
-      }
-      const legMesh = legs.mesh(this.material, 'creature-limb');
-      this.bodies.push(new THREE.InstancedMesh(bodyMesh.geometry, this.material, this.capacity));
-      this.limbs.push(new THREE.InstancedMesh(legMesh.geometry, this.material, this.capacity * 6));
+      const glowSlots = model.glow.map(point => {
+        const index = poser.layout.findIndex(part => part.name === point.part);
+        if (index < 0) throw new Error(`creature ${species} glow on missing part ${point.part}`);
+        return bases[index] + (point.instance ?? 0);
+      });
+      this.species.push({ poser, meshes, bases, glow: model.glow, glowSlots, glowColors: model.glow.map(point => new THREE.Color(point.color)),
+        sphere: new THREE.Sphere(), centerY: 0, radius: 1, count: 0 });
+      for (const mesh of meshes) mesh.boundingSphere = this.species[species].sphere;
     }
-    for (const mesh of [...this.bodies, ...this.limbs]) {
-      mesh.count = 0; mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.group.add(mesh);
-    }
+    for (let i = 0; i < maxSlots; i++) this.slots.push(new THREE.Matrix4());
+    for (let species = 0; species < SPECIES; species++) this.calibrate(this.species[species], species);
+    this.glow = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1), this.glowMaterial, this.capacity * MAX_GLOW);
+    this.glow.name = 'creature-glow'; this.glow.count = 0; this.glow.visible = false;
+    this.glow.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.glow.setColorAt(0, white);
+    this.glow.instanceColor!.setUsage(THREE.DynamicDrawUsage); this.glow.boundingSphere = this.glowSphere;
+    this.group.add(this.glow);
+    this.warnings.name = 'creature-warnings';
     this.warnings.count = 0; this.warnings.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.group.add(this.warnings);
     this.group.add(...this.attacks.meshes);
+    // Instances carry every pose; the meshes themselves never move.
+    for (const mesh of this.group.children) { mesh.updateMatrix(); mesh.matrixAutoUpdate = false; }
+  }
+
+  /** Rest corpses on the ground from actual vertices, and size culling spheres. */
+  private calibrate(render: SpeciesRender, species: number): void {
+    const rig = render.poser.rig, track = this.createTrack({ id: 0, species, x: 0, y: 0, z: 0, yaw: 0, speed: 0, alert: false }, 0);
+    track.scale = 1; this.root.identity();
+    const box = new THREE.Box3(), part = new THREE.Box3(), point = new THREE.Vector3();
+    // Culling bounds use transformed part boxes; the corpse rest height uses exact vertices.
+    const bounds = () => {
+      render.poser.pose(track, this.root, this.slots);
+      render.meshes.forEach((mesh, index) => {
+        for (let k = 0; k < render.poser.layout[index].instances; k++)
+          box.union(part.copy(mesh.geometry.boundingBox!).applyMatrix4(this.slots[render.bases[index] + k]));
+      });
+    };
+    const lowest = () => {
+      render.poser.pose(track, this.root, this.slots);
+      let low = Infinity;
+      render.meshes.forEach((mesh, index) => {
+        const positions = mesh.geometry.getAttribute('position');
+        for (let k = 0; k < render.poser.layout[index].instances; k++) {
+          const slot = this.slots[render.bases[index] + k];
+          for (let i = 0; i < positions.count; i++) low = Math.min(low, point.fromBufferAttribute(positions, i).applyMatrix4(slot).y);
+        }
+      });
+      return low;
+    };
+    bounds();
+    track.dead = 10; track.target = { ...track.target, dead: true };
+    for (let variant = 0; variant < 2; variant++) {
+      track.side = variant ? 1 : -1; track.seed = variant ? .75 : .25;
+      if (deathVariant(rig, track) !== variant) throw new Error('death variant mismatch');
+      rig.deadDrop[variant] = .3;
+      rig.deadDrop[variant] += .012 - lowest();
+      bounds();
+    }
+    // Animation (gallops, raised arms, lunges) stays inside a padded sphere.
+    const center = box.getCenter(point);
+    render.centerY = center.y;
+    render.radius = box.getSize(new THREE.Vector3()).length() * .5 * 1.3 + Math.hypot(center.x, center.z);
+  }
+
+  private createTrack(c: CreatureState, phase: number): CreatureTrack {
+    const seed = hash01(c.id % 65536, Math.floor(c.id / 65536) % 65536);
+    const def = CREATURE_DEFS[c.species];
+    return { target: c, x: c.x, y: c.y, z: c.z, yaw: c.yaw, phase, speed: 0, move: 0, turn: 0, climb: 0,
+      alert: c.alert && !c.dead ? 1 : 0, windup: 0, strike: 0, strikeTime: -1, cast: 0,
+      dead: c.dead ? 10 : -1, side: seed > .5 ? 1 : -1, time: seed * 20, seed,
+      scale: def?.boss ? 1 : .96 + .08 * hash01(seed * 97, 5), lookYaw: 0, lookPitch: 0, tail: 0, tailVelocity: 0, tail2: 0,
+      winding: !!c.windingUp };
   }
 
   sync(creatures: readonly CreatureState[], tick = 0): void {
     this.attacks.sync(creatures, tick);
-    const ids = new Set<number>();
-    for (const c of creatures.slice(0, this.capacity)) {
+    const ids = this.seen; ids.clear();
+    const limit = Math.min(creatures.length, this.capacity);
+    for (let i = 0; i < limit; i++) {
+      const c = creatures[i];
       if (!CREATURE_DEFS[c.species] || !Number.isFinite(c.x + c.y + c.z + c.yaw)) continue;
       ids.add(c.id);
       const existing = this.tracks.get(c.id);
       if (existing) existing.target = c;
-      else this.tracks.set(c.id, { target: c, x: c.x, y: c.y, z: c.z, yaw: c.yaw, phase: ((c.id % 65536) * 2) % (Math.PI * 2) });
+      else this.tracks.set(c.id, this.createTrack(c, ((c.id % 65536) * 2) % TAU));
     }
     for (const id of this.tracks.keys()) if (!ids.has(id)) this.tracks.delete(id);
+    this.list.length = 0;
+    for (const track of this.tracks.values()) this.list.push(track);
     for (const [id, label] of this.labels) if (!ids.has(id)) {
       label.sprite.material.map?.dispose(); label.sprite.material.dispose(); this.group.remove(label.sprite); this.labels.delete(id);
     }
@@ -172,39 +173,84 @@ export class WildlifeModels {
 
   get count(): number { return this.tracks.size; }
   get attackStats() { return { targetZones: this.attacks.rings.count, bolts: this.attacks.bolts.count, impacts: this.attacks.impacts.count }; }
+
+  /** Ease displayed state toward the snapshot and derive gait inputs from actual travel. */
+  private advance(c: CreatureTrack, step: number, blend: number, tick: number): void {
+    const target = c.target, render = this.species[target.species], rig = render.poser.rig;
+    const previousX = c.x, previousY = c.y, previousZ = c.z;
+    const gx = c.x - target.x, gy = c.y - target.y, gz = c.z - target.z, jump = gx * gx + gy * gy + gz * gz > 64;
+    const factor = jump ? 1 : blend;
+    c.x += (target.x - c.x) * factor; c.y += (target.y - c.y) * factor; c.z += (target.z - c.z) * factor;
+    const yawStep = Math.atan2(Math.sin(target.yaw - c.yaw), Math.cos(target.yaw - c.yaw)) * factor;
+    c.yaw += yawStep;
+    const dead = !!target.dead;
+    if (!jump && step > 0) {
+      const mx = c.x - previousX, mz = c.z - previousZ, moved = Math.sqrt(mx * mx + mz * mz);
+      // Phase follows displayed travel (and in-place turning steps), so
+      // planted feet never skate regardless of the snapshot speed field.
+      const stride = strideLength(rig.gait, c.speed) * rig.scale * c.scale;
+      if (!dead) c.phase += (moved + Math.abs(yawStep) * .35 * rig.scale * c.scale) * TAU / stride;
+      const k = 1 - Math.exp(-step * 5);
+      c.speed += (Math.min(30, moved / step / (rig.scale * c.scale)) - c.speed) * k;
+      c.turn += (yawStep / step - c.turn) * (1 - Math.exp(-step * 6));
+      const slope = moved > 1e-4 ? Math.atan2(c.y - previousY, moved) : 0;
+      c.climb += (Math.max(-.5, Math.min(.5, slope)) - c.climb) * (1 - Math.exp(-step * 3));
+    }
+    const moving = !dead && (c.speed > .12 || Math.abs(c.turn) > .6);
+    c.move += ((moving ? 1 : 0) - c.move) * approach(step, moving ? 5 : 3.5);
+    c.alert += ((target.alert && !dead ? 1 : 0) - c.alert) * approach(step, 4);
+    c.windup += ((target.windingUp && !dead ? 1 : 0) - c.windup) * approach(step, 6);
+    const ranged = target.rangedAttack;
+    // Arms rise while a ranged bolt charges and come down when it is released.
+    c.cast += ((ranged && !dead && tick < ranged.fireTick ? 1 : 0) - c.cast) * approach(step, 4);
+    if (c.winding && !target.windingUp && !dead) c.strikeTime = 0;
+    c.winding = !!target.windingUp;
+    if (c.strikeTime >= 0) {
+      c.strikeTime += step;
+      c.strike = c.strikeTime < .5 ? Math.sin(Math.PI * c.strikeTime / .5) : 0;
+      if (c.strikeTime >= .5) c.strikeTime = -1;
+    }
+    if (dead) c.dead = c.dead < 0 ? 0 : c.dead + step; else c.dead = -1;
+    c.time += step;
+    animateTrackSecondary(c, step, rig.look);
+  }
+
   update(dt: number, tick = 0): void {
     this.attacks.update(tick);
-    const counts = Array(SPECIES).fill(0), legs = Array(SPECIES).fill(0), blend = 1 - Math.exp(-Math.max(0, dt) * 15);
-    let warningCount = 0;
-    for (const c of this.tracks.values()) {
-      const target = c.target, species = target.species, def = CREATURE_DEFS[species];
-      const previousX = c.x, previousZ = c.z;
-      const factor = Math.hypot(c.x - target.x, c.y - target.y, c.z - target.z) > 8 ? 1 : blend;
-      c.x += (target.x - c.x) * factor; c.y += (target.y - c.y) * factor; c.z += (target.z - c.z) * factor;
-      c.yaw += Math.atan2(Math.sin(target.yaw - c.yaw), Math.cos(target.yaw - c.yaw)) * blend;
-      const movement = Math.hypot(c.x - previousX, c.z - previousZ);
-      c.phase += movement * 6;
-      const stride = Math.min(1, movement / Math.max(.001, dt) / 2.5);
-      this.root.position.set(c.x, c.y + (target.dead ? CORPSE_REST_HEIGHT[species] : 0), c.z);
-      this.root.rotation.set(0, c.yaw, target.dead ? Math.PI / 2 : 0);
-      this.root.updateMatrix(); this.bodies[species].setMatrixAt(counts[species], this.root.matrix);
+    const step = Math.max(0, dt), blend = 1 - Math.exp(-step * 15);
+    for (let s = 0; s < SPECIES; s++) this.species[s].count = 0;
+    let warningCount = 0, glowCount = 0;
+    this.glowSphere.makeEmpty();
+    for (let i = 0; i < this.list.length; i++) {
+      const c = this.list[i], target = c.target, species = target.species, def = CREATURE_DEFS[species];
+      const render = this.species[species], poser = render.poser;
+      this.advance(c, step, blend, tick);
+      const scale = poser.rig.scale * c.scale;
+      this.rotation.setFromAxisAngle(this.up, c.yaw);
+      this.root.compose(this.position.set(c.x, c.y, c.z), this.rotation, this.size.set(scale, scale, scale));
+      poser.pose(c, this.root, this.slots);
+      const n = render.count++;
       // Small fixed coat variations share the same models and materials.
-      this.tint.setRGB(1, 1, 1).multiplyScalar(.84 + (target.id % 5) * .04);
-      this.bodies[species].setColorAt(counts[species]++, this.tint);
-      const humanoid = def.undead || species === 11, arthropod = species === 2 || species === 5 || species >= 10 && !humanoid;
-      const pairs = arthropod ? 3 : species === 3 || humanoid ? 1 : 2;
-      const scale = humanoid ? def.boss ? species === 11 ? 6 : 5.3 : species === 8 ? 1.5 : species === 7 ? .86 : 1 :
-        species === 13 ? 7 : species === 12 ? 1.2 : 1;
-      for (let pair = 0; pair < pairs; pair++) for (const side of [-1, 1]) {
-        this.transform.position.set(side * (arthropod ? species === 5 ? .37 : .5 : species === 3 || humanoid ? .19 : .3) * scale,
-          (humanoid ? .76 : species === 0 ? .55 : species === 3 ? .8 : species === 5 ? .34 : .49) * scale,
-          (pairs === 1 ? .06 : (pair / (pairs - 1) - .5) * (species === 5 ? .68 : .85)) * scale);
-        const swing = Math.sin(c.phase + pair * Math.PI + (side > 0 ? Math.PI : 0)) * .55 * stride;
-        this.transform.rotation.set(target.dead ? .8 : swing, 0, arthropod ? side * -.65 : 0);
-        this.transform.scale.set(scale, scale * (species === 2 ? 1.22 : species === 5 ? .82 : 1), scale);
-        this.transform.updateMatrix(); this.matrix.multiplyMatrices(this.root.matrix, this.transform.matrix);
-        this.limbs[species].setMatrixAt(legs[species]++, this.matrix);
+      this.tint.setRGB(1, 1, 1).multiplyScalar(.86 + (target.id % 5) * .035);
+      for (let p = 0; p < render.meshes.length; p++) {
+        const mesh = render.meshes[p], per = poser.layout[p].instances, base = render.bases[p];
+        for (let k = 0; k < per; k++) { mesh.setMatrixAt(n * per + k, this.slots[base + k]); mesh.setColorAt(n * per + k, this.tint); }
       }
+      // Eyes and lures stay lit while alive and fade out with the collapse.
+      const lit = c.dead < 0 ? 1 : Math.max(.12, 1 - c.dead / .6);
+      for (let g = 0; g < render.glow.length && glowCount < this.glow.instanceMatrix.count; g++) {
+        const point = render.glow[g];
+        this.transform.position.set(point.at[0], point.at[1], point.at[2]); this.transform.rotation.set(0, 0, 0);
+        this.transform.scale.set(point.size[0], point.size[1], point.size[2]); this.transform.updateMatrix();
+        this.matrix.multiplyMatrices(this.slots[render.glowSlots[g]], this.transform.matrix);
+        this.glow.setMatrixAt(glowCount, this.matrix);
+        const pulse = point.pulse ? .75 + .25 * Math.sin(c.time * point.pulse + c.seed * 9) : 1;
+        this.tint.copy(render.glowColors[g]).multiplyScalar(lit * pulse);
+        this.glow.setColorAt(glowCount++, this.tint);
+      }
+      this.sphere.center.set(c.x, c.y + render.centerY * scale, c.z); this.sphere.radius = render.radius * scale;
+      if (n === 0) render.sphere.copy(this.sphere); else render.sphere.union(this.sphere);
+      if (render.glow.length) this.glowSphere.union(this.sphere);
       if (target.windingUp && !target.dead) {
         this.transform.position.set(c.x, c.y + .12, c.z); this.transform.rotation.set(0, 0, 0);
         this.transform.scale.setScalar(def.reach ?? 1.7); this.transform.updateMatrix();
@@ -212,19 +258,21 @@ export class WildlifeModels {
       }
       if (def.boss) this.updateBossLabel(c, tick);
     }
-    this.warnings.count = warningCount; this.warnings.instanceMatrix.needsUpdate = true;
-    if (warningCount) this.warnings.computeBoundingSphere();
-    for (let i = 0; i < SPECIES; i++) {
-      this.bodies[i].count = counts[i]; this.limbs[i].count = legs[i];
-      for (const mesh of [this.bodies[i], this.limbs[i]]) {
-        mesh.instanceMatrix.needsUpdate = true;
-        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-        if (mesh.count) mesh.computeBoundingSphere();
+    this.warnings.count = warningCount; this.warnings.visible = warningCount > 0;
+    if (warningCount) { this.warnings.instanceMatrix.needsUpdate = true; this.warnings.computeBoundingSphere(); }
+    this.glow.count = glowCount; this.glow.visible = glowCount > 0;
+    if (glowCount) { this.glow.instanceMatrix.needsUpdate = true; this.glow.instanceColor!.needsUpdate = true; }
+    for (let s = 0; s < SPECIES; s++) {
+      const render = this.species[s], count = render.count;
+      for (let p = 0; p < render.meshes.length; p++) {
+        const mesh = render.meshes[p];
+        mesh.count = count * render.poser.layout[p].instances; mesh.visible = count > 0;
+        if (count) { mesh.instanceMatrix.needsUpdate = true; mesh.instanceColor!.needsUpdate = true; }
       }
     }
   }
 
-  private updateBossLabel(track: Track, tick: number): void {
+  private updateBossLabel(track: CreatureTrack, tick: number): void {
     if (typeof document === 'undefined') return;
     const c = track.target, def = CREATURE_DEFS[c.species];
     let label = this.labels.get(c.id);
@@ -256,9 +304,10 @@ export class WildlifeModels {
 
   dispose(): void {
     this.attacks.dispose();
-    for (const mesh of [...this.bodies, ...this.limbs]) { mesh.geometry.dispose(); mesh.dispose(); }
+    for (const render of this.species) for (const mesh of render.meshes) { mesh.geometry.dispose(); mesh.dispose(); }
+    this.glow.geometry.dispose(); this.glow.dispose(); this.glowMaterial.dispose();
     for (const label of this.labels.values()) { label.sprite.material.map?.dispose(); label.sprite.material.dispose(); }
     this.labels.clear(); this.warnings.geometry.dispose(); this.warnings.dispose(); this.warningMaterial.dispose();
-    this.material.dispose(); this.group.clear(); this.tracks.clear();
+    this.material.dispose(); this.group.clear(); this.tracks.clear(); this.list.length = 0;
   }
 }

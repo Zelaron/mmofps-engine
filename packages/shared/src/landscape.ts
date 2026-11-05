@@ -22,6 +22,24 @@ export interface RoadSegment {
   dramatic?: boolean;
   id: string;
 }
+/** The routed road network (edges and summit trails) as compact polylines.
+ * Route searches are deterministic per seed, so a worker can compute the
+ * whole island and hand it to other World instances of the same seed; they
+ * decode each link on first use instead of re-running its route search.
+ * Coordinates are float64, so adopted links are bit-identical. */
+export interface RoadNetworkSnapshot {
+  version: 1;
+  seed: number;
+  /** `e:<ix>,<iz>,<axis>` for trunk links, `t:<ix>,<iz>` for summit trails. */
+  keys: string[];
+  /** Point ranges per key (points, not coordinates); length keys.length + 1. */
+  offsets: Uint32Array;
+  /** x, y, z per point. A link with fewer than two points has no road. */
+  points: Float64Array;
+  /** Per key: bit 0 dramatic trail. */
+  flags: Uint8Array;
+}
+
 export interface RoadSample {
   distance: number; height: number; width: number; trail: boolean;
   dx: number; dz: number;
@@ -92,6 +110,7 @@ export class Landscape {
   private lastRoadTile: { x: number; z: number; tile: RoadTile } | undefined;
   private cityList: CityDistrict[] | null = null;
   private cityRoads: RoadSegment[] | null = null;
+  private network: { snapshot: RoadNetworkSnapshot; index: Map<string, number> } | null = null;
   private highlights: Set<string> | null = null;
   constructor(readonly seed: number, private naturalHeight: (x: number, z: number) => number,
     private base: (x: number, z: number) => LandscapeColumn) {}
@@ -224,9 +243,53 @@ export class Landscape {
     return cacheSet(this.nodes, key, { x, z, y });
   }
 
+  /** Use a snapshot computed elsewhere (same seed) for links not yet cached. */
+  adoptRoadNetwork(snapshot: RoadNetworkSnapshot): boolean {
+    if (snapshot?.version !== 1 || snapshot.seed !== this.seed || snapshot.offsets.length !== snapshot.keys.length + 1) return false;
+    const index = new Map<string, number>();
+    for (let i = 0; i < snapshot.keys.length; i++) index.set(snapshot.keys[i], i);
+    this.network = { snapshot, index };
+    return true;
+  }
+
+  /** Every routed link and trail computed so far, as a transferable snapshot. */
+  exportRoadNetwork(): RoadNetworkSnapshot {
+    const keys: string[] = [], counts: number[] = [], flags: number[] = [];
+    const lines: RoadPoint[][] = [];
+    const add = (key: string, segments: readonly RoadSegment[]) => {
+      const line = segments.length ? [segments[0].a, ...segments.map(segment => segment.b)] : [];
+      keys.push(key); lines.push(line); counts.push(line.length); flags.push(segments[0]?.dramatic ? 1 : 0);
+    };
+    for (const [key, segments] of this.edges) add(`e:${key}`, segments);
+    for (const [key, segments] of this.trails) add(`t:${key}`, segments);
+    const offsets = new Uint32Array(keys.length + 1);
+    for (let i = 0; i < counts.length; i++) offsets[i + 1] = offsets[i] + counts[i];
+    const points = new Float64Array(offsets[keys.length] * 3);
+    let j = 0;
+    for (const line of lines) for (const p of line) { points[j++] = p.x; points[j++] = p.y; points[j++] = p.z; }
+    return { version: 1, seed: this.seed, keys, offsets, points, flags: Uint8Array.from(flags) };
+  }
+
+  /** Decodes one adopted link exactly as `edge`/`trail` would have built it. */
+  private adopted(key: string, id: string, width: number, trail: boolean): RoadSegment[] | undefined {
+    const network = this.network, i = network?.index.get(key);
+    if (!network || i === undefined) return undefined;
+    const { offsets, points, flags } = network.snapshot, dramatic = (flags[i] & 1) !== 0;
+    const line: RoadPoint[] = [];
+    for (let p = offsets[i]; p < offsets[i + 1]; p++) line.push({ x: points[p * 3], y: points[p * 3 + 1], z: points[p * 3 + 2] });
+    const segments: RoadSegment[] = [];
+    for (let p = 0; p + 1 < line.length; p++) {
+      segments.push(trail ? { a: line[p], b: line[p + 1], width, trail: true, dramatic, id }
+        : { a: line[p], b: line[p + 1], width, trail: false, id });
+    }
+    return segments;
+  }
+
   private edge(ix: number, iz: number, axis: number): RoadSegment[] {
     const key = `${ix},${iz},${axis}`, found = this.edges.get(key);
     if (found) return found;
+    const adopted = this.adopted(`e:${key}`, key, 5.8, false);
+    if (adopted) return cacheSet(this.edges, key, adopted);
     const a = this.node(ix, iz), b = this.node(ix + (axis === 0 ? 1 : 0), iz + (axis === 1 ? 1 : 0));
     const bend = (unit(hash2i(this.seed ^ (axis ? 0x821af : 0x90aba), ix, iz)) - 0.5) * 130;
     const variation = unit(hash2i(this.seed ^ 0x639ba, ix + axis * 73, iz));
@@ -271,6 +334,8 @@ export class Landscape {
   private trail(ix: number, iz: number): RoadSegment[] {
     const key = `${ix},${iz}`, found = this.trails.get(key);
     if (found) return found;
+    const adopted = this.adopted(`t:${key}`, `trail:${key}`, 2.7, true);
+    if (adopted) return cacheSet(this.trails, key, adopted);
     const s = this.mountain(ix, iz);
     // These switchbacks climb the added mountain system, which fades out in
     // volcanic country. Do not draw a summit trail into a flooded crater.

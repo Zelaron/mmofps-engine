@@ -238,7 +238,7 @@ export class OrbitalCampaign {
             (point.contested || (point.progressRate ?? 0) !== 0)) attackers.add(point.pressureFaction);
         if (point.contested) for (const actor of this.game.players.values()) {
           const s=actor.state;
-          if (actor.faction && actor.faction!==point.owner && s.alive && !s.vehicle && inCaptureRange(point,s.px,s.py,s.pz)) attackers.add(actor.faction);
+          if (actor.faction && actor.faction!==point.owner && s.alive && !s.vehicle && inCaptureRange(point,s.px,s.py,s.pz,!actor.isBot)) attackers.add(actor.faction);
         }
       }
       return { id:base.id,name:base.name,owner:base.owner,x:base.x,z:base.z,held,attackers:[...attackers] };

@@ -2,7 +2,7 @@ import { fork, type ChildProcess } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PLANETS, type PlanetId } from '@shared/universe';
+import { DEFAULT_ENABLED_PLANETS, PLANETS, type PlanetId } from '@shared/universe';
 import { Coordinator, NODE_TIMEOUT_MS } from './coordinator.js';
 import { startControlPlane } from './control-plane.js';
 import { startGateway } from './gateway.js';
@@ -12,6 +12,10 @@ import { DEFAULT_TARGET_POPULATION, defaultClientDir } from './server.js';
 interface ClusterOptions {
   port?: number; host?: string; dataDir?: string; clientDir?: string;
   maxPlayers?: number; targetPopulation?: number; log?: boolean;
+  /** Worlds in this universe (default: Meridian only). Disabled planets keep
+   * their code; characters saved there are brought back to the entry world. */
+  enabledPlanets?: readonly PlanetId[];
+  /** Enabled worlds this machine launches; the rest may register remotely. */
   localPlanets?: PlanetId[];
   controlHost?: string; controlPort?: number; controlSecret?: string;
   /** Explicit entry point is useful to process supervisors and test fixtures. */
@@ -35,7 +39,9 @@ const WORLD_V8_OPTIONS = [
  * workers. Each planet has its own process, simulation, bots and world store. */
 export async function startCluster(options: ClusterOptions = {}) {
   const dataDir = path.resolve(options.dataDir ?? 'data');
+  const enabled = options.enabledPlanets?.length ? [...new Set(options.enabledPlanets)] : [...DEFAULT_ENABLED_PLANETS];
   const coordinator = new Coordinator(path.join(dataDir, 'universe.sqlite'));
+  coordinator.enablePlanets(enabled);
   const secret = options.controlSecret ?? randomBytes(32).toString('hex');
   const control = await startControlPlane(coordinator, secret, { legacy: new WorldStore(path.join(dataDir, 'meridian')), host: options.controlHost, port: options.controlPort });
   const controlHost = options.controlHost && !['0.0.0.0', '::'].includes(options.controlHost) ? options.controlHost : '127.0.0.1';
@@ -109,10 +115,10 @@ export async function startCluster(options: ClusterOptions = {}) {
   try {
     // Starting sequentially keeps first boot's procedural generation from
     // monopolizing a small home server, while normal play runs in parallel.
-    for (const planet of PLANETS) if (!options.localPlanets || options.localPlanets.includes(planet.id)) await launch(planet);
+    for (const planet of PLANETS) if (enabled.includes(planet.id) && (!options.localPlanets || options.localPlanets.includes(planet.id))) await launch(planet);
     gateway = await startGateway(coordinator, { port: options.port ?? 8080, host: options.host ?? '0.0.0.0',
       clientDir: options.clientDir ?? defaultClientDir(), secret });
-    if (options.log !== false) console.log(`THE MMOFPS on http://localhost:${gateway.port} — ${workers.size} persistent worlds`);
+    if (options.log !== false) console.log(`THE MMOFPS on http://localhost:${gateway.port} — ${workers.size} persistent world${workers.size === 1 ? '' : 's'}`);
     return { port: gateway.port, controlPort: control.port, coordinator, workers, close };
   } catch (error) { await close(); throw error; }
 }

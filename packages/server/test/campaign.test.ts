@@ -30,7 +30,9 @@ test('each planet has dry control networks, three separated faction staging base
       assert.ok(frontier.bases.some(b => b.kind === 'harbor' && b.owner === faction));
       const base = frontier.bases.find(b => b.id === `base-forward-${faction}`)!;
       const player = game.addPlayer(`Scout ${faction}`, null); player.faction = faction;
-      kill(game, player); respawn(game, player);
+      // Fresh arrivals join the most active front; choosing the forward base
+      // as the next respawn still deploys at that staging base.
+      kill(game, player); assert.equal(game.requestRespawn(player, base.id), true); respawn(game, player);
       assert.ok(Math.hypot(player.state.px - base.x, player.state.pz - base.z) <= 65, `${planet.id}: friendly staging arrival`);
       assert.equal(game.world.liquidAt(player.state.px, player.state.py, player.state.pz), undefined);
       assert.ok(capsuleClearance(game.world, player.state.px, player.state.py, player.state.pz) >= -.02);
@@ -64,14 +66,15 @@ test('two of three surrounding controls secure a city for each faction and persi
   for (const faction of [1, 2, 3] as const) {
     const game = new Game(1337, { frontier: true }), f = game.frontier!, p = game.addPlayer('Captor', null);
     p.faction = faction;
-    const base = f.bases[0], sites = f.territories.filter(t => t.baseId === base.id);
+    // A city that starts neutral (the factions' home cities start owned).
+    const base = f.bases.find(b => b.kind === 'city' && b.owner === 0)!, sites = f.territories.filter(t => t.baseId === base.id);
     hold(game, p, sites[0]); assert.equal(base.owner, 0);
     assert.ok(!f.spawnOptions(p).some(o => o.id === base.id));
     hold(game, p, sites[1]); assert.equal(base.owner, faction);
     assert.ok(f.spawnOptions(p).some(o => o.id === base.id));
     const restored = new Game(1337, { frontier: true }); restored.frontier!.restore(f.save());
-    assert.equal(restored.frontier!.bases[0].owner, faction);
-    assert.equal(restored.frontier!.territories[0].captureFaction, faction);
+    assert.equal(restored.frontier!.bases.find(b => b.id === base.id)!.owner, faction);
+    assert.equal(restored.frontier!.territories.find(t => t.id === sites[0].id)!.captureFaction, faction);
   }
 });
 
@@ -101,10 +104,10 @@ test('death immediately sends a ten-second selection window; selection persists 
   assert.equal(p.respawnAtTick - game.tick, 10 * TICK_RATE);
   const packet = packets.find(b => b[0] === Msg.SFrontier)!;
   assert.equal(decodeFrontierState(packet.buffer as ArrayBuffer).respawn?.remaining, PLAYER.RESPAWN_SECONDS);
-  assert.equal(game.requestRespawn(p, 'base-city-0'), false, 'unclaimed base is not a spawn');
+  assert.equal(game.requestRespawn(p, 'base-city-1'), false, 'unclaimed base is not a spawn');
   assert.equal(game.requestRespawn(p, base.id), true);
   respawn(game, p); assert.ok(p.state.alive); assert.equal(p.preferredSpawnId, base.id);
-  assert.ok(Math.hypot(p.state.px - base.x, p.state.pz - base.z) <= 65);
+  assert.ok(Math.hypot(p.state.px - base.x, p.state.pz - base.z) <= 600, 'deploys at the chosen harbor');
   kill(game, p);
   for (const site of game.frontier!.territories.filter(t => t.baseId === base.id)) {
     site.owner = 1; site.captureFaction = 1; site.captureProgress = 1; site.influence = -1;
@@ -156,13 +159,12 @@ test('defense reserves reinforce the exact control being neutralized before its 
   assert.equal(f.order(defender)?.phase, 'defend'); assert.equal(f.order(defender)?.targetId, attacked.id);
 });
 
-test('captured legacy single-flag cities retain ownership when sibling controls are introduced', () => {
+test('worlds saved before front-line wars start the first war on the new layout', () => {
   const game = new Game(1337, { frontier: true }), f = game.frontier!;
+  const fresh = new Game(1337, { frontier: true }).frontier!;
   f.restore({ version: 1, seed: 1337, territories: [
     { id: 'city-2-0', owner: 1, influence: -1 }, { id: 'harbor-1', owner: 1, influence: -1 },
   ] });
-  for (const id of ['base-city-2', 'base-harbor-1']) {
-    assert.equal(f.bases.find(b => b.id === id)!.owner, 1);
-    assert.ok(f.territories.filter(t => t.baseId === id).every(t => t.owner === 1));
-  }
+  assert.equal(f.war.number, 1);
+  for (const base of f.bases) assert.equal(base.owner, fresh.bases.find(b => b.id === base.id)!.owner, base.id);
 });

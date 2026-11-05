@@ -1,4 +1,4 @@
-import type { CampaignBase, Faction, FrontierState, SpawnOption, Territory } from '@shared/frontier';
+import type { CampaignBase, CampaignOrder, Faction, FrontierState, SpawnOption, Territory } from '@shared/frontier';
 
 export interface RespawnStatus {
   remaining: number;
@@ -43,6 +43,27 @@ export function orderedReinforcements(options: readonly SpawnOption[], bases: re
     || Number(b.available !== false) - Number(a.available !== false)
     || Math.hypot(a.x - x, a.z - z) - Math.hypot(b.x - x, b.z - z) || a.id.localeCompare(b.id));
 }
+
+/** Where DEPLOY NOW goes: the soldier's own choice, else the staging of their
+ * current order (the HUD's "G → DEPLOY NOW" hint means "go to the fight"),
+ * else the first available point. Never an airborne launch by default. */
+export function deployNowTarget(options: readonly SpawnOption[], selected: string | null | undefined,
+  order: CampaignOrder | undefined, from?: { x: number; z: number }): string | undefined {
+  const usable = options.filter(o => o.available !== false && o.kind !== 'air');
+  if (selected && options.some(o => o.id === selected && o.available !== false)) return selected;
+  if (!order) return usable[0]?.id;
+  const staging = usable.find(o => o.controlId === order.targetId) ?? usable.find(o => (o.baseId ?? o.id) === order.baseId);
+  if (staging) return staging.id;
+  // No point at the order itself (its staging is unsafe for now): the usable
+  // point nearest to it, as an automatic respawn would choose, and only when
+  // that actually brings the soldier closer to the fight.
+  const toOrder = (p: { x: number; z: number }) => Math.hypot(p.x - order.x, p.z - order.z);
+  const nearest = [...usable].sort((a, b) => toOrder(a) - toOrder(b))[0];
+  if (!nearest || (from && toOrder(nearest) > toOrder(from) - DEPLOY_MIN_GAIN_M)) return undefined;
+  return nearest.id;
+}
+/** A fallback deployment must bring the soldier at least this much closer. */
+export const DEPLOY_MIN_GAIN_M = 250;
 
 export function baseControlStatus(base: CampaignBase, territories: readonly Territory[], faction: Faction, reinforcement?: SpawnOption): {
   held: number; total: number; required: number; kind: 'secured' | 'threatened' | 'partial' | 'enemy'; detail: string;

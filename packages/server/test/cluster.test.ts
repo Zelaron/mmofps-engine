@@ -26,7 +26,7 @@ test('three independent worker processes run full worlds and recover character o
   let cluster: Awaited<ReturnType<typeof startCluster>> | null = null;
   const sockets: WebSocket[] = [];
   try {
-    cluster = await startCluster({ dataDir: root, port: 0, host: '127.0.0.1', targetPopulation: 0, maxPlayers: 4, log: false });
+    cluster = await startCluster({ dataDir: root, port: 0, host: '127.0.0.1', targetPopulation: 0, maxPlayers: 4, log: false, enabledPlanets: ['meridian', 'cinder', 'nacre'] });
     const pids = [...cluster.workers.values()].map(w => w.process.pid);
     assert.equal(new Set(pids).size, 3); assert.ok(pids.every(pid => pid && pid !== process.pid));
     const health = await fetch(`http://127.0.0.1:${cluster.port}/healthz`).then(r => r.json()) as { worlds: { available: boolean }[] };
@@ -56,6 +56,21 @@ test('three independent worker processes run full worlds and recover character o
   } finally {
     for (const ws of sockets) ws.terminate(); await cluster?.close();
     assert.equal(path.dirname(path.resolve(root)), path.resolve(tmpdir())); assert.ok(path.basename(root).startsWith('the-mmofps-cluster-'));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('the default universe runs Meridian alone while the other worlds stay available by configuration', { timeout: 60_000 }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'the-mmofps-cluster-'));
+  let cluster: Awaited<ReturnType<typeof startCluster>> | null = null;
+  try {
+    cluster = await startCluster({ dataDir: root, port: 0, host: '127.0.0.1', targetPopulation: 0, maxPlayers: 4, log: false });
+    assert.deepEqual([...cluster.workers.keys()], ['meridian']);
+    const universe = await fetch(`http://127.0.0.1:${cluster.port}/api/universe`).then(r => r.json()) as { planets: { id: string; available: boolean }[] };
+    assert.deepEqual(universe.planets.map(p => p.id), ['meridian']);
+    assert.equal(universe.planets[0].available, true);
+  } finally {
+    await cluster?.close();
     await rm(root, { recursive: true, force: true });
   }
 });

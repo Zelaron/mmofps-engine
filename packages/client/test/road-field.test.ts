@@ -48,7 +48,11 @@ test('volcanic road triangles retain basalt before and outside the continuous gr
 test('fast travel across recenter boundaries cannot starve the far road map',()=>{
   const roads=new RoadField(new World(1337));
   try {
-    for(let i=0;i<500&&roads.uniforms.roadFarBounds.value.z===1;i++)roads.update(i%2?2000:0,0);
+    // Every update crosses a far-map recenter cell. Restarting work there
+    // would never publish a map, whatever the bound. Each update performs at
+    // least one step, so the bound only needs to exceed the map's total
+    // steps (about 1,400): a loaded machine may fit just one per 1.5 ms slice.
+    for(let i=0;i<5000&&roads.uniforms.roadFarBounds.value.z===1;i++)roads.update(i%2?2000:0,0);
     assert.ok(roads.uniforms.roadFarBounds.value.z>10000,'a complete map must become visible while moving');
     const retained=roads.uniforms.roadFarMap.value;
     roads.update(6000,0);

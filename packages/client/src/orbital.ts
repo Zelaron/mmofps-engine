@@ -28,6 +28,9 @@ export class OrbitalUI {
   private abort = new AbortController();
   private observer: ResizeObserver;
   private poll: ReturnType<typeof setInterval>;
+  /** A universe with one enabled world has nowhere to launch to: the star
+   * chart and its HUD button stay hidden until more worlds are enabled. */
+  singleWorld = false;
 
   constructor(private travel: (destination: number) => void, private changed: (open: boolean, resume: boolean) => void, private atlas: () => void) {
     this.element.id = 'orbital-map'; this.element.hidden = true;
@@ -81,6 +84,7 @@ export class OrbitalUI {
     void this.loadStatus();
   }
   toggle(value = !this.open, resume = true): void {
+    if (value && this.singleWorld) return;
     if (this.open === value) return;
     this.open = value; this.element.hidden = !value; this.changed(value, resume);
     if (value) { this.element.scrollTop = 0; this.refresh(); this.draw(); void this.loadStatus(); this.element.querySelector<HTMLButtonElement>('.orbit-close')!.focus({ preventScroll: true }); }
@@ -100,8 +104,16 @@ export class OrbitalUI {
       const response = await fetch('/api/universe', { signal: AbortSignal.timeout(3000) });
       if (!response.ok) throw new Error('No transit signal');
       this.status = await response.json() as UniverseStatus;
+      this.setSingleWorld(Array.isArray(this.status.planets) && this.status.planets.length <= 1);
     } catch { this.status = null; }
     this.refresh();
+  }
+  private setSingleWorld(single: boolean): void {
+    this.singleWorld = single;
+    const button = document.getElementById('system-open');
+    if (button) button.hidden = single;
+    document.body.classList.toggle('single-world', single);
+    if (single && this.open) this.toggle(false);
   }
   update(x: number, y: number, z: number, yaw: number, onFoot: boolean, seconds: number): void {
     this.position = { x, y, z }; this.onFoot = onFoot;

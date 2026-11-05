@@ -4,7 +4,7 @@ import { BOT_FULL_SIM_RADIUS, BOT_SUPPORTED_GROUND_RADIUS, BOT_LOD_MIN_POPULATIO
 import { Game, ServerPlayer, type ServerVehicle } from '../src/game.js';
 import { BTN, stepMove, type InputCmd } from '@shared/movement';
 import { PLAYER, TICK_DT, TICK_RATE } from '@shared/constants';
-import { CAPTURE_SECONDS } from '@shared/frontier';
+import { BOT_CAPTURE_WEIGHT, CAPTURE_SECONDS } from '@shared/frontier';
 import { World, type Box, type Region } from '@shared/worldgen';
 import { setVehicleColliders } from '@shared/vehicle-collision';
 import { VEHICLE } from '@shared/vehicles';
@@ -465,7 +465,7 @@ test('Game repeats cached bot input at fixed ticks, keeps combat timers and capt
   assert.equal(game.tick,60);assert.equal(p.state.simulationTick,60);
   assert.equal(p.fireCd,0);assert.equal(p.vehFireCd,0);
   assert.ok(Math.abs(p.state.airSeconds!-7)<1e-8);
-  assert.ok(Math.abs(site.captureProgress!-.2/CAPTURE_SECONDS)<1e-8,'all sixty ticks contribute living capture pressure');
+  assert.ok(Math.abs(site.captureProgress!-BOT_CAPTURE_WEIGHT/CAPTURE_SECONDS)<1e-8,'all sixty ticks contribute living capture pressure');
   assert.equal(p.inputQueue.length,0);assert.equal(p.lastProcessedSeq,55);
   // Force the static urban fallback so two movement ticks are deferred;
   // weapon cooldown and a live shot must still execute on those ticks.
@@ -536,24 +536,26 @@ test('supported ground in the 200-300 m band advances every tick with full-rate 
 });
 
 test('supported-ground boundaries do not move the 300 m thought and shared-dt boundary',()=>{
-  assert.equal(BOT_FULL_SIM_RADIUS,300);assert.equal(BOT_SUPPORTED_GROUND_RADIUS,200);
-  for(const distance of [199.999,200,200.001,299.999,300,300.001]){
+  assert.equal(BOT_FULL_SIM_RADIUS,300);assert.equal(BOT_SUPPORTED_GROUND_RADIUS,110);
+  const R=BOT_SUPPORTED_GROUND_RADIUS;
+  for(const distance of [R-.001,R,R+.001,299.999,300,300.001]){
     const {world,players,p,sim}=supportedBandFixture(distance);
     sim.prepare(1,players,[]);const before={...p.state};
     assert.equal(sim.shouldThink(p),distance<300,`thoughts at ${distance}`);
-    assert.equal(sim.move(world,p,cmd(0),TICK_DT,1),distance>=200,`supported ground at ${distance}`);
-    if(distance<200)assert.deepEqual(p.state,before);
+    assert.equal(sim.move(world,p,cmd(0),TICK_DT,1),distance>=R,`supported ground at ${distance}`);
+    if(distance<R)assert.deepEqual(p.state,before);
     assert.equal(sim.physicsDt(world,p,cmd(0),TICK_DT,1),distance<300?TICK_DT:0,`shared dt at ${distance}`);
   }
 });
 
 test('every registered human protects the supported-ground boundary, including a dead observer',()=>{
   const {world,players,p,sim,origin}=supportedBandFixture();
-  const near=new ServerPlayer(101,'near',null,false,{x:origin.x,y:500,z:origin.z+199.999});
+  const R=BOT_SUPPORTED_GROUND_RADIUS;
+  const near=new ServerPlayer(101,'near',null,false,{x:origin.x,y:500,z:origin.z+R-.001});
   players.push(near);near.state.alive=false;
   sim.prepare(1,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,1),false);
-  near.state.pz=origin.z+200;sim.prepare(2,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,2),true);
-  near.state.pz=origin.z+199;sim.prepare(3,players,[]);const before={...p.state};
+  near.state.pz=origin.z+R;sim.prepare(2,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,2),true);
+  near.state.pz=origin.z+R-1;sim.prepare(3,players,[]);const before={...p.state};
   assert.equal(sim.move(world,p,cmd(),TICK_DT,3),false);assert.deepEqual(p.state,before);
   assert.equal(sim.physicsDt(world,p,cmd(),TICK_DT,3),TICK_DT);
 });
@@ -636,7 +638,7 @@ test('entering the supported-ground band flushes pending remote time before any 
   const dt=sim.physicsDt(world,p,cmd(),TICK_DT,2);assert.equal(dt,2*TICK_DT);
   stepMove(world,p.state,cmd(),dt,2);
   sim.prepare(3,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,3),true);
-  human.state.px=p.state.px+199;sim.prepare(4,players,[]);
+  human.state.px=p.state.px+BOT_SUPPORTED_GROUND_RADIUS-1;sim.prepare(4,players,[]);
   assert.equal(sim.move(world,p,cmd(),TICK_DT,4),false);
   assert.equal(sim.physicsDt(world,p,cmd(),TICK_DT,4),TICK_DT);
 });
@@ -655,12 +657,12 @@ test('entering the supported-ground band clears both remote rest and its pending
   }
 });
 
-test('a proven corridor survives the 300 m transition but releases immediately inside 200 m',()=>{
+test('a proven corridor survives the 300 m transition but releases immediately inside the supported-ground radius',()=>{
   const {world,players,p,sim,human,origin}=supportedBandFixture(301);
   sim.prepare(1,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,1),true);const checks=sim.stats.pathChecks;
   human.state.px=origin.x+250;sim.prepare(2,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,2),true);
   assert.equal(sim.stats.pathChecks,checks,'only the unchanged corridor proof is reused');
-  human.state.px=origin.x+199;sim.prepare(3,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,3),false);
+  human.state.px=origin.x+BOT_SUPPORTED_GROUND_RADIUS-1;sim.prepare(3,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,3),false);
   human.state.px=origin.x+250;sim.prepare(4,players,[]);assert.equal(sim.move(world,p,cmd(),TICK_DT,4),true);
   assert.equal(sim.stats.pathChecks,checks+1,'the inner promotion discarded the old path');
 });

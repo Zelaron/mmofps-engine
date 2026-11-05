@@ -13,6 +13,19 @@ export const PLANETS = [
 ] as const;
 export type PlanetId = typeof PLANETS[number]['id'];
 export function planetById(id: unknown) { return PLANETS.find(p => p.id === id); }
+/** Worlds the universe runs by default. Cinder and Nacre keep their complete
+ * implementation (terrain, ecology, travel, expeditions) and return with
+ * `PLANETS=all` or an explicit comma-separated list such as
+ * `PLANETS=meridian,cinder`. The first enabled planet is the entry world. */
+export const DEFAULT_ENABLED_PLANETS: readonly PlanetId[] = ['meridian'];
+export function parseEnabledPlanets(value: string | undefined): PlanetId[] {
+  if (value === undefined || value.trim() === '') return [...DEFAULT_ENABLED_PLANETS];
+  if (value.trim().toLowerCase() === 'all') return PLANETS.map(p => p.id);
+  const ids = value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const unknown = ids.filter(id => !planetById(id));
+  if (unknown.length) throw new Error(`PLANETS contains unknown planet ${unknown.join(', ')}`);
+  return [...new Set(ids)] as PlanetId[];
+}
 export function planetBySeed(seed: number) { return PLANETS.find(p => p.seed === seed) ?? PLANETS[0]; }
 export interface UniverseStatus {
   system: string; stars: string[];

@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { registerDrawWarmup, warmupLayout } from './draw-warmup-registry.js';
 import type { World, Box } from '@shared/worldgen';
 import type { CapitalSweep, CapitalPlan } from '@shared/capital-geometry';
 import { buildVesperPlan } from '@shared/vesper-city';
@@ -163,7 +164,13 @@ export class VesperCity {
   private currentKey = '';
   private disposed = false;
 
-  constructor(private readonly world: Pick<World, 'collectCities'>) { this.group.name = 'vesper-abyss-city'; }
+  constructor(private readonly world: Pick<World, 'collectCities'>) {
+    this.group.name = 'vesper-abyss-city';
+    // Districts and decks are built on approach; draw their programs during loading.
+    const decks = new THREE.InstancedMesh(warmupLayout({ position: 3, normal: 3, uv: 2 }, { instanceDeckBounds: 4 }), this.deckMaterial, 1);
+    decks.setColorAt(0, new THREE.Color());
+    registerDrawWarmup(new THREE.Mesh(warmupLayout({ position: 3, normal: 3, color: 3, sweepGlow: 1, sweepCoord: 3, sweepAccent: 3 }), this.material), decks);
+  }
 
   private build(): void {
     const city = this.world.collectCities().find(city => city.theme === 'vesper');

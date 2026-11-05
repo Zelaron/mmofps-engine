@@ -64,6 +64,11 @@ export async function startControlPlane(coordinator: Coordinator, secret: string
     }
   });
   http.requestTimeout = 5000;
+  // Workers reuse pooled connections. With Node's default 5 s idle timeout, a
+  // worker whose event loop was briefly busy (world generation, a large
+  // spawn wave) can send its next request on a socket the server already
+  // closed and get ECONNRESET. Internal, authenticated clients may idle longer.
+  http.keepAliveTimeout = 65_000; http.headersTimeout = 66_000;
   await new Promise<void>((resolve, reject) => { http.once('error', reject); http.listen(options.port ?? 0, options.host ?? '127.0.0.1', resolve); });
   const address = http.address(); if (!address || typeof address === 'string') throw new Error('No coordinator address');
   return { port: address.port, async close() { await new Promise<void>(resolve => http.close(() => resolve())); } };

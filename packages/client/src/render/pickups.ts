@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { freezeStatic } from './static-transforms.js';
 import {
   PICKUP_AMMO, PICKUP_HEALTH, PICKUP_WEAPON, WEAPONS,
   type SnapshotPickup,
@@ -196,6 +197,8 @@ export class PickupModels {
     } else {
       this.buildAmmoCrate(root, pickup.weapon);
     }
+    // Only the root bobs and spins; its parts never move relative to it.
+    freezeStatic(root);
     return root;
   }
 

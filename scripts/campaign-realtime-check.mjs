@@ -15,12 +15,12 @@ import WebSocket from 'ws';
 const args = process.argv.slice(2), options = new Map();
 if (args.length === 1 && args[0] === '--help') {
   console.log('node --no-warnings --experimental-sqlite scripts/campaign-realtime-check.mjs [--population 192] [--seconds 240] [--client-seconds 15] [--browser-seconds 0] [--browser-engine chromium|firefox] [--browser-mode headless|windowed] [--browser-activity walk|drive] [--viewport 1440x900] [--source-data data] [--server-entry path] [--label campaign-realtime]');
-  console.log('Requires npm run build. Runs three isolated worlds with the requested population, then optional raw-socket and rendering-browser play checks. --source-data requires the source server stopped and Python sqlite3: DB/WAL files are copied and checked before a backup is read from staging. Campaign saves are copied into the temporary fixture; the original DB is never opened by SQLite. Writes raw samples and assertions under artifacts/.');
+  console.log('Requires npm run build. Runs the enabled worlds (Meridian by default; --planets all for Cinder and Nacre too) with the requested population, then optional raw-socket and rendering-browser play checks. --source-data requires the source server stopped and Python sqlite3: DB/WAL files are copied and checked before a backup is read from staging. Campaign saves are copied into the temporary fixture; the original DB is never opened by SQLite. Writes raw samples and assertions under artifacts/.');
   process.exit(0);
 }
 for (let i = 0; i < args.length; i += 2) {
   const key = args[i], value = args[i + 1];
-  assert.ok(['--population', '--seconds', '--client-seconds', '--browser-seconds', '--browser-engine', '--browser-mode', '--browser-activity', '--viewport', '--source-data', '--server-entry', '--label'].includes(key) && value !== undefined && !options.has(key), `Invalid option: ${key}`);
+  assert.ok(['--planets', '--population', '--seconds', '--client-seconds', '--browser-seconds', '--browser-engine', '--browser-mode', '--browser-activity', '--viewport', '--source-data', '--server-entry', '--label'].includes(key) && value !== undefined && !options.has(key), `Invalid option: ${key}`);
   options.set(key, value);
 }
 const seconds = Number(options.get('--seconds') ?? 240), clientSeconds = Number(options.get('--client-seconds') ?? 15);
@@ -57,8 +57,12 @@ await build({ stdin: { contents: `export { startCluster } from './packages/serve
   export { MAP_SIZE, MAP_SPAN } from './packages/client/src/world-map.ts';`,
   resolveDir: root, loader: 'ts' }, outfile: helper, bundle: true, platform: 'node', format: 'cjs', target: ['node22'],
   tsconfig: path.join(root, 'tsconfig.json'), external: ['bufferutil', 'utf-8-validate'], logOverride: { 'empty-import-meta': 'silent' } });
-const { startCluster, PLANETS, ByteReader, Msg, decodeWelcome, decodeSnapshot, decodeFire, decodeFrontierState, encodeHello, encodeInput,
+const { startCluster, PLANETS: ALL_PLANETS, ByteReader, Msg, decodeWelcome, decodeSnapshot, decodeFire, decodeFrontierState, encodeHello, encodeInput,
   VEHICLE, vehicleDefinition, vehicleArmament, TICK_RATE, WORLD, PLAYER, MAP_SIZE, MAP_SPAN } = createRequire(import.meta.url)(helper);
+// The universe runs Meridian alone unless more worlds are requested.
+const planetOption = options.get('--planets') ?? 'meridian';
+const PLANETS = planetOption === 'all' ? ALL_PLANETS : ALL_PLANETS.filter(planet => planetOption.split(',').includes(planet.id));
+assert.ok(PLANETS.length, 'Unknown --planets selection');
 const temporary = await mkdtemp(path.join(tmpdir(), 'mmofps-realtime-'));
 const samples = [], exits = [], baseline = new Map(), populationDeficits = new Map();
 let cluster, client, browser, browserServer, browserPage, browserProbe, copiedData, failure, closing = false, closed = false, began = 0, stoppedBySignal = '';
@@ -947,7 +951,8 @@ const browserPlay = async () => {
 try {
   await copySavedWorlds();
   cluster = await startCluster({ dataDir: temporary, port: 0, host: '127.0.0.1', controlHost: '127.0.0.1', controlPort: 0,
-    targetPopulation: population, maxPlayers: 64, log: false, entry, clientDir: path.join(root, 'packages/client/dist') });
+    targetPopulation: population, maxPlayers: 64, log: false, entry, clientDir: path.join(root, 'packages/client/dist'),
+    enabledPlanets: PLANETS.map(planet => planet.id) });
   began = performance.now();
   for (const worker of cluster.workers.values()) worker.process.once('exit', (code, signal) => {
     if (!closing) exits.push({ planet: worker.planet, pid: worker.process.pid, code, signal, elapsedMs: performance.now() - began });

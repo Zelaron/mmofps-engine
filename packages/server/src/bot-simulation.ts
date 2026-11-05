@@ -4,7 +4,7 @@ import { capsuleClearance, capsulePenetrates } from '@shared/physics';
 import { transitDistance } from '@shared/transit-motion';
 import { SWIMMING } from '@shared/liquids';
 import { clamp } from '@shared/math';
-import { World, type Box, type Region } from '@shared/worldgen';
+import { World, type Box, type Region, type VegetationPlacement } from '@shared/worldgen';
 import type { ServerPlayer, ServerVehicle } from './game.js';
 import { BotVehicleSimulation } from './bot-vehicle-simulation.js';
 import { movingHullCanReach } from './bot-moving-hull.js';
@@ -13,9 +13,11 @@ import { VEHICLE } from '@shared/vehicles';
 /** Supported ordinary-ground travel is an intentional server-only approximation.
  * Humans and hazardous movement retain the shared controller. Thoughts, deferred
  * movement and vehicles keep their 300 m full-rate protection; supported on-foot
- * travel may advance every tick outside 200 m. Weapons and timers stay at 60 Hz. */
+ * travel may advance every tick outside 110 m (it was 200 m: in dense fronts the
+ * 110-200 m band dominated tick cost, and the proven corridor is not visible at
+ * that range). Weapons and timers stay at 60 Hz. */
 export const BOT_FULL_SIM_RADIUS = 300;
-export const BOT_SUPPORTED_GROUND_RADIUS = 200;
+export const BOT_SUPPORTED_GROUND_RADIUS = 110;
 export const BOT_LOD_MIN_POPULATION = 48;
 const HORIZON = 24, PATH_STEP = .24, SKIN = .10;
 // Treat very slow residual wall/ground contact creep as stopped for at most
@@ -56,6 +58,12 @@ function authoredRectangleContains(path:GroundPath,x:number,y:number,z:number):b
   const height=path.heights[0]+SKIN;
   return x-pad>=b.x0&&x+pad<=b.x1&&z-pad>=b.z0&&z+pad<=b.z1&&
     Math.min(y,height)>=b.y0&&Math.max(y,height)+PLAYER.HEIGHT+.2<=b.y1;
+}
+
+/** A plant's collider: from `sink` below its support up to its height. */
+function stemBounds(p: VegetationPlacement): Box {
+  const sink = p.sink ?? 0, half = (p.height + sink) / 2;
+  return { x: p.x, y: p.y - sink + half, z: p.z, hx: p.radius, hy: half, hz: p.radius };
 }
 
 export class BotSimulation {
@@ -312,7 +320,7 @@ export class BotSimulation {
     const region=this.staticRegion(world,space.x0,space.x1,space.z0,space.z1);
     const blocked=(boxes:readonly Box[])=>boxes.some(box=>overlaps(box,space.x0-.6,space.x1+.6,space.z0-.6,space.z1+.6,space.y0-.6,space.y1+.6));
     if(region.capitalArea||blocked(region.boulders)||blocked(region.pads)||blocked(region.solids)||blocked(region.cuts)||blocked(region.foundations??[])||
-      region.vegetation.some(p=>overlaps({x:p.x,y:p.y+p.height/2,z:p.z,hx:p.radius,hy:p.height/2,hz:p.radius},space.x0,space.x1,space.z0,space.z1,space.y0,space.y1)))return null;
+      region.vegetation.some(p=>overlaps(stemBounds(p),space.x0,space.x1,space.z0,space.z1,space.y0,space.y1)))return null;
     const cy=(space.y0+space.y1)/2,reach=Math.hypot(2.5,2.5,(space.y1-space.y0)/2)+.6;
     if((region.transportBridges?.distance(x,cy,z,reach)??reach)<reach||world.outposts.distance(x,cy,z,reach)<reach||
       capsuleClearance(world,x,y,z)<1)return null;
@@ -346,7 +354,7 @@ export class BotSimulation {
     const y0=min-.7,y1=max+PLAYER.HEIGHT+.2,region=this.staticRegion(world,x0,x1,z0,z1);
     const blocked=(boxes:readonly Box[])=>boxes.some(box=>overlaps(box,x0,x1,z0,z1,y0,y1));
     if(region.capitalArea&&(!nativeCapitalProviders(world)||this.capitalBlocked(region,x0,x1,z0,z1,y0,y1))||blocked(region.boulders)||blocked(region.pads)||blocked(region.solids)||blocked(region.cuts)||
-      blocked(region.foundations??[])||region.vegetation.some(p=>overlaps({x:p.x,y:p.y+p.height/2,z:p.z,hx:p.radius,hy:p.height/2,hz:p.radius},x0,x1,z0,z1,y0,y1))){this.reject('static geometry');return null;}
+      blocked(region.foundations??[])||region.vegetation.some(p=>overlaps(stemBounds(p),x0,x1,z0,z1,y0,y1))){this.reject('static geometry');return null;}
     const mx=(x+ex)/2,mz=(z+ez)/2,my=(min+max+PLAYER.HEIGHT)/2,reach=length+PLAYER.HEIGHT;
     if((region.transportBridges?.distance(mx,my,mz,reach)??reach)<reach||
       world.outposts.distance(mx,my,mz,reach)<reach||transitDistance(world,tick/TICK_RATE,mx,my,mz,24)<24){this.reject('transport/camp');return null;}
@@ -419,7 +427,7 @@ export class BotSimulation {
     const flatten=region.foundations?.some(f=>!f.underground&&f.y+f.hy===floor&&covers(f));
     if(blocked(region.boulders)||!flatten&&blocked(region.pads,.6)||blocked(region.cuts)||
       region.solids.some(b=>b.y+b.hy>floor+1e-6&&overlaps(b,x0,x1,z0,z1,floor,y1))||
-      region.vegetation.some(p=>overlaps({x:p.x,y:p.y+p.height/2,z:p.z,hx:p.radius,hy:p.height/2,hz:p.radius},x0,x1,z0,z1,floor,y1)))return reject('static geometry');
+      region.vegetation.some(p=>overlaps(stemBounds(p),x0,x1,z0,z1,floor,y1)))return reject('static geometry');
     // Every tapered capital shell lies within its endpoint bounds expanded
     // by the larger radius, including thin ribs between terrain samples.
     if(region.capitalSegments?.some(({a,b})=>{

@@ -5,7 +5,7 @@ import { MAP_SPAN, MAP_SIZE, mapPoint, mapViewport, separateMapPins } from './wo
 import type { WorldMapStream } from './world-map-stream.js';
 import { planetBySeed, PLANETS } from '@shared/universe';
 import { captureStatus, type CaptureObserver } from './capture-status.js';
-import { baseControlStatus, localCampaignBase, orderedReinforcements, reinforcementStatus, respawnStatus } from './respawn-status.js';
+import { baseControlStatus, localCampaignBase, orderedReinforcements, reinforcementStatus, respawnStatus, deployNowTarget } from './respawn-status.js';
 import { controlActivity, ownershipShares, renderOwnership, territoryRegions, territoryBorders, type TerritoryRegion } from './territory-map.js';
 import { contactColor, declutterMapLoot, EMPTY_MAP_INTEL, type MapIntel } from './tactical-intel.js';
 import { CREATURE_DEFS } from '@shared/wildlife';
@@ -54,7 +54,8 @@ export class FrontierUI {
   get respawning(): boolean { return this.dead; }
 
   constructor(private readonly enlist: (faction: Faction) => void, private readonly onOpen: (open: boolean, resume: boolean) => void,
-    system: () => void = () => {}, private readonly selectSpawn: (id: string) => void = () => {}) {
+    system: () => void = () => {}, private readonly selectSpawn: (id: string) => void = () => {},
+    private readonly deployNow: (id: string) => void = () => {}) {
     this.bar.id = 'frontier-bar';
     this.bar.innerHTML = `<div class="world-brand"><b>THE MMOFPS<span>01</span></b><span>MERIDIAN SYSTEM</span></div>
       <div class="world-location">Arriving on the frontier</div><button id="atlas-open" aria-label="Open tactical map (G)"><kbd>G</kbd><span>TACTICAL MAP</span> ↗</button>
@@ -81,7 +82,7 @@ export class FrontierUI {
       <section class="atlas-intelligence"><small>FRONTLINE REPORT</small><h2>Active objectives.</h2><div class="atlas-controls"></div><p class="atlas-death-readout" hidden></p><div class="atlas-objective"></div><div class="atlas-battles"></div><p class="atlas-battle-help">Select a report to locate it. Combat rings show the last 30 seconds. Unit markers show nearby contacts; major threats are broadcast planet-wide.</p><div class="atlas-threats"></div></section>
       <section class="atlas-allegiance"><small>YOUR ALLEGIANCE</small><h2>Choose your own war.</h2><p>You join a faction automatically, ready to fight. You can switch sides here after leaving combat.</p>
       <div class="faction-choices">${FACTIONS.filter(f => f.id > 0).map(f => `<button data-faction="${f.id}" style="--faction:${f.color}"><i></i><span><b>${f.name}</b><small>${f.description}</small></span><em>→</em></button>`).join('')}</div>
-      <div class="atlas-inventory"></div></section><div class="atlas-fronts"></div><div class="atlas-campaign"></div><div class="atlas-transit"><small>CAPTURE BASES</small><p>Capture 2 of a base's 3 control points to secure the base. One captured point is not enough. Reinforcements arrive at a safe rally outside the rings; nearby enemies can temporarily block it. Choose your next respawn here with G, while alive or after death. Hold a flag's ring on foot at ground level. One player needs ${CAPTURE_SECONDS} seconds for a neutral point, or ${CAPTURE_SECONDS * 2} seconds to neutralize and capture an enemy point. Enemy troops inside pause progress.</p><small>GO FURTHER</small><p>Follow the rail lines into another city. Take a ferry around the coast. Board a friendly vehicle or an airlift pod to join the next attack.</p><span>M · compass & minimap &nbsp; E · board / interact</span></div></aside></div>
+      <div class="atlas-inventory"></div></section><div class="atlas-fronts"></div><div class="atlas-daily"></div><div class="atlas-campaign"></div><div class="atlas-transit"><small>CAPTURE BASES</small><p>Capture 2 of a base's 3 control points to secure the base. One captured point is not enough. Reinforcements arrive at a safe rally outside the rings; nearby enemies can temporarily block it. Choose your next respawn here with G, while alive or after death. Hold a flag's ring on foot at ground level. One player needs ${CAPTURE_SECONDS} seconds for a neutral point, or ${CAPTURE_SECONDS * 2} seconds to neutralize and capture an enemy point. Enemy troops inside pause progress.</p><small>GO FURTHER</small><p>Follow the rail lines into another city. Take a ferry around the coast. Board a friendly vehicle or an airlift pod to join the next attack.</p><span>M · compass & minimap &nbsp; E · board / interact</span></div></aside></div>
       <footer><span>G · TACTICAL MAP &nbsp; / &nbsp; M · MINIMAP</span><span>Color = owner · Arc = capture progress · Broken ring = contested</span></footer>`;
     document.body.append(this.bar, this.element);
     this.map = this.element.querySelector('.atlas-map')!;
@@ -151,6 +152,41 @@ export class FrontierUI {
       this.element.querySelector<HTMLElement>(this.dead ? '.respawn-choices button:not(:disabled)' : '#atlas-close')?.focus({ preventScroll: true });
     }
   }
+  private prewarmed = false;
+  /** Build, lay out and paint the atlas once, invisibly, soon after joining.
+   * Its first real open (G, a death, DEPLOY NOW) otherwise spends a ~200 ms
+   * frame building lists and pins and laying out/painting the large SVG
+   * basemap. The work is spread over several frames: lists, then overlays,
+   * then each visual section revealed (still invisible) in its own frame. */
+  prewarm(): void {
+    if (this.prewarmed || this.open || this.dead || !this.state) return;
+    this.prewarmed = true;
+    const el = this.element;
+    const sections = [...el.querySelectorAll<HTMLElement>('header, .atlas-sidebar, .atlas-map-tools, .atlas-map-key, .atlas-territory, .atlas-pins, .atlas-live-pins, .atlas-map')];
+    const restore = () => {
+      for (const section of sections) section.style.display = '';
+      if (!this.open) el.hidden = true;
+      el.style.opacity = ''; el.style.pointerEvents = ''; el.removeAttribute('aria-hidden');
+    };
+    const steps: (() => void)[] = [
+      () => { this.open = true; try { this.refreshStrategicState(); } finally { this.open = false; } },
+      () => { this.open = true; try { this.renderViewport(); this.renderIntel(); } finally { this.open = false; } },
+      () => {
+        for (const section of sections) section.style.display = 'none';
+        el.style.opacity = '.001'; el.style.pointerEvents = 'none'; el.setAttribute('aria-hidden', 'true'); el.hidden = false;
+      },
+      ...sections.map(section => () => { section.style.display = ''; }),
+      () => {}, restore,
+    ];
+    let index = 0;
+    const run = () => {
+      // A real open (or death) takes over; it renders everything itself.
+      if (this.open || this.dead) { if (index > 2) restore(); return; }
+      steps[index++]();
+      if (index < steps.length) requestAnimationFrame(run);
+    };
+    requestAnimationFrame(run);
+  }
   /** Death is driven by fast authoritative snapshots, independent of the 1 Hz atlas data. */
   setAlive(alive: boolean, mapDelayMs = 0): void {
     if (this.dead === !alive) return;
@@ -216,6 +252,22 @@ export class FrontierUI {
     for (const faction of FACTIONS.slice(1)) {
       const line = document.createElement('div'); line.style.color = faction.color;
       line.textContent = `${faction.name}   ${state.bases?.filter(base => base.owner === faction.id).length ?? 0} bases · ${state.territories.filter(t => t.owner === faction.id).length} points`; fronts.append(line);
+    }
+    const daily = this.element.querySelector('.atlas-daily')!; daily.replaceChildren();
+    if (state.progress?.daily?.orders.length) {
+      const title = document.createElement('small'); title.textContent = 'DAILY ORDERS'; daily.append(title);
+      for (const order of state.progress.daily.orders) {
+        const row = document.createElement('div'); row.className = `atlas-order${order.done ? ' done' : ''}`;
+        const name = document.createElement('b'); name.textContent = order.label;
+        const detail = document.createElement('span');
+        detail.textContent = order.done ? `Done · +${order.xp.toLocaleString()} XP` : `${order.progress}/${order.goal} · +${order.xp.toLocaleString()} XP`;
+        const track = document.createElement('i'); track.style.setProperty('--order-progress', `${Math.min(100, order.progress / order.goal * 100)}%`);
+        row.append(name, detail, track); daily.append(row);
+      }
+      const reset = document.createElement('p');
+      const minutes = Math.ceil(state.progress.daily.resetsIn / 60);
+      reset.textContent = `New orders in ${minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`}.`;
+      daily.append(reset);
     }
     const campaign = this.element.querySelector('.atlas-campaign')!; campaign.replaceChildren();
     if (state.bases?.length) {
@@ -378,7 +430,8 @@ export class FrontierUI {
     const key=JSON.stringify([this.zoom,this.mapCenter,bounds,this.dead,state.you.faction,Math.round(this.x/25),Math.round(this.z/25),
       state.territories.map(site=>[site.id,site.x,site.z,site.owner,site.radius,controlActivity(site)]),state.bases,state.order,state.death,
       state.battles?.map(battle=>[battle.id,battle.x,battle.z,Math.round(battle.intensity*10),battle.factions]),
-      this.reinforcements?.selected,this.displayedSpawns,state.threats?.map(threat=>[threat.id,threat.x,threat.z,Math.round(threat.health*100)])]);
+      this.reinforcements?.selected,this.displayedSpawns,state.threats?.map(threat=>[threat.id,threat.x,threat.z,Math.round(threat.health*100)]),
+      state.airfields?.map(field=>[field.x,field.z,field.ready])]);
     if(key===this.pinKey)return;
     this.pinKey=key;
     this.renderTerritories();
@@ -508,6 +561,17 @@ export class FrontierUI {
         block(point,16);
       }
     }
+    for (const field of state.airfields ?? []) {
+      const point = mapPoint(field), marker = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      marker.classList.add('airfield-marker'); marker.dataset.ready = String(field.ready);
+      marker.setAttribute('transform', `translate(${point.x} ${point.y}) scale(${unitsPerPixel})`); block(point, 9);
+      const title = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      title.textContent = field.ready ? 'Airfield · a fighter jet is parked here' : 'Airfield · no jet parked right now';
+      const plane = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      plane.setAttribute('d', 'M0 -7L1.2 -2L7 1L7 2.6L1.2 1.2L1 5L3 6.5L3 7.6L0 6.7L-3 7.6L-3 6.5L-1 5L-1.2 1.2L-7 2.6L-7 1L-1.2 -2Z');
+      marker.append(title, plane); this.pins.append(marker);
+      addLabel(`airfield:${field.x},${field.z}`, point, field.ready ? 'AIRFIELD · JET READY' : 'AIRFIELD', field.ready ? 1 : 3, 'map-control-label', field.ready ? '#9ecbff' : '#9aa6ad');
+    }
     for(const threat of state.threats??[]){const species=CREATURE_DEFS[threat.species];if(!species?.boss||threat.health<=0)continue;const point=mapPoint(threat);block(point,9);addLabel(`boss:${threat.id}`,point,`${species.name} · ${Math.round(threat.health*100)}%`,0,'map-threat-label','#ffd397');}
     const placements=placeMapLabels(labels,{x:0,y:0,width:bounds.width||pixels,height:bounds.height||pixels},obstacles,pixels<450?9:14);
     for(const placed of placements){const data=labelData.get(placed.id)!;const group=document.createElementNS('http://www.w3.org/2000/svg','g');group.classList.add('map-placed-label');group.dataset.label=placed.id;
@@ -533,7 +597,7 @@ export class FrontierUI {
     this.element.querySelector<HTMLElement>('.redeploy-countdown')!.hidden = !this.dead;
     this.element.querySelector('.respawn-help')!.textContent = this.dead
       ? 'Your choice is used when the timer ends. If the rally becomes unsafe, you return at another safe position; your preference is remembered.'
-      : 'This sets your next respawn only. It does not teleport or move you. Your preference is remembered between deaths.';
+      : 'Choose your next respawn, or DEPLOY NOW to go there immediately when you are out of combat. Your preference is remembered between deaths.';
     this.displayedSpawns = orderedReinforcements(state?.options ?? [], this.state?.bases ?? [], this.x, this.z, this.state?.territories);
     const local = localCampaignBase(this.state?.bases ?? [], this.x, this.z, this.state?.territories);
     const localPanel = this.element.querySelector<HTMLElement>('.reinforcement-local')!; localPanel.replaceChildren(); localPanel.hidden = !local || !this.state;
@@ -558,9 +622,10 @@ export class FrontierUI {
       }
       localPanel.append(focus, meter, detail);
     }
-    const add = (id: string, name: string, detail: string, index?: number, available = true, near = false) => {
+    const add = (id: string, name: string, detail: string, index?: number, available = true, near = false, air = false) => {
       const button = document.createElement('button'); button.dataset.spawn = id;
       button.disabled = !available; button.dataset.available = String(available); button.classList.toggle('local-spawn', near);
+      button.classList.toggle('air-spawn', air);
       button.setAttribute('aria-pressed', String((state?.selected ?? '') === id));
       const title = document.createElement('b'); title.textContent = `${index === undefined ? '' : `${index + 1}. `}${name}`;
       const description = document.createElement('span'); description.textContent = detail;
@@ -569,10 +634,34 @@ export class FrontierUI {
     };
     for (const [index, option] of this.displayedSpawns.entries()) {
       const near = (option.baseId ?? option.id) === local?.id, available = option.available !== false;
-      const detail = `${near ? 'LOCAL · ' : ''}${available ? option.kind === 'mobile' ? 'Mobile rally' : 'Safe reinforcement rally' : 'UNAVAILABLE'} · ${(Math.hypot(option.x - this.x, option.z - this.z) / 1000).toFixed(1)} km${option.reason ? ` · ${option.reason}` : ''}`;
-      add(option.id, option.name, detail, index, available, near);
+      const detail = `${near ? 'LOCAL · ' : ''}${available ? option.kind === 'mobile' ? 'Mobile rally' : option.kind === 'air' ? 'Airborne fighter jet' : option.id.startsWith('assault-') ? 'Forward assault staging' : 'Safe reinforcement rally' : 'UNAVAILABLE'} · ${(Math.hypot(option.x - this.x, option.z - this.z) / 1000).toFixed(1)} km${option.reason ? ` · ${option.reason}` : ''}`;
+      add(option.id, option.name, detail, index, available, near, option.kind === 'air');
     }
     add('', 'Automatic deployment', 'Use an available safe faction rally', undefined, !!state);
+    if (!this.dead && state) {
+      // Alive and out of combat: go there now instead of walking.
+      const order = this.state?.order;
+      const target = deployNowTarget(this.displayedSpawns, state.selected, order, { x: this.x, z: this.z });
+      const deploy = document.createElement('button'); deploy.className = 'deploy-now'; deploy.disabled = !target;
+      const label = document.createElement('b'); label.textContent = 'DEPLOY NOW ↗';
+      const hint = document.createElement('span');
+      hint.textContent = target ? `Move to ${state.options.find(o => o.id === target)?.name ?? 'the selected point'} immediately (out of combat only).`
+        : order ? `No deployment point is closer to your order (${order.name}) right now. Try again shortly, or pick a point above.` : 'No deployment point is available right now.';
+      deploy.append(label, hint);
+      deploy.onclick = () => { if (target) { this.deployNow(target); this.toggle(false); } };
+      list.append(deploy);
+      const jet = this.displayedSpawns.find(option => option.kind === 'air');
+      if (jet) {
+        const ready = jet.available !== false;
+        const fly = document.createElement('button'); fly.className = 'deploy-now deploy-jet'; fly.disabled = !ready;
+        const flyLabel = document.createElement('b'); flyLabel.textContent = 'FIGHTER JET ✈';
+        const flyHint = document.createElement('span');
+        flyHint.textContent = ready ? `${jet.reason ?? 'Launch airborne.'} Out of combat only.` : jet.reason ?? 'Not available right now.';
+        fly.append(flyLabel, flyHint);
+        fly.onclick = () => { if (ready) { this.deployNow(jet.id); this.toggle(false); } };
+        list.append(fly);
+      }
+    }
     if (this.dead) this.updateRespawnCountdown();
     else this.element.querySelector('#respawn-detail')!.textContent = reinforcementStatus(state ?? { selected: null, options: [] }, true).detail;
   }
@@ -598,7 +687,8 @@ export class FrontierUI {
       const distance = Math.hypot(goal.x - x, goal.z - z), angle = Math.atan2(-(goal.x - x), -(goal.z - z)) - yaw;
       const relative = Math.atan2(Math.sin(angle), Math.cos(angle));
       const arrow = Math.abs(relative) < .5 ? '↑' : Math.abs(relative) > 2.6 ? '↓' : relative > 0 ? '←' : '→';
-      this.orderPanel.textContent = `${arrow} SQUAD ${order.squad + 1} · ${order.phase.toUpperCase()} · ${order.name} · ${distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${Math.round(distance)} m`}`;
+      // Far from the fight: point out the instant redeploy instead of a long walk.
+      this.orderPanel.textContent = `${arrow} SQUAD ${order.squad + 1} · ${order.phase.toUpperCase()} · ${order.name} · ${distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${Math.round(distance)} m`}${distance > 700 ? ' · G → DEPLOY NOW' : ''}`;
     }
     if (this.open) {
       const pods = this.world?.collectTransportPlan().pods ?? [];

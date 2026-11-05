@@ -41,7 +41,10 @@
     "test:maps:browser": "node --import tsx scripts/map-readability-browser-check.ts",
     "test:orbital-campaign:browser": "node --import tsx scripts/orbital-campaign-browser-check.ts",
     "test:campaign:simulation": "node --import tsx scripts/campaign-simulation-check.ts",
-    "test:campaign:realtime": "node --no-warnings --experimental-sqlite scripts/campaign-realtime-check.mjs"
+    "test:campaign:realtime": "node --no-warnings --experimental-sqlite scripts/campaign-realtime-check.mjs",
+    "test:war": "node --experimental-sqlite --max-semi-space-size=64 --import tsx scripts/war-dynamics-check.ts",
+    "test:progression:browser": "node --experimental-sqlite --import tsx scripts/progression-browser-check.ts",
+    "test:play:browser": "node --experimental-sqlite --import tsx scripts/play-session-check.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",

@@ -30,13 +30,15 @@ function fixture(count = 48) {
   return { bases, controls, players, director, order };
 }
 
-test('whole squads share stable operations while three squads spread beyond the starting battle', () => {
+test('whole squads share stable operations and prefer the fronts within reach', () => {
   const { director, players, order, bases } = fixture();
   director.update(players, 0);
   for (const faction of [1, 2, 3]) {
     const allies = players.filter(p => p.faction === faction), orders = allies.map(p => order(p));
     assert.equal(new Set(orders.map(o => o.baseId)).size, 3, 'each of the three squads gets its own operation');
-    assert.ok(orders.some(o => bases.find(b => b.id === o.baseId)!.x > 2400), 'an expedition leaves the starting cluster');
+    // Squads fight the nearby fronts instead of marching across the planet to
+    // quiet, distant cities (reinforcements redeploy forward anyway).
+    assert.ok(orders.every(o => bases.find(b => b.id === o.baseId)!.x <= 4800), 'no long expeditions while fronts are near');
     for (const squad of new Set(orders.map(o => o.squad)))
       assert.equal(new Set(orders.filter(o => o.squad === squad).map(o => o.targetId)).size, 1);
   }
@@ -61,7 +63,7 @@ test('two assault squads retain distinct controls across reassessments and respo
   const attackers = players.filter(player => player.faction === 1 && order(player).baseId === base.id);
   assert.equal(new Set(attackers.map(player => order(player).squad)).size, 2);
   const initial = attackers.map(player => order(player).targetId);
-  assert.equal(new Set(initial).size, 2, 'both eligible controls receive a squad');
+  assert.equal(new Set(initial).size, 1, 'two squads mass on one control before opening a second');
   for (let tick = 2 * TICK_RATE; tick <= 20 * TICK_RATE; tick += 2 * TICK_RATE) {
     director.update(players, tick);
     assert.deepEqual(attackers.map(player => order(player, tick).targetId), initial,
@@ -107,8 +109,8 @@ test('192 bots retain distinct roster squads and bounded deployment around one h
   director.update(players, 0);
   const allies = players.filter(p => p.faction === 1), orders = allies.map(p => order(p));
   assert.equal(new Set(orders.map(o => o.squad)).size, 11, 'squad IDs do not wrap after three groups');
-  assert.ok(orders.filter(o => o.baseId === base.id).length <= 12, 'even heavy pressure draws no more than two squads');
-  assert.ok(new Set(orders.map(o => o.baseId)).size >= 7, 'the rest of the army continues the planetary campaign');
+  assert.ok(orders.filter(o => o.baseId === base.id).length <= 24, 'even heavy pressure draws no more than four squads');
+  assert.ok(new Set(orders.map(o => o.baseId)).size >= 3, 'the rest of the army keeps other fronts going');
 });
 
 test('a secured distant city keeps a garrison before the squad moves onward', () => {
@@ -164,6 +166,7 @@ test('unassigned fragmented squads reassess once per interval and react to terri
 });
 
 test('auction invariant precomputation preserves deterministic assignments and staging', () => {
+  const run = (): string[] => {
   const fingerprints: string[] = [];
   for (const count of [48, 192, 216]) {
     const { director, players, order, controls, bases } = fixture(count);
@@ -198,12 +201,16 @@ test('auction invariant precomputation preserves deterministic assignments and s
     record(20 * TICK_RATE); record(130 * TICK_RATE);
     fingerprints.push(createHash('sha256').update(JSON.stringify(trace)).digest('hex'));
   }
-  // Recorded from the original auction before invariant precomputation. Hash
-  // every full order, including target, phase, squad, and staging coordinates.
+  return fingerprints;
+  };
+  const fingerprints = run();
+  assert.deepEqual(run(), fingerprints, 'identical inputs produce identical squad assignments');
+  // Recorded from the front-line auction (concentrated assaults, nearby
+  // fronts). Hash every full order, including target, phase, squad and staging.
   assert.deepEqual(fingerprints, [
-    'b2271ff203edf4010709ae8034355f62ec797c9f4af7b5348776a286c8a42569',
-    '733d2e9a536ccfa03f5ea5363cc6da394f98b66d5c5a3334ba7e32ad75fc29ec',
-    '0ab14da7fb507840cf04720f3d6a9de3831550647382d142ef288bd1ca2ec78f',
+    '03dd7d82d53431ee95b1db426e043084b53259e23262643595791b0021da1315',
+    'fd480298bf95ee5249360e30abb731b9ec72ffca8868f24edad7724520c37783',
+    'd766cb1467ce429772fa3283f3b3339bd9b52a15530f34e1d93ca211c88f96a9',
   ]);
 });
 

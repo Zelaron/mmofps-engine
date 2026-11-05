@@ -1,0 +1,82 @@
+/* Career progression and war status. Everything here is non-interactive HUD:
+   it never takes pointer input or blocks play. */
+#xp-ribbons{position:absolute;left:calc(50% + 46px);top:calc(50% + 18px);display:flex;flex-direction:column;gap:3px;pointer-events:none;z-index:4}
+.xp-ribbon{display:flex;align-items:baseline;gap:8px;font:600 15px/1.15 Barlow Condensed,sans-serif;letter-spacing:.06em;color:#f3f6ea;
+  text-shadow:0 1px 6px #000b,0 0 2px #000;animation:xp-in .18s ease-out;transition:opacity .45s,transform .45s}
+.xp-ribbon b{color:#ffd66e;font-size:17px;min-width:46px}
+.xp-ribbon.big b{color:#8ff0c8;font-size:20px}
+.xp-ribbon.big span{color:#d9fff0}
+.xp-ribbon.fade{opacity:0;transform:translateY(-6px)}
+@keyframes xp-in{from{opacity:0;transform:translateX(-10px) scale(1.15)}to{opacity:1;transform:none}}
+
+#rank-panel{position:absolute;left:14px;bottom:86px;width:300px;padding:7px 10px 8px;pointer-events:none;text-shadow:0 1px 5px #000a;
+  background:linear-gradient(90deg,#08131ab8 0%,#08131a80 65%,#08131a00 100%)}
+.rank-line{display:flex;align-items:center;gap:8px;font:600 13px/1 Barlow Condensed,sans-serif;letter-spacing:.08em;color:#e9eedf}
+.rank-badge{display:inline-grid;place-items:center;min-width:24px;height:20px;padding:0 4px;box-sizing:border-box;border:1px solid #ffd66e99;
+  background:#2a2410cc;color:#ffd66e;font:700 12px/1 Barlow Condensed,sans-serif}
+.rank-session{margin-left:auto;color:#8ff0c8;font-size:12px}
+.rank-track{height:4px;margin-top:5px;background:#0a0e14a6;border-radius:2px;overflow:hidden}
+.rank-fill{height:100%;width:0;background:linear-gradient(90deg,#c99a3a,#ffd66e);transition:width .35s ease-out}
+.rank-xp{margin-top:3px;font:500 10px/1 Barlow,sans-serif;letter-spacing:.06em;color:#aab6ad}
+.rank-daily{display:flex;gap:7px;align-items:baseline;margin-top:6px;font:500 11px/1.25 Barlow,sans-serif;letter-spacing:.03em;color:#dfe6d8}
+.rank-daily b{font:600 11px/1 Barlow Condensed,sans-serif;letter-spacing:.1em;color:#8ff0c8;white-space:nowrap}
+.rank-daily span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rank-daily.complete b{color:#ffd66e}
+
+#war-strip{position:absolute;left:50%;top:14px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:6px 12px;
+  background:#08131add;border:1px solid #a8d1d233;font:600 12px/1 Barlow Condensed,sans-serif;letter-spacing:.08em;color:#dfe8dc;
+  pointer-events:none;white-space:nowrap;z-index:5}
+.war-clock{color:#f3f6ea;font-size:13px}
+.war-clock.final{color:#ffb35c;font-weight:700}
+.war-faction{display:inline-flex;align-items:center;gap:5px;color:var(--faction);opacity:.82}
+.war-faction i{width:8px;height:8px;background:var(--faction);display:inline-block}
+.war-faction b{color:#fff;font-size:14px;margin-left:2px}
+.war-faction.mine{opacity:1;text-decoration:underline;text-underline-offset:4px}
+.war-faction.near-win b{color:#ffd66e}
+.war-goal{color:#93a1a0;font-size:10px}
+
+#war-banner{position:absolute;left:50%;top:27%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:6px;
+  pointer-events:none;text-align:center;z-index:6;animation:banner-in .35s ease-out}
+#war-banner b{font:700 52px/1 Barlow Condensed,sans-serif;letter-spacing:.12em;color:#f6f2e2;text-shadow:0 3px 18px #000c}
+#war-banner span{font:500 15px/1.3 Barlow,sans-serif;letter-spacing:.04em;color:#dfe6d8;text-shadow:0 2px 8px #000c;max-width:min(640px,86vw)}
+#war-banner[data-kind=victory] b{color:#ffd66e}
+#war-banner[data-kind=defeat] b{color:#ff9b8f}
+#war-banner[data-kind=promotion] b{color:#8ff0c8;font-size:40px}
+#war-banner[data-kind=war] b{color:#9ecbff;font-size:42px}
+#war-banner[data-kind=push] b{color:#ffb35c;font-size:46px}
+@keyframes banner-in{from{opacity:0;transform:translate(-50%,8px) scale(.96)}to{opacity:1;transform:translateX(-50%)}}
+
+/* War debrief: a side card during the intermission, never blocking play. */
+#war-debrief{position:absolute;right:24px;top:96px;width:300px;display:flex;flex-direction:column;gap:6px;padding:12px 14px;
+  background:#08131add;border:1px solid #a8d1d233;border-left:3px solid #9ecbff;pointer-events:none;z-index:5;animation:debrief-in .4s ease-out}
+#war-debrief[data-kind=victory]{border-left-color:#ffd66e}
+#war-debrief[data-kind=defeat]{border-left-color:#ff9b8f}
+#war-debrief b{font:700 14px/1 Barlow Condensed,sans-serif;letter-spacing:.14em;color:#9ecbff}
+#war-debrief strong{font:600 18px/1.1 Barlow Condensed,sans-serif;letter-spacing:.04em;color:#f6f2e2}
+#war-debrief[data-kind=victory] strong{color:#ffd66e}
+#war-debrief span{font:500 12px/1.4 Barlow,sans-serif;color:#dfe6d8}
+#war-debrief em{font:italic 500 12px/1.4 Barlow,sans-serif;color:#8ff0c8}
+@keyframes debrief-in{from{opacity:0;transform:translateX(12px)}to{opacity:1;transform:none}}
+.touch-device #war-debrief{top:auto;bottom:12px;right:50%;transform:translateX(50%);width:min(340px,90vw);padding:8px 10px;animation:none}
+.touch-device #war-debrief strong{font-size:15px}
+
+/* Touch: the bottom-left belongs to the movement stick; rank sits under the war strip. */
+.touch-device #rank-panel{left:50%;transform:translateX(-50%);top:36px;bottom:auto;width:190px;padding:3px 8px;background:#08131a99}
+.touch-device #rank-panel .rank-xp,.touch-device #rank-panel .rank-session,.touch-device #rank-panel .rank-track{display:none}
+.touch-device #rank-panel .rank-line{justify-content:center}
+.touch-device #rank-panel .rank-daily{justify-content:center;margin-top:3px}.touch-device #rank-panel .rank-daily span{display:none}
+.touch-device #war-strip{top:6px;padding:4px 8px;gap:6px;font-size:10px}
+.touch-device .war-goal{display:none}
+.touch-device #xp-ribbons{left:calc(50% + 30px)}
+.touch-device .xp-ribbon{font-size:12px}.touch-device .xp-ribbon b{font-size:13px;min-width:34px}
+.touch-device #war-banner b{font-size:34px}
+@media (max-width:700px){#war-strip .war-goal{display:none}#rank-panel{width:200px}#war-banner b{font-size:34px}}
+/* Instant redeploy from the tactical map (alive, out of combat). */
+.respawn-choices button.deploy-now{margin-top:8px;background:#1d4a2f;border-color:#8ff0c8aa}
+.respawn-choices button.deploy-now b{color:#8ff0c8;letter-spacing:.1em}
+.respawn-choices button.deploy-now:hover:not(:disabled){background:#28663f}
+.respawn-choices button.deploy-now:disabled{opacity:.5}
+.respawn-choices button.deploy-jet{margin-top:6px;background:#1c3550;border-color:#9ecbffaa}
+.respawn-choices button.deploy-jet b{color:#9ecbff}
+.respawn-choices button.deploy-jet:hover:not(:disabled){background:#264a70}
+.respawn-choices button.air-spawn{border-left:3px solid #9ecbff}

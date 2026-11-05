@@ -28,14 +28,19 @@ export const BTN = {
   /** Vehicle alternate action: jeep boost, tank cluster shell, jet bombs. */
   ALTFIRE: 512,
   /**
-   * Playtest cheat (H): ~10x run speed on foot. Anyone may send it - this
-   * is a co-op sandbox, not a ranked ladder - but bots never do.
+   * Playtest cheat (H): ~10x run speed on foot. Honoured only while
+   * HYPERSPEED_ENABLED (or a Game created with `hyperspeed`); bots never send it.
    */
   HYPER: 1024,
   /** Jet engine / airbrake: Space and C (also touch controls). */
   THROTTLE: 2048,
   BRAKE: 4096,
 } as const;
+
+/** Playtest hyperspeed (H: ~10x speed on foot, invulnerable, no captures or
+ * XP) is disabled for players: the client ignores H and the server strips
+ * BTN.HYPER from every input. Set true to bring it back. */
+export const HYPERSPEED_ENABLED = false;
 
 export interface InputCmd {
   seq: number;

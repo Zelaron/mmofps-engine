@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile, open } from 'node:fs/promises';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { isFaction } from '@shared/frontier';
+import { DAILY_COUNT } from '@shared/progression';
 import { capsuleClearance } from '@shared/physics';
 import { WORLD, PLAYER, TICK_RATE } from '@shared/constants';
 import { WEAPONS } from '@shared/weapons';
@@ -19,14 +20,20 @@ export interface SavedPlayer {
   salvageSpent?: number;
   salvageEarned?: number;
   campaignRewards?: number[];
+  /** Career progression (absent in saves predating ranks). */
+  xp?: number; careerKills?: number; captures?: number; warsWon?: number; bestStreak?: number;
+  /** Daily orders (absent in older saves): UTC day, progress, done bitmask. */
+  dailyDay?: number; dailyProgress?: number[]; dailyDone?: number;
   x: number; y: number; z: number; health: number; alive: boolean;
   frags: number; deaths: number; factionWait: number; combatWait: number;
   ammo: { magazine: number; reserve: number }[];
 }
 export function capturePlayer(game: Pick<Game, 'seed' | 'tick'>,
-  p: Omit<ServerPlayer, 'sink' | 'discoveries' | 'fullPickupContacts'> & { discoveries: Iterable<string> }): SavedPlayer {
+  p: Omit<ServerPlayer, 'sink' | 'discoveries' | 'fullPickupContacts' | 'recentAttackers'> & { discoveries: Iterable<string> }): SavedPlayer {
   return { version: 1, seed: game.seed, savedAt: Date.now(), faction: p.faction, factionAssigned: true, preferredSpawnId: p.preferredSpawnId, salvage: p.salvage, salvageSpent: p.salvageSpent, salvageEarned: p.salvageEarned,
     discoveries: [...p.discoveries], campaignRewards: [...p.campaignRewards], lastDeath: p.lastDeath, x: p.state.px, y: p.state.py, z: p.state.pz,
+    xp: p.xp, careerKills: p.careerKills, captures: p.captures, warsWon: p.warsWon, bestStreak: p.bestStreak,
+    dailyDay: p.dailyDay, dailyProgress: [...p.dailyProgress], dailyDone: p.dailyDone,
     health: p.health, alive: p.state.alive, frags: p.frags, deaths: p.deaths,
     factionWait: Math.max(0, p.factionChangeAt - game.tick) / TICK_RATE,
     combatWait: Math.max(0, p.regenBlockUntil - game.tick) / TICK_RATE,
@@ -53,6 +60,12 @@ export function restorePlayer(game: Game, p: ServerPlayer, value: unknown): void
     ? [...new Set(data.campaignRewards.filter(seed => PLANETS.some(planet => planet.seed === seed)))] : [];
   p.discoveries = new Set(Array.isArray(data.discoveries) ? data.discoveries.filter(d => typeof d === 'string' && /^(?:\d{1,10}:)?city-[0-3]$/.test(d)).map(d => d.includes(':') ? d : `${data.seed}:${d}`) : []);
   p.frags = bounded(data.frags, 32767); p.deaths = bounded(data.deaths, 32767);
+  p.xp = Math.floor(bounded(data.xp, 4_000_000_000)); p.careerKills = Math.floor(bounded(data.careerKills, 1e9));
+  p.captures = Math.floor(bounded(data.captures, 1e9)); p.warsWon = Math.floor(bounded(data.warsWon, 1e6));
+  p.bestStreak = Math.floor(bounded(data.bestStreak, 1e6));
+  p.dailyDay = Math.floor(bounded(data.dailyDay, 1e7));
+  p.dailyProgress = Array.from({ length: DAILY_COUNT }, (_, i) => Math.floor(bounded(Array.isArray(data.dailyProgress) ? data.dailyProgress[i] : 0, 1e6)));
+  p.dailyDone = Math.floor(bounded(data.dailyDone, (1 << DAILY_COUNT) - 1));
   const elapsed = Math.max(0, (Date.now() - bounded(data.savedAt, Date.now(), Date.now())) / 1000);
   p.factionChangeAt = game.tick + Math.max(0, bounded(data.factionWait, 30) - elapsed) * TICK_RATE;
   p.regenBlockUntil = game.tick + Math.max(0, bounded(data.combatWait, PLAYER.REGEN_DELAY) - elapsed) * TICK_RATE;

@@ -254,7 +254,7 @@ export class Hud {
   /** HUD extras are created lazily so index.html stays untouched. */
   private vehicleBox(): HTMLElement {
     return this.lazyBox('hud-vehicle',
-      'position:absolute;left:18px;bottom:96px;font:600 15px system-ui;' +
+      'position:absolute;left:18px;bottom:140px;font:600 15px system-ui;' +
       'color:#cfe3d2;text-shadow:0 1px 2px rgba(0,0,0,.7);pointer-events:none;');
   }
 

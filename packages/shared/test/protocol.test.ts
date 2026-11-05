@@ -208,7 +208,11 @@ test('event roundtrips', () => {
   });
 
   const join = decodeJoin(strip(encodeJoin(4, 'Xan')));
-  assert.deepEqual(join, { id: 4, name: 'Xan' });
+  assert.deepEqual(join, { id: 4, name: 'Xan', bot: false });
+  assert.deepEqual(decodeJoin(strip(encodeJoin(5, 'Bot', true))), { id: 5, name: 'Bot', bot: true }, 'roster entries mark bots');
+  // Older join payloads without the flag still decode.
+  const legacyJoin = new ByteWriter(16).u8(Msg.SJoin).entity(6).str('Old').finish();
+  assert.deepEqual(decodeJoin(strip(legacyJoin)), { id: 6, name: 'Old' });
 
   const scores = decodeScores(strip(encodeScores([
     { id: 1, frags: 10, deaths: 3, ping: 48 },

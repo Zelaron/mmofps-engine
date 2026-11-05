@@ -12,7 +12,7 @@ export async function startGateway(coordinator: Coordinator, options: GatewayOpt
     const pathname = (req.url ?? '/').split('?')[0];
     if (pathname === '/api/session') {
       const key = sessionKey(req), owner = key ? coordinator.locate(key) : null;
-      ensureSession(req, res, { planet: owner?.planet ?? 'meridian' }); return;
+      ensureSession(req, res, { planet: owner && coordinator.planetEnabled(owner.planet) ? owner.planet : coordinator.entryPlanet }); return;
     }
     if (pathname === '/api/universe') {
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(JSON.stringify(coordinator.status())); return;

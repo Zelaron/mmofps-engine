@@ -61,13 +61,24 @@ function withInput(check: (input: InputTracker, doc: FakeDocument, win: FakeTarg
   }
 }
 
-test('H toggles playtest hyperspeed in normal play and ignores repeats, chat and paused input', () => {
+test('hyperspeed is disabled: H does nothing and the server strips the playtest bit', () => {
   withInput((input, doc, _win, canvas) => {
+    canvas.emit('click'); doc.emit('keydown', key('KeyH'));
+    assert.equal(input.hyper, false); assert.equal(input.sample(1, 0, 0).buttons & BTN.HYPER, 0);
+    const game = new Game(1337, { frontier: true }), player = game.addPlayer('Player', null);
+    game.queueInput(player, { ...input.sample(2, 0, 0), buttons: BTN.HYPER | BTN.FORWARD }); game.step();
+    assert.equal(player.lastCmd!.buttons & BTN.HYPER, 0, 'a modified client cannot turn it on');
+  });
+});
+
+test('when enabled, H toggles playtest hyperspeed in normal play and ignores repeats, chat and paused input', () => {
+  withInput((input, doc, _win, canvas) => {
+    input.hyperspeedEnabled = true;
     const toggles: boolean[] = []; input.onHyperToggle = value => toggles.push(value);
     canvas.emit('click');
     doc.emit('keydown', key('KeyH'));
     assert.equal(input.hyper, true); assert.ok(input.sample(1, 0, 0).buttons & BTN.HYPER);
-    const game = new Game(1337, { frontier: true }), player = game.addPlayer('Playtester', null);
+    const game = new Game(1337, { frontier: true, hyperspeed: true }), player = game.addPlayer('Playtester', null);
     game.queueInput(player, input.sample(1, 0, 0)); game.step();
     assert.ok(player.lastCmd!.buttons & BTN.HYPER, 'the live frontier accepts human playtest input');
     doc.emit('keydown', { ...key('KeyH'), repeat: true });

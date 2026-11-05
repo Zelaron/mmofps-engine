@@ -10,7 +10,7 @@ npm run build
 npm start
 ```
 
-Open `http://localhost:8080`, or the server's hostname on port 8080. One command starts a gateway/coordinator and three independent world workers. The scripts enable built-in SQLite. Keep `package-lock.json`: `npm ci` installs the recorded dependency versions needed for the build.
+Open `http://localhost:8080`, or the server's hostname on port 8080. One command starts a gateway/coordinator and the enabled world workers (Meridian by default; `PLANETS=all` adds Cinder and Nacre). The scripts enable built-in SQLite. Keep `package-lock.json`: `npm ci` installs the recorded dependency versions needed for the build.
 
 The build automatically downloads two fixed-version font files and checks their hashes. Run `npm run assets` to prepare this cache separately. Node dependencies, fonts, bundles, test artifacts and saved data are not committed; a clean clone is sufficient to reproduce the application. The running game serves its assets locally and does not request fonts from Google in players' browsers.
 
@@ -24,12 +24,13 @@ The build automatically downloads two fixed-version font files and checks their 
 | `MAX_PLAYERS` | `64` | Human admission limit per world; not a proven capacity claim. |
 | `BOTS` | `192` | Maximum bot-filled population target per planet, including humans. Default adaptive range: 96–192. |
 | `SESSION_COOKIE_SECURE` | unset | Set to `1` when browsers use HTTPS through a reverse proxy; marks the anonymous session cookie `Secure`. Leave unset for direct local HTTP. |
-| `LOCAL_PLANETS` | `meridian,cinder,nacre` | Worlds supervised locally. An empty value starts only gateway/coordinator. |
+| `PLANETS` | `meridian` | Worlds that make up the universe: `all`, or a list such as `meridian,cinder`. The first is the entry world; characters saved on a world outside the list return there with their inventory. The star chart and orbital travel stay hidden while only one world is enabled. |
+| `LOCAL_PLANETS` | every enabled world | Enabled worlds supervised locally (must be a subset of `PLANETS`). An empty value starts only gateway/coordinator. |
 | `COORDINATOR_HOST`, `COORDINATOR_PORT` | `127.0.0.1`, free port | Private coordinator interface. |
 | `COORDINATOR_SECRET` | generated per local run | Service secret, at least 32 characters. Configure it for external workers. |
 | `CLIENT_DIR` | built client directory | Optional static asset override. |
 
-To move Cinder to another machine, run the gateway with `LOCAL_PLANETS=meridian,nacre`, a fixed private coordinator address/port and a configured service secret. On the other machine use the same build with `MMOFPS_ROLE=world`, `PLANET_ID=cinder`, a fresh `WORLD_NODE_ID` for every process start (including restarts), the matching `COORDINATOR_SECRET` and `COORDINATOR_URL=http://<private-gateway-address>:<control-port>`. Set that worker's `HOST`/`PORT`, `NODE_ADVERTISE=ws://<private-worker-address>:<world-port>/ws`, and its own `DATA_DIR`. Start it with the V8 options the local launcher gives its worlds, which lower simulation cost without changing results: `node --experimental-sqlite --max-semi-space-size=64 --max-inlined-bytecode-size-cumulative=11040 --max-inlined-bytecode-size-absolute=22080 packages/server/dist/server.cjs`. It registers automatically and appears on the star chart when ready. Retain its world directory when moving; local territory files are not automatically replicated.
+To move Cinder to another machine, run the gateway with `PLANETS=all LOCAL_PLANETS=meridian,nacre`, a fixed private coordinator address/port and a configured service secret. On the other machine use the same build with `MMOFPS_ROLE=world`, `PLANET_ID=cinder`, a fresh `WORLD_NODE_ID` for every process start (including restarts), the matching `COORDINATOR_SECRET` and `COORDINATOR_URL=http://<private-gateway-address>:<control-port>`. Set that worker's `HOST`/`PORT`, `NODE_ADVERTISE=ws://<private-worker-address>:<world-port>/ws`, and its own `DATA_DIR`. Start it with the V8 options the local launcher gives its worlds, which lower simulation cost without changing results: `node --experimental-sqlite --max-semi-space-size=64 --max-inlined-bytecode-size-cumulative=11040 --max-inlined-bytecode-size-absolute=22080 packages/server/dist/server.cjs`. It registers automatically and appears on the star chart when ready. Retain its world directory when moving; local territory files are not automatically replicated.
 
 Keep coordinator/world interfaces on a private network or behind authenticated TLS tunnels. Browsers connect only to the gateway. A planet currently has one live authority; extra processes for the same planet do not add capacity within it. Use a process supervisor for external workers; the local launcher supervises its children.
 

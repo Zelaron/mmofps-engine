@@ -9,7 +9,7 @@ import { SpatialIndex } from '../src/spatial-index.js';
 import { TICK_RATE } from '@shared/constants';
 import { ByteReader, decodeSnapshot, BTN, Msg } from '@shared/index';
 import { decodeFrontierState, encodeFrontierState } from '@shared/frontier-wire';
-import { CAPTURE_SECONDS, inCaptureRange } from '@shared/frontier';
+import { BOT_CAPTURE_WEIGHT, CAPTURE_SECONDS, inCaptureRange } from '@shared/frontier';
 import { PLANETS } from '@shared/universe';
 import { capsuleClearance } from '@shared/physics';
 
@@ -87,16 +87,20 @@ test('all three opposing factions exchange damage while allies remain protected'
   actors[0].health = 100; damage(game, actors[0], actors[0]); assert.equal(actors[0].health, 80);
 });
 
-test('territory capture needs presence; neutral players do not contest; human presence is five times a bot', () => {
+test('territory capture needs presence; neutral players do not contest; a human outweighs four bots', () => {
   const game = new Game(1337, { frontier: true }), frontier = game.frontier!;
   const player = game.addPlayer('Scout', null), neutral = game.addPlayer('Explorer', null), bot = game.addPlayer('Bot', null, true);
   const site = frontier.territories[1]; site.owner = 0; site.influence = 0;
   for (const p of [player, neutral, bot]) { p.state.px = site.x; p.state.py = site.y; p.state.pz = site.z; }
   player.faction = 1; neutral.faction = 0; bot.faction = 2;
-  frontier.step([player, neutral, bot], 0, 10); assert.equal(site.influence, 0); assert.equal(site.contested, true);
+  // Majority capture: the contested ring still advances for the side with the
+  // clearly larger capture weight, at the rate of its margin.
+  frontier.step([player, neutral, bot], 0, 10); assert.equal(site.contested, true);
+  assert.ok(Math.abs(site.influence + (1 - BOT_CAPTURE_WEIGHT) * 10 / CAPTURE_SECONDS) < 1e-9);
+  site.influence = 0;
   frontier.step([player, neutral], 0, CAPTURE_SECONDS * .2); assert.ok(Math.abs(site.influence + .2) < 1e-9);
   site.influence = 0;
-  frontier.step([bot, neutral], 0, CAPTURE_SECONDS * .2); assert.ok(Math.abs(site.influence - .04) < 1e-9);
+  frontier.step([bot, neutral], 0, CAPTURE_SECONDS * .2); assert.ok(Math.abs(site.influence - .2 * BOT_CAPTURE_WEIGHT) < 1e-9);
   frontier.step([player, neutral], 0, CAPTURE_SECONDS * 1.1); assert.equal(site.owner, 1);
   player.state.py += 20;
   const before = site.influence; frontier.step([player], 0, 20); assert.equal(site.influence, before);
@@ -124,7 +128,7 @@ test('enemy territory neutralizes, pauses while contested, captures and persists
   const packets: Uint8Array[] = [], game = new Game(1337, { frontier: true }), frontier = game.frontier!;
   const p = game.addPlayer('Captor', { send: bytes => packets.push(bytes) }), enemy = game.addPlayer('Defender', null);
   p.faction = 1; enemy.faction = 2;
-  const site = frontier.territories[1]; site.owner = 2; site.influence = 1;
+  const site = frontier.territories[1]; site.owner = 2; site.influence = 1; site.captureFaction = 2; site.captureProgress = 1;
   for (const actor of [p, enemy]) Object.assign(actor.state, { px: site.x, py: site.y, pz: site.z });
   frontier.step([p], 0, CAPTURE_SECONDS / 2);
   assert.equal(site.influence, .5); assert.equal(site.owner, 2);
@@ -207,6 +211,9 @@ test('replication still sends nearby players and owned distant artillery', () =>
 
 test('live frontier stops repeated movement after input has gone stale', () => {
   const game = new Game(1337, { frontier: true }), p = game.addPlayer('Idle tab', null);
+  // A flat city street, so any remaining motion would come from repeated input.
+  const street = game.frontier!.bases.find(b => b.id === 'base-city-0')!;
+  Object.assign(p.state, { px: street.x, py: street.y, pz: street.z, vx: 0, vy: 0, vz: 0 });
   game.queueInput(p, { seq: 1, buttons: BTN.FORWARD, weapon: 1, yaw: 0, pitch: 0, renderTick: 0, renderFrac: 0 });
   for (let i = 0; i < 75; i++) game.step();
   assert.ok(Math.hypot(p.state.vx, p.state.vz) < .05);

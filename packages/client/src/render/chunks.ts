@@ -1,5 +1,7 @@
 import { validateAuthoredSeams, spliceAuthoredBoundary, type AuthoredSeamPayload } from './terrain-authored-seams.js';
 import * as THREE from 'three';
+import { registerDrawWarmup, warmupLayout } from './draw-warmup-registry.js';
+import { frameSections } from '../frame-sections.js';
 import {
   World, CHUNK_SIZE, VIEW_CHUNK_RADIUS, CAVE_DETAIL_RADIUS,
   CAVE_MESH_RADIUS,
@@ -7,13 +9,14 @@ import {
 } from '@shared/index';
 import type { ChunkMesh, EntrancePortalMesh } from './surfacenets.js';
 import type { TransportSnapshot } from '@shared/transport';
+import type { RoadNetworkSnapshot } from '@shared/worldgen';
 import { ENTRANCE_PORTAL_LIFT } from './surfacenets.js';
 import {
   meshBoundary, stitchBoundary, combineSeamMeshes,
   type BoundaryMesh, type BoundaryPlane, type BoundarySegment, type SeamMesh,
 } from './terrain-seams.js';
 import { createTerrainMaterial } from './surface-material.js';
-import { RoadField } from './road-field.js';
+import { RoadField, type RoadFieldWorker } from './road-field.js';
 import { renderProfile, workerJobRestMs, isLocalWorldHost } from './device-profile.js';
 import { TerrainPreviewBuilder } from './terrain-preview.js';
 import {
@@ -157,6 +160,13 @@ interface PortalParts {
 
 const LOD1_TILE_M = CHUNK_SIZE * LOD1_STEP; // 128m
 const LOD2_TILE_M = CHUNK_SIZE * LOD2_STEP; // 512m
+/** Milliseconds per update() for seam-checked terrain retirement. */
+const RETIRE_BUDGET_MS = 4;
+/** Milliseconds per update() for reconciling distant seam edges. */
+const SEAM_BUDGET_MS = 4;
+/** Mixed-LOD seams only exist around the fine and LOD1 rings (which can lead
+ * the camera in flight). Edges beyond this close in budgeted slices. */
+const NEAR_SEAM_M = LOD1_RADIUS + 4 * LOD1_TILE_M;
 /** ~1/3s of continuous open sky before cave rendering disengages. */
 const OPEN_SKY_EXIT_FRAMES = 20;
 const DIRECT_PARTS = LOD1_STEP; // Every direct LOD transition is exactly 4x4.
@@ -195,6 +205,15 @@ export class ChunkManager {
   private readonly pendingMeshes: { slot: WorkerSlot; worker: Worker; msg: MeshedMsg }[] = [];
   private seamSerial = 0;
   private readonly seamDirty = new Set<string>();
+  private detaching: Set<THREE.Object3D> | null = null;
+  /** Seam proofs for retiring tiles share one small budget per update();
+   * outside update() (events, tests) retirement stays synchronous. */
+  private retireLimit = Infinity;
+  private retireSpent = 0;
+  private retireBacklog = false;
+  private seamLimit = Infinity;
+  private seamSpent = 0;
+  private retireOffset = 0;
   private readonly seamMaskDirty = new Set<string>();
   private readonly seamEdges = new Map<string, SeamEdge>();
   private readonly seamGroups = new Map<ColumnState, SeamGroup>();
@@ -248,17 +267,27 @@ export class ChunkManager {
   private readonly profile = renderProfile();
   private readonly cooperative = isLocalWorldHost();
   stats = { columnsReady: 0, columnsPending: 0, triangles: 0 };
+  /** Other Worlds of this seed may adopt the road worker's routed network. */
+  onRoadNetwork: ((snapshot: RoadNetworkSnapshot) => void) | null = null;
 
   constructor(seed: number, workerCount = 0, workerTimeoutMs = 45_000,
-    private readonly transportSnapshot?: TransportSnapshot) {
+    private readonly transportSnapshot?: TransportSnapshot, roadWorkerUrl?: string) {
     this.seed = seed;
     this.workerTimeoutMs = workerTimeoutMs;
     // World adopts and defensively clones the plan lazily on its first query,
     // including emergency coverage on the main thread.
     this.terrainWorld = new World(seed, transportSnapshot);
-    this.roads = new RoadField(this.terrainWorld);
+    // Road maps for the terrain shader are built by their own worker when the
+    // page provides one (route searches would otherwise run on this thread).
+    this.roads = new RoadField(this.terrainWorld, roadWorkerUrl && typeof Worker !== 'undefined'
+      ? { create: () => new Worker(roadWorkerUrl) as unknown as RoadFieldWorker, seed, transportSnapshot, cooperative: this.cooperative,
+        onNetwork: snapshot => { this.terrainWorld.adoptRoadNetwork(snapshot); this.onRoadNetwork?.(snapshot); } } : undefined);
     this.material = createTerrainMaterial(this.roads.uniforms);
     this.group.add(this.portalGroup);
+    // Terrain chunks and cave entrance portals may arrive only after the
+    // loading screen's warm-up pass; draw their programs there regardless.
+    registerDrawWarmup(this.createMesh({ positions: new Float32Array(9), normals: new Float32Array(9), colors: new Uint8Array(9), caveDepth: new Uint8Array(3) }),
+      Object.assign(new THREE.Mesh(warmupLayout({ position: 3 }), this.portalMaterial), { renderOrder: CAVE_PORTAL_RENDER_ORDER }));
     if (workerCount <= 0) {
       const hc = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 4 : 4;
       workerCount = Math.min(this.profile.workers, Math.max(2, Math.floor(hc / 2)));
@@ -503,6 +532,7 @@ export class ChunkManager {
   /** Call every frame with the player/camera position. */
   update(px: number, py: number, pz: number, motion?: ChunkMotion): void {
     if (!this.disposed) this.roads.update(px, pz);
+    frameSections.mark('terrain.roads');
     if (this.disposed || !Number.isFinite(px + py + pz)) return;
     this.lastPx = px;
     this.lastPz = pz;
@@ -513,6 +543,7 @@ export class ChunkManager {
     // leave the sky using an old camera-side stencil after an exit.
     const finite = Number.isFinite(px + py + pz);
     const col = finite ? this.terrainWorld.column(px, pz) : undefined;
+    frameSections.mark('terrain.column');
     const previousRadius = this.detailRadius, previousFlight = this.flight;
     this.flight = motion?.flight === true;
     const speed = motion && Number.isFinite(motion.vx + motion.vz) ? Math.hypot(motion.vx, motion.vz) : 0;
@@ -543,6 +574,7 @@ export class ChunkManager {
     const roofed = finite && this.terrainWorld.roofedAbove(px, py, pz);
     this.cameraRoofed = roofed;
     this.belowSurfaceEnvelope = !!col && py < col.h + ENTRANCE_PORTAL_LIFT;
+    frameSections.mark('terrain.sample');
     // An exterior view into a gallery can see genuine cave walls hundreds
     // of metres away. Prefetch the same bounded cave disk from the padded
     // approach, before walking under its roof, instead of exposing the
@@ -558,6 +590,15 @@ export class ChunkManager {
     } else {
       this.openSkyStreak = 0;
     }
+    this.retireSpent = 0; this.retireLimit = RETIRE_BUDGET_MS;
+    this.seamSpent = 0; this.seamLimit = SEAM_BUDGET_MS;
+    try {
+      this.updateSelectionAndInstalls(px, pz, ccx, ccz, midCx, midCz, underground, previousRadius, previousFlight);
+    } finally { this.retireLimit = Infinity; this.seamLimit = Infinity; }
+  }
+
+  private updateSelectionAndInstalls(px: number, pz: number, ccx: number, ccz: number, midCx: number, midCz: number,
+    underground: boolean, previousRadius: number, previousFlight: boolean): void {
     // Caps run for exterior cameras too: crossing into a cave marks a far
     // cutoff ray; crossing back out clears it. They never write color/depth.
     if (!this.haveSelection || ccx !== this.lastCcx || ccz !== this.lastCcz ||
@@ -572,12 +613,19 @@ export class ChunkManager {
       const start = performance.now();
       this.rebuildSelection(px, pz, ccx, ccz, underground);
       this.selectionMs = performance.now() - start;
+      frameSections.mark('terrain.select');
     }
     // Completions and selection changes reconcile only affected ancestors.
     // A stationary camera never needs a global fallback-mask pass.
     this.flushMeshes();
+    frameSections.mark('terrain.install');
     this.advanceEmergencyCoverage();
+    frameSections.mark('terrain.emergency');
     this.pump(px, pz);
+    frameSections.mark('terrain.pump');
+    // Retirement and distant seams cut short by an earlier budget continue here.
+    if (this.retireBacklog) this.pruneRetiring();
+    if (this.seamDirty.size || this.seamMaskDirty.size) this.syncTerrainSeams();
   }
 
   private rebuildSelection(px: number, pz: number, ccx: number, ccz: number, underground: boolean): void {
@@ -652,9 +700,11 @@ export class ChunkManager {
       changedParents.add(`2:${Math.floor(st.cx / (st.lod === 0 ? 16 : 4))},${Math.floor(st.cz / (st.lod === 0 ? 16 : 4))}`);
     }
     this.pruneUndesired();
+    frameSections.mark('select.prune');
     this.cancelObsoleteJobs();
     for (const key of changedParents) this.syncOneCoarse(this.columns.get(key));
     this.syncTerrainSeams();
+    frameSections.mark('select.seams');
     this.refreshStats();
   }
 
@@ -688,11 +738,16 @@ export class ChunkManager {
   }
 
   private pruneUndesired(): void {
+    this.batchDetach(() => this.pruneUndesiredStates());
+  }
+
+  private pruneUndesiredStates(): void {
     let queueChanged = false;
     for (const [key, st] of this.columns) {
       if (this.desired.has(key)) continue;
-      if (!st.installed || this.fallbackInstalled(st)) {
-        this.removeState(st);
+      if (!st.installed) { this.removeState(st); queueChanged = true; continue; }
+      if (this.retireNow(st)) {
+        this.timedRemove(st);
         queueChanged = true;
         continue;
       }
@@ -711,35 +766,98 @@ export class ChunkManager {
 
   private pruneRetiring(): void {
     let removed = false;
-    for (const st of [...this.columns.values()]) {
-      if (!st.retiring || !this.fallbackInstalled(st)) continue;
-      this.removeState(st);
-      removed = true;
-    }
+    this.retireBacklog = false;
+    this.batchDetach(() => {
+      const retiring = [...this.columns.values()].filter(st => st.retiring);
+      const start = retiring.length ? this.retireOffset % retiring.length : 0;
+      this.retireOffset = 0;
+      for (let i = 0; i < retiring.length; i++) {
+        const st = retiring[(start + i) % retiring.length];
+        if (this.columns.get(st.key) !== st || !st.retiring) continue;
+        if (!this.retireNow(st)) {
+          // Out of budget: resume with this tile, so none can starve.
+          if (this.retireBacklog) { this.retireOffset = start + i; return; }
+          continue;
+        }
+        this.timedRemove(st);
+        removed = true;
+      }
+    });
     if (removed) this.compactQueue();
   }
 
+  /** fallbackInstalled(), whose seam proof for still-visible neighbors is the
+   * costly part (about 0.3 ms per fine tile). After a respawn or deployment
+   * hundreds of old tiles retire at once and used to stall one frame for up
+   * to ~90 ms. Beyond this update's budget a tile simply stays visible
+   * (retiring) and is checked on a following frame. */
+  private retireNow(st: ColumnState): boolean {
+    const fallback = this.fallbackState(st);
+    if (fallback === 'no') return false;
+    if (this.retireSpent >= this.retireLimit) { this.retireBacklog = true; return false; }
+    if (fallback === 'yes') return true;
+    const start = performance.now(), retire = this.canRetireSeams(st);
+    this.retireSpent += performance.now() - start;
+    return retire;
+  }
+
+  /** Removal itself (seam marks, mesh disposal) shares the retirement budget. */
+  private timedRemove(st: ColumnState): void {
+    const start = performance.now();
+    this.removeState(st);
+    this.retireSpent += performance.now() - start;
+  }
+
+  /** Object3D.remove scans and splices its parent's children. A long
+   * teleport retires hundreds of meshes from groups holding thousands, so
+   * removals inside `run` are collected and each group is filtered once. */
+  private batchDetach(run: () => void): void {
+    if (this.detaching) { run(); return; }
+    const detaching = this.detaching = new Set<THREE.Object3D>();
+    try { run(); } finally {
+      this.detaching = null;
+      if (detaching.size) for (const group of [this.group, this.portalGroup]) {
+        const kept = group.children.filter(child => !detaching.has(child));
+        if (kept.length === group.children.length) continue;
+        for (const child of group.children) if (detaching.has(child)) child.parent = null;
+        group.children = kept;
+      }
+    }
+  }
+
+  private detach(parent: THREE.Object3D, child: THREE.Object3D): void {
+    if (this.detaching && child.parent === parent) this.detaching.add(child);
+    else parent.remove(child);
+  }
+
   private fallbackInstalled(st: ColumnState): boolean {
+    const fallback = this.fallbackState(st);
+    return fallback === 'seams' ? this.canRetireSeams(st) : fallback === 'yes';
+  }
+
+  /** 'seams' when a desired coarser fallback is installed but the tile may
+   * only retire once its seams provably close (canRetireSeams). */
+  private fallbackState(st: ColumnState): 'yes' | 'no' | 'seams' {
     // A paged-out horizon tile has no coarser fallback and needs none: its
     // footprint is beyond fully saturated fog. Drop old nearby geometry too
     // after a long teleport instead of retaining it forever awaiting a tile
     // the new camera will never request.
-    if (st.lod === 2) return true;
+    if (st.lod === 2) return 'yes';
     const size = CHUNK_SIZE * (st.lod === 0 ? 1 : LOD1_STEP);
     const dx = Math.max(0, Math.abs((st.cx + 0.5) * size - this.lastPx) - size * 0.5);
     const dz = Math.max(0, Math.abs((st.cz + 0.5) * size - this.lastPz) - size * 0.5);
-    if (Math.hypot(dx, dz) > this.profile.farRadius) return true;
+    if (Math.hypot(dx, dz) > this.profile.farRadius) return 'yes';
     if (st.lod === 0) {
       const t1x = Math.floor(st.cx / LOD1_STEP);
       const t1z = Math.floor(st.cz / LOD1_STEP);
-      if (this.desiredInstalled(`1:${t1x},${t1z}`)) return this.canRetireSeams(st);
+      if (this.desiredInstalled(`1:${t1x},${t1z}`)) return 'seams';
       const t2x = Math.floor(st.cx / LOD2_STEP);
       const t2z = Math.floor(st.cz / LOD2_STEP);
-      return this.desiredInstalled(`2:${t2x},${t2z}`) && this.canRetireSeams(st);
+      return this.desiredInstalled(`2:${t2x},${t2z}`) ? 'seams' : 'no';
     }
     const t2x = Math.floor(st.cx / DIRECT_PARTS);
     const t2z = Math.floor(st.cz / DIRECT_PARTS);
-    return this.desiredInstalled(`2:${t2x},${t2z}`) && this.canRetireSeams(st);
+    return this.desiredInstalled(`2:${t2x},${t2z}`) ? 'seams' : 'no';
   }
 
   private canRetireSeams(st: ColumnState): boolean {
@@ -842,7 +960,8 @@ export class ChunkManager {
     // Retained unpublished candidates still participate in prospective
     // ownership, so their removal must wake and revalidate their neighbors.
     if (st.installed || this.seamDeferred.has(st.key)) {
-      this.markSeamEdges(st);
+      if (st.lod === 2 && !this.seamDeferred.has(st.key)) this.markRemovedHorizonSeams(st);
+      else this.markSeamEdges(st);
       this.markSeamParents(st);
     }
     this.seamDeferred.delete(st.key);
@@ -913,6 +1032,7 @@ export class ChunkManager {
       this.onMeshed(pending.slot, pending.msg);
       installed = 1;
     } else installed = this.retryDeferredSeam() ? 1 : 0;
+    frameSections.mark('install.deferred');
     while (this.pendingMeshes.length && installed < UPLOADS_PER_FRAME &&
       (installed === 0 || performance.now() - start < UPLOAD_BUDGET_MS)) {
       const pending = this.pendingMeshes.shift()!;
@@ -1440,7 +1560,10 @@ export class ChunkManager {
       ? msg.authoredSeams : undefined;
     const candidate = this.seamCandidate(st, msg.chunks, msg.portals, authoredSeams);
     this.seamCandidateMessages.set(candidate, { msg, preview: msg.preview === true, dependencies: new Map() });
-    if (!(msg.preview && st.previewInstalled) && !this.installGeometry(st, msg.chunks, msg.portals, candidate)) {
+    frameSections.mark('install.candidate');
+    const installed = (msg.preview && st.previewInstalled) || this.installGeometry(st, msg.chunks, msg.portals, candidate);
+    frameSections.mark(`install.geometry${st.lod}`);
+    if (!installed) {
       if (msg.preview && st.lod === 2 && !st.installed && st.requestId === null &&
           this.columns.get(st.key) === st && this.desired.has(st.key) && !st.retiring &&
           msg.caveDetail === st.caveDetail && !this.seamDeferred.has(st.key) &&
@@ -1470,8 +1593,10 @@ export class ChunkManager {
     }
     this.finishMeshState(st, msg);
     this.pruneRetiring();
+    frameSections.mark('install.retire');
     // Every finer completion can change one or more exact coarse masks.
     this.syncCoarseVisibility(st);
+    frameSections.mark('install.coarse');
     return true;
   }
 
@@ -1594,6 +1719,28 @@ export class ChunkManager {
     const keys = this.seamKeys(st);
     for (const key of keys) this.seamDirty.add(key);
     this.wakeDeferredSeams(keys);
+  }
+
+  /** Removing a horizon tile, the coarsest owner, cannot create a seam on
+   * any of its interior edges: finer pairs keep their owners and every
+   * finer/horizon strip there is owned by this tile. Only its perimeter and
+   * the strips it owns change. A long teleport pages out ~150 horizon tiles;
+   * revisiting all 544 edges of each used to stall that frame for ~100 ms. */
+  private markRemovedHorizonSeams(st: ColumnState): void {
+    const keys = new Set<string>(this.seamGroups.get(st)?.parts.keys());
+    const x0 = st.cx * LOD2_STEP, z0 = st.cz * LOD2_STEP, x1 = x0 + LOD2_STEP, z1 = z0 + LOD2_STEP;
+    for (let i = 0; i < LOD2_STEP; i++) {
+      keys.add(`x:${x0},${z0 + i}`); keys.add(`x:${x1},${z0 + i}`);
+      keys.add(`z:${x0 + i},${z0}`); keys.add(`z:${x0 + i},${z1}`);
+    }
+    for (const key of keys) this.seamDirty.add(key);
+    this.wakeDeferredSeams(keys);
+    // A finer replacement inside the tile may have been waiting for its contour.
+    for (const pending of this.seamDeferred.values()) {
+      const scale = pending.state.lod === 0 ? 1 : pending.state.lod === 1 ? LOD1_STEP : LOD2_STEP;
+      const px = pending.state.cx * scale, pz = pending.state.cz * scale;
+      if (px < x1 && px + scale > x0 && pz < z1 && pz + scale > z0) pending.dirty = true;
+    }
   }
 
   private markSeamParents(st: ColumnState): void {
@@ -1776,18 +1923,60 @@ export class ChunkManager {
   }
 
   private syncTerrainSeams(): void {
-    for (const key of this.seamMaskDirty) this.syncOneCoarse(this.columns.get(key));
-    this.seamMaskDirty.clear();
+    const limited = this.seamLimit !== Infinity, maskStart = performance.now();
+    if (!limited) {
+      for (const key of this.seamMaskDirty) this.syncOneCoarse(this.columns.get(key));
+      this.seamMaskDirty.clear();
+    } else {
+      // Coarse tiles near the camera update their finer-coverage masks now;
+      // distant ones (a retired neighborhood after a respawn) share the
+      // update's seam budget and may update a frame later.
+      let checkedMasks = 0, overMasks = this.seamSpent >= this.seamLimit;
+      for (const key of [...this.seamMaskDirty]) {
+        if ((++checkedMasks & 7) === 0) overMasks = this.seamSpent + performance.now() - maskStart >= this.seamLimit;
+        if (overMasks && !this.nearTile(key)) continue;
+        this.syncOneCoarse(this.columns.get(key));
+        this.seamMaskDirty.delete(key);
+      }
+      this.seamSpent += performance.now() - maskStart;
+    }
+    frameSections.mark('seams.masks');
     if (!this.seamDirty.size) return;
     const changes = new Map<string, SeamEdge | null>();
+    const start = performance.now();
+    let checked = 0, over = limited && this.seamSpent >= this.seamLimit;
     for (const key of this.seamDirty) {
+      // A horizon install or a retired neighborhood dirties hundreds to
+      // thousands of edges (about 30 us each), mostly far away where only
+      // equal-LOD horizon tiles meet. Near edges always close this frame;
+      // distant ones share the update's budget and may close a frame later.
+      if (limited && (++checked & 15) === 0) over = this.seamSpent + performance.now() - start >= this.seamLimit;
+      if (over && !this.nearSeam(key)) continue;
       const entry = this.prepareSeam(key);
       // A replacement has already passed this check before its mask changed.
       // Selection can also remove an edge entirely; never keep a stale strip.
       changes.set(key, entry === false ? null : entry);
     }
-    this.seamDirty.clear();
-    this.replaceSeams(changes);
+    if (changes.size === this.seamDirty.size) this.seamDirty.clear();
+    else for (const key of changes.keys()) this.seamDirty.delete(key);
+    frameSections.mark('seams.prepare');
+    if (changes.size) this.replaceSeams(changes);
+    this.seamSpent += performance.now() - start;
+    frameSections.mark('seams.replace');
+  }
+
+  /** A `lod:cx,cz` column key whose tile center lies near the camera. */
+  private nearTile(key: string): boolean {
+    const colon = key.indexOf(':'), comma = key.indexOf(',', colon);
+    const size = key[0] === '0' ? CHUNK_SIZE : key[0] === '1' ? LOD1_TILE_M : LOD2_TILE_M;
+    const x = (Number(key.slice(colon + 1, comma)) + .5) * size, z = (Number(key.slice(comma + 1)) + .5) * size;
+    return Math.hypot(x - this.lastPx, z - this.lastPz) <= NEAR_SEAM_M + size / 2;
+  }
+
+  private nearSeam(key: string): boolean {
+    const comma = key.indexOf(',', 2);
+    const x = (Number(key.slice(2, comma)) + .5) * CHUNK_SIZE, z = (Number(key.slice(comma + 1)) + .5) * CHUNK_SIZE;
+    return Math.hypot(x - this.lastPx, z - this.lastPz) <= NEAR_SEAM_M;
   }
 
   private seamCandidate(st: ColumnState, chunks: ChunkMesh[], portals: EntrancePortalMesh,
@@ -2035,12 +2224,12 @@ export class ChunkManager {
 
   private disposeMeshes(st: ColumnState): void {
     for (const m of st.meshes) {
-      this.group.remove(m);
+      this.detach(this.group, m);
       m.geometry.dispose();
     }
     st.meshes = [];
     for (const m of st.portalMeshes) {
-      this.portalGroup.remove(m);
+      this.detach(this.portalGroup, m);
       m.geometry.dispose();
     }
     st.portalMeshes = [];

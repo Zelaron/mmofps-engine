@@ -58,8 +58,9 @@ test('reassessed second-squad orders let four cave walkers recover through ordin
   Object.defineProperty(game,'frontier',{value:{territories:[home,...targets],
     order:(player:ServerPlayer)=>director.order(player,()=>roster,game.tick),recordCombat(){},step(){},send(){}} as unknown as Frontier});
   const initial=director.order(players[0],()=>roster,game.tick)!;
-  assert.equal(initial.targetId,targets[1].id,'the captured cave squad receives the second control');
-  assert.equal(director.order(strategic[0],()=>roster,game.tick)!.targetId,targets[0].id);
+  // Both assault squads mass on one control before a second is opened.
+  assert.ok(targets.some(target=>target.id===initial.targetId),'the captured cave squad joins the city assault');
+  assert.equal(director.order(strategic[0],()=>roster,game.tick)!.targetId,initial.targetId);
   const bots=players.map(p=>new Bot(p,1337)),left=new Set<number>(),recovered=new Set<number>();
   for(let tick=0;tick<2100&&left.size<players.length;tick++) {
     director.update(roster,game.tick);

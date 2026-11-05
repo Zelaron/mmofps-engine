@@ -77,6 +77,7 @@ function sourceHarness(source: string): string {
     const vehicleEyeOffset = new THREE.Vector3(0, PLAYER.EYE_HEIGHT, 0), shake = 0;
     const net = { rttMs: 0, snapshotAgeMs: 0, estServerTick: () => clock.tick };
     const updateOverlay = () => {}, scheduleReconnect = () => { reconnects++; };
+    const frameSections = { begin() {}, mark() {}, end() {} };
     function leadTicks() { return clamp(net.rttMs / (1000 / TICK_RATE) + 2, 2, 30); }
     function doPredictedTick() {
       const cmd = { seq: seq++, buttons: 0, weapon: 0, yaw: 0, pitch: 0, renderTick: clock.tick, renderFrac: 0 };

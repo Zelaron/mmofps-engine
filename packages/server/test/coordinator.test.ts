@@ -191,3 +191,39 @@ test('regional ownership is weighted by control point counts and incomplete repo
     assert.equal(c.status().planets[0].capacity, 20);
   } finally { c.close(); }
 });
+
+test('a character saved on a world that is no longer enabled returns to the entry world with its cargo', () => {
+  let now = 10_000; const c = new Coordinator(':memory:', () => now); register(c);
+  try {
+    // Travel to Cinder while all three worlds run, then shut Cinder down.
+    const grant = c.claim(key, 'meridian', 'meridian:one', 'meridian', saved());
+    c.transfer({ key, epoch: grant.epoch, holder: 'meridian:one', state: saved() }, 'cinder', 'c'.repeat(32));
+    const arrival = c.claim(key, 'cinder', 'cinder:one', 'cinder');
+    assert.equal(c.release({ key, epoch: arrival.epoch, holder: 'cinder:one', state: { ...saved(7331, 512), arrival: false } }), true);
+    c.enablePlanets(['meridian']);
+    assert.deepEqual(c.status().planets.map(p => p.id), ['meridian'], 'disabled worlds are not advertised');
+    const route = c.routeCharacter(key);
+    assert.equal(route?.planet, 'meridian', 'the gateway routes the stranded character to the entry world');
+    const owner = c.locate(key)!;
+    assert.equal(owner.planet, 'meridian'); assert.ok(owner.epoch > arrival.epoch, 'relocation fences the old world');
+    assert.equal(owner.state!.seed, 1337); assert.equal(owner.state!.arrival, true);
+    assert.equal(owner.state!.salvage, 512, 'inventory and progress travel with the character');
+    const back = c.claim(key, 'meridian', 'meridian:two', 'meridian');
+    assert.equal(back.entityId, grant.entityId); assert.equal(back.state!.salvage, 512);
+    assert.equal(c.relocateStranded(key), false, 'characters on enabled worlds are not moved');
+    const row = { key, epoch: back.epoch, holder: 'meridian:two', state: saved() };
+    assert.throws(() => c.transfer(row, 'nacre', 'd'.repeat(32)), code('unavailable'), 'travel to a disabled world is refused');
+  } finally { c.close(); }
+});
+
+test('a live session on a world being disabled is not relocated underneath it', () => {
+  const c = new Coordinator(':memory:'); register(c);
+  try {
+    const grant = c.claim(key, 'meridian', 'meridian:one', 'meridian', saved());
+    c.transfer({ key, epoch: grant.epoch, holder: 'meridian:one', state: saved() }, 'nacre', 'e'.repeat(32));
+    c.claim(key, 'nacre', 'nacre:one', 'nacre');
+    c.enablePlanets(['meridian']);
+    assert.equal(c.relocateStranded(key), false);
+    assert.equal(c.locate(key)!.planet, 'nacre');
+  } finally { c.close(); }
+});

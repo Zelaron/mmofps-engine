@@ -1,4 +1,4 @@
-import { CAPTURE_HEIGHT, FACTIONS, type Faction, type Territory } from '@shared/frontier';
+import { CAPTURE_HEIGHT, FACTIONS, captureHeightGap, type Faction, type Territory } from '@shared/frontier';
 
 export interface CaptureObserver { x: number; y: number; z: number; alive: boolean; onFoot: boolean }
 export interface CaptureStatus {
@@ -25,8 +25,24 @@ export function captureStatus(site: Territory, faction: Faction, p: CaptureObser
   if (!p.alive) return result('blocked', 'CAPTURE PAUSED', 'Respawn to help capture this zone.');
   if (!faction) return result('blocked', 'AWAITING FACTION', 'A faction is assigned when you join the world.', 0);
   if (!p.onFoot) return result('blocked', 'DISEMBARK TO CAPTURE', 'Leave your vehicle or pod, then hold the ring on foot.');
-  if (Math.abs(p.y - site.y) > CAPTURE_HEIGHT) return result('blocked', 'RETURN TO THE FLAG LEVEL', 'Reach the ground beside the flag. Roofs and caves do not count.');
-  if (site.contested) return result('contested', 'CONTESTED — CAPTURE PAUSED', 'Clear enemy troops from the ring to resume capture.');
+  // The server's height rule for a human (inCaptureRange): name the gap.
+  const gap = captureHeightGap(site, p.y, true);
+  if (gap && site.ground) return result('blocked', gap > 0 ? 'TOO HIGH TO CAPTURE' : 'TOO LOW TO CAPTURE',
+    `You are ${Math.max(1, Math.round(Math.abs(gap)))} m ${gap > 0 ? 'above' : 'below'} the ground in this ring. Stand on the ground inside it: roofs and caves do not count.`);
+  const rise = p.y - site.y;
+  if (gap) return result('blocked', 'RETURN TO THE FLAG LEVEL',
+    `You are ${Math.round(Math.abs(rise))} m ${rise > 0 ? 'above' : 'below'} the flag. Get within ${CAPTURE_HEIGHT} m of its height: move toward it. Roofs and caves do not count.`);
+  if (site.contested) {
+    // The faction with a clear majority in the ring keeps making progress.
+    const pushing = Math.abs(site.progressRate ?? 0) > 1e-6 && site.pressureFaction ? site.pressureFaction : 0;
+    if (pushing === faction) {
+      const remaining = influence < 0 ? -influence : 1 - influence, rate = Math.abs(site.progressRate ?? 0);
+      return result('capturing', 'CONTESTED — YOU OUTNUMBER THEM', `Keep your majority in the ring.${rate > 1e-6 ? ` About ${Math.ceil(remaining / rate)}s remaining.` : ''}`);
+    }
+    if (pushing) return result('blocked', 'CONTESTED — OUTNUMBERED', 'The enemy has more soldiers in the ring. Kill them or bring allies.');
+    if (site.owner === faction && influence >= 1 - 1e-6) return result('contested', 'CONTESTED — HOLDING', 'Attackers are in the ring but cannot out-number you. Drive them out.', 100);
+    return result('contested', 'CONTESTED — STALEMATE', 'Neither side has a clear majority. Clear enemy troops or out-number them to resume capture.');
+  }
   if (site.owner === faction && influence >= 1 - 1e-6) return result('secured', 'CONTROL POINT SECURED', `This point is held by ${FACTIONS[faction].name}. Check the base reinforcement status below.`, 100);
   const rate = modern ? (site.pressureFaction === faction ? 1 : -1) * Math.abs(site.progressRate ?? 0) : (site.captureRate ?? 0) * sign;
   if (rate < -1e-6) return result('blocked', 'ENEMY CAPTURING', 'Stop enemy troops in the ring.');

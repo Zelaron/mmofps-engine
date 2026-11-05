@@ -98,6 +98,14 @@ export class PlayerConn implements PlayerSink {
           }
           break;
         }
+        case Msg.CDeploy: {
+          const id = r.str();
+          if (bytes.length !== new TextEncoder().encode(id).length + 2) break;
+          const refusal = this.game.deployNow(this.player, id);
+          if (refusal) this.send(encodeServerMessage(refusal));
+          this.game.frontier?.send(this.player, this.game.players.values(), this.game.tick);
+          break;
+        }
         case Msg.CHarvest: {
           if (bytes.length !== 2 || bytes[1] > 1) throw new Error('Invalid extraction input');
           this.lifecycle.harvest?.(this.player, bytes[1] === 1); break;

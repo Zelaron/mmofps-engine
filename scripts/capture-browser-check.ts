@@ -8,7 +8,7 @@ import { Coordinator } from '../packages/server/src/coordinator.js';
 import { startControlPlane } from '../packages/server/src/control-plane.js';
 import { startGateway } from '../packages/server/src/gateway.js';
 import { startServer, defaultClientDir } from '../packages/server/src/server.js';
-import { BTN } from '../packages/shared/src/index.js';
+import { BTN, HYPERSPEED_ENABLED } from '../packages/shared/src/index.js';
 
 // Positions and competing presence belong to this isolated fixture. Actual
 // capture ticks, network snapshots, input, UI and persistence use game code.
@@ -32,7 +32,7 @@ try {
     await page.waitForFunction(() => (window as any).__mmofps?.state.initialized && (window as any).__mmofps.state.rendering.worldPresented);
     const id = await page.evaluate(() => (window as any).__mmofps.state.myId), player = server.game.players.get(id)!;
     let hyperDistance = 0;
-    if (!mobile) {
+    if (!mobile && HYPERSPEED_ENABLED) {
       await page.locator('#c').click({ position: { x: 710, y: 460 } });
       await page.waitForFunction(() => !!document.pointerLockElement);
       await page.keyboard.press('KeyH'); await page.locator('#hyperspeed-status').waitFor({ state: 'visible' });

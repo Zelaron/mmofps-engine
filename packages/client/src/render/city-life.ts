@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import type { World } from '@shared/worldgen';
-import { cityLifePlan, cityCivilianPose, type CityVenue, type CityVenueKind, type CityLifeMarker } from '@shared/city-life';
+import { cityLifePlan, cityCivilianPose, type CityCivilian, type CityCivilianPose, type CityVenue, type CityVenueKind, type CityLifeMarker } from '@shared/city-life';
 import { disjointStructureBoxes } from '@shared/structures';
-import { CivilianModels, MAX_VISIBLE_CIVILIANS, type CivilianRenderItem } from './civilian-models.js';
+import { CivilianModels, CIVILIAN_DOWN_SECONDS, CIVILIAN_RETURN_SECONDS, MAX_VISIBLE_CIVILIANS, type CivilianRenderItem } from './civilian-models.js';
 import { VehicleGeometry } from './vehicle-geometry.js';
 import { renderProfile } from './device-profile.js';
 
@@ -52,6 +52,27 @@ function venueProps(kind: CityVenueKind, material: THREE.Material): THREE.Buffer
 
 /** Local city detail is independent of networked combat entities. Every room
  * wall and stair uses its shared collision box; props stay on that furniture. */
+/** A civilian shot or caught in a blast falls (CIVILIAN_DOWN_SECONDS), then
+ * returns after CIVILIAN_RETURN_SECONDS. Civilians are not simulated by the
+ * server, so this runs on each client, from the shots and blasts it sees. */
+const CIVILIAN_RADIUS = .3, CIVILIAN_HEIGHT = 1.75;
+
+/** Distance along a ray (unit direction) to a standing civilian's upright
+ * cylinder, or null when it misses. */
+export function rayCivilian(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
+  cx: number, cy: number, cz: number): number | null {
+  const fx = ox - cx, fz = oz - cz, a = dx * dx + dz * dz;
+  if (a < 1e-9) return null;
+  const b = fx * dx + fz * dz, c = fx * fx + fz * fz - CIVILIAN_RADIUS * CIVILIAN_RADIUS, disc = b * b - a * c;
+  if (disc < 0) return null;
+  const root = Math.sqrt(disc);
+  for (const t of [(-b - root) / a, (-b + root) / a]) {
+    const y = oy + dy * t;
+    if (t >= 0 && y >= cy && y <= cy + CIVILIAN_HEIGHT) return t;
+  }
+  return null;
+}
+
 export class CityLife {
   readonly group = new THREE.Group();
   readonly stats = { venues: 0, civilians: 0, boxes: 0, draws: 0, triangles: 0 };
@@ -80,6 +101,9 @@ export class CityLife {
   private readonly up = new THREE.Vector3(0, 1, 0);
   private signature = '';
   private disposed = false;
+  private seconds = 0;
+  private standing: CivilianRenderItem[] = [];
+  private readonly fallen = new Map<number, { at: number; civilian: CityCivilian; pose: CityCivilianPose; dirX: number; dirZ: number }>();
 
   constructor(private readonly world: Pick<World, 'collectCities'>) {
     this.group.name = 'city-life'; this.walls.name = 'city-venue-solids'; this.walls.count = 0;
@@ -109,17 +133,58 @@ export class CityLife {
     if (signature !== this.signature) { this.signature = signature; this.rebuild(venues, markers, plans.flatMap(p => p.solids)); }
     const visible = new Set(venues.filter(v => Math.abs(v.y - y) < 14).map(v => v.id));
     const population: CivilianRenderItem[] = [];
+    this.seconds = seconds;
+    for (const [id, down] of this.fallen) {
+      const elapsed = seconds - down.at;
+      if (elapsed < 0 || elapsed >= CIVILIAN_RETURN_SECONDS) { this.fallen.delete(id); continue; }
+      if (elapsed < CIVILIAN_DOWN_SECONDS && Math.hypot(down.pose.x - x, down.pose.z - z) < 170)
+        population.push({ civilian: down.civilian, pose: down.pose, fall: { elapsed, dirX: down.dirX, dirZ: down.dirZ } });
+    }
     for (const civilian of plans.flatMap(p => p.civilians)) {
-      if (!visible.has(civilian.venueId)) continue;
+      if (!visible.has(civilian.venueId) || this.fallen.has(civilian.id)) continue;
       const pose = cityCivilianPose(civilian, seconds);
       if (Math.hypot(pose.x - x, pose.z - z) < 170) population.push({ civilian, pose });
     }
     population.sort((a, b) => Math.hypot(a.pose.x - x, a.pose.z - z) - Math.hypot(b.pose.x - x, b.pose.z - z));
-    this.population.update(population.slice(0, renderProfile().touch ? 24 : MAX_VISIBLE_CIVILIANS), seconds);
+    // Only civilians actually drawn can be hit.
+    const shown = population.slice(0, renderProfile().touch ? 24 : MAX_VISIBLE_CIVILIANS);
+    this.standing = shown.filter(item => !item.fall);
+    this.population.update(shown, seconds);
     this.stats.civilians = this.population.stats.count;
     this.stats.draws = (this.walls.count ? 1 : 0) + (this.signs.count ? 1 : 0) + (this.arrows.count ? 1 : 0) + [...this.props.values()].filter(m => m.count).length + this.population.stats.draws;
     this.stats.triangles = this.walls.count * 12 + this.signs.count * 2 + this.arrows.count * 3 + this.population.stats.triangles;
     for (const mesh of this.props.values()) this.stats.triangles += mesh.count * (mesh.geometry.index?.count ?? mesh.geometry.attributes.position.count) / 3;
+  }
+
+  /** The nearest standing civilian a shot from o along unit d hits within
+   * `range` falls; returns where the shot struck, or null. */
+  shoot(ox: number, oy: number, oz: number, dx: number, dy: number, dz: number, range: number): { x: number; y: number; z: number } | null {
+    let best: CivilianRenderItem | undefined, bestT = range;
+    for (const item of this.standing) {
+      const t = rayCivilian(ox, oy, oz, dx, dy, dz, item.pose.x, item.pose.y, item.pose.z);
+      if (t !== null && t <= bestT) { best = item; bestT = t; }
+    }
+    if (!best) return null;
+    this.fall(best, dx, dz);
+    return { x: ox + dx * bestT, y: oy + dy * bestT, z: oz + dz * bestT };
+  }
+
+  /** Every standing civilian within a blast's radius falls, away from it. */
+  blast(x: number, y: number, z: number, radius: number): number {
+    let count = 0;
+    for (const item of this.standing) {
+      const p = item.pose, nearestY = Math.max(p.y, Math.min(p.y + CIVILIAN_HEIGHT, y));
+      if (this.fallen.has(item.civilian.id) || Math.hypot(p.x - x, nearestY - y, p.z - z) > radius) continue;
+      this.fall(item, p.x - x, p.z - z); count++;
+    }
+    return count;
+  }
+
+  private fall(item: CivilianRenderItem, dirX: number, dirZ: number): void {
+    const length = Math.hypot(dirX, dirZ) || 1;
+    this.fallen.set(item.civilian.id, { at: this.seconds, civilian: item.civilian, pose: { ...item.pose, moving: false },
+      dirX: dirX / length, dirZ: dirZ / length });
+    this.standing = this.standing.filter(other => other !== item);
   }
 
   private rebuild(venues: CityVenue[], markers: CityLifeMarker[], solids: ReturnType<typeof cityLifePlan>['solids']): void {

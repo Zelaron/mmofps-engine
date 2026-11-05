@@ -342,6 +342,20 @@ export class AudioFX {
     this.noise(0.4, 800, 'lowpass', 0, 0.4, 100);
   }
   spawn(): void { this.tone(200, 600, 0.16, 'sine', 0, 0.25); }
+  /** Experience reward: a short bright tick (a richer chord for big rewards). */
+  xp(big: boolean): void {
+    this.tone(big ? 784 : 1046, big ? 1175 : 1318, 0.07, 'triangle', 0, big ? 0.13 : 0.07);
+    if (big) this.tone(1175, 1568, 0.1, 'triangle', 0, 0.1, 0.07);
+  }
+  /** Promotion fanfare: a rising major arpeggio. */
+  promotion(): void {
+    [523, 659, 784, 1046].forEach((note, i) => this.tone(note, note * 1.002, i === 3 ? 0.45 : 0.14, 'triangle', 0, 0.2, i * 0.11));
+  }
+  /** War result: triumphant or somber cadence. */
+  victory(won: boolean): void {
+    const notes = won ? [392, 523, 659, 784] : [392, 349, 311, 262];
+    notes.forEach((note, i) => this.tone(note, note, i === 3 ? 0.7 : 0.2, won ? 'triangle' : 'sine', 0, 0.22, i * 0.18));
+  }
   weaponSwitch(): void { this.noise(0.04, 1800, 'highpass', 0, 0.15); }
   pickupHealth(): void {
     // A soft rising two-note chime: positive and distinct from combat cues.

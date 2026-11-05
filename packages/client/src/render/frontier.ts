@@ -23,9 +23,12 @@ export class FrontierMarkers {
         const mast = new THREE.Mesh(this.mast, this.materials[site.owner]); mast.name = 'capture-mast'; mast.position.y = 4;
         const flag = new THREE.Mesh(this.flag, this.materials[site.owner]); flag.name = 'capture-flag'; flag.position.y = 8.5;
         group.add(ring, mast, flag); this.markers.set(site.id, group); this.group.add(group);
+        // The ring and mast never animate; only the flag spins.
+        for (const part of [group, ring, mast]) part.matrixAutoUpdate = false;
+        mast.updateMatrix();
       }
-      group.position.set(site.x, site.y, site.z);
-      group.children[0].scale.setScalar(site.radius);
+      group.position.set(site.x, site.y, site.z); group.updateMatrix();
+      group.children[0].scale.setScalar(site.radius); group.children[0].updateMatrix();
       for (const child of group.children) (child as THREE.Mesh).material = this.materials[site.owner];
     }
     for (const [id, marker] of this.markers) if (!retained.has(id)) { this.group.remove(marker); this.markers.delete(id); }

@@ -50,6 +50,9 @@ export class Coordinator {
   private campaign!: CampaignLedger;
   private readonly now: () => number;
   private readonly clocks: PlanetClocks;
+  /** Planets that make up this universe. Defaults to every implemented world
+   * so embedded/test coordinators keep their behavior; the cluster narrows it. */
+  private enabled: readonly PlanetId[] = PLANETS.map(p => p.id);
   constructor(file: string, wall: () => number = Date.now,
     monotonic: () => number = wall === Date.now ? () => performance.now() : wall) {
     const began = monotonic(), wallAtStart = wall();
@@ -132,6 +135,34 @@ export class Coordinator {
     } catch (error) { this.db.close(); throw error; }
   }
   close(): void { this.db.close(); }
+  /** Restrict the universe to these worlds. The first is the entry world. */
+  enablePlanets(ids: readonly PlanetId[]): void {
+    const valid = [...new Set(ids)].filter(id => planetById(id));
+    if (!valid.length) throw new Error('At least one planet must be enabled');
+    this.enabled = valid;
+  }
+  get enabledPlanets(): readonly PlanetId[] { return this.enabled; }
+  get entryPlanet(): PlanetId { return this.enabled[0]; }
+  planetEnabled(planet: PlanetId): boolean { return this.enabled.includes(planet); }
+  /** A character saved on a world that is no longer part of the universe is
+   * brought to the entry world's arrival terminal, keeping its inventory,
+   * allegiance and progress. Live sessions are left alone; they are fenced by
+   * their own leases. Returns true when the saved location changed. */
+  relocateStranded(key: string): boolean {
+    this.validateKey(key);
+    return this.transaction(() => {
+      const old = this.locate(key), now = this.now();
+      if (!old || this.planetEnabled(old.planet)) return false;
+      if (old.holder && old.leaseUntil > now) return false;
+      if (this.regional.locked(key)) return false;
+      const entry = planetById(this.entryPlanet)!;
+      const region = this.region(entry.id).id;
+      const state: SavedPlayer | null = old.state ? { ...this.camps.reconcile(key, old.state), seed: entry.seed, arrival: true, savedAt: now } : null;
+      this.db.prepare('UPDATE players SET planet=?,region=?,node_id=NULL,node_epoch=NULL,epoch=?,holder=NULL,lease_until=0,state=? WHERE key=?')
+        .run(entry.id, region, old.epoch + 1, state ? this.snapshotJson(state, entry.id) : null, key);
+      return true;
+    });
+  }
   campaignExchange(request: CampaignExchangeRequest) { return this.transaction(() => this.campaign.exchange(request)); }
   departCampaign(request: CampaignDeparture) { return this.transaction(() => this.campaign.depart(request)); }
   cancelCampaign(request: CampaignDeparture) { return this.transaction(() => this.campaign.cancel(request)); }
@@ -273,11 +304,13 @@ export class Coordinator {
     return node && node.leaseUntil > this.now() ? { ...node, ...(node.ownership ? { ownership: [...node.ownership] as PlanetOwnership } : {}) } : null;
   }
   routeCharacter(key: string): NodeRecord | null {
-    const owner = this.locate(key), planet = owner?.planet ?? 'meridian';
+    let owner = this.locate(key);
+    if (owner && !this.planetEnabled(owner.planet) && this.relocateStranded(key)) owner = this.locate(key);
+    const planet = owner?.planet ?? this.entryPlanet;
     return this.route(planet, this.savedRegion(this.grids.get(planet)!, owner?.state ?? null));
   }
   status(): UniverseStatus {
-    return { system: 'Helios', stars: ['Helios A', 'Helios B'], planets: PLANETS.map(p => {
+    return { system: 'Helios', stars: ['Helios A', 'Helios B'], planets: PLANETS.filter(p => this.planetEnabled(p.id)).map(p => {
       const node = this.route(p.id);
       // One current authority per configured region. Retired process records
       // cannot double-count a replacement's population or control points.
@@ -374,6 +407,7 @@ export class Coordinator {
       if (!old || old.epoch !== row.epoch || old.holder !== row.holder || old.leaseUntil <= now) throw new OwnershipError('fenced', 'Session no longer owns this character');
       this.snapshotJson(row.state, old.planet);
       if (old.planet === destination) throw new OwnershipError('invalid', 'Already on this world');
+      if (!this.planetEnabled(destination)) throw new OwnershipError('unavailable', 'Destination is not part of this universe');
       const node = this.route(destination);
       if (!node) throw new OwnershipError('unavailable', 'Destination is temporarily unavailable');
       if (!this.ownsWorld(old)) throw new OwnershipError('fenced', 'World authority changed');

@@ -1,5 +1,5 @@
 import { TICK_RATE } from '@shared/constants';
-import type { CampaignBase, SpawnOption, Territory } from '@shared/frontier';
+import { BOT_CAPTURE_WEIGHT, inCaptureRange, type CampaignBase, type SpawnOption, type Territory } from '@shared/frontier';
 import { capsuleClearance } from '@shared/physics';
 import type { World } from '@shared/worldgen';
 import type { ServerPlayer } from './game.js';
@@ -8,6 +8,11 @@ type Point = { x: number; y: number; z: number };
 export const REINFORCEMENT_ZONE_GAP = 80;
 export const REINFORCEMENT_ENEMY_DISTANCE = 180;
 export const REINFORCEMENT_QUIET_SECONDS = 12;
+/** Assault reinforcements arrive about this far from their target control:
+ * close enough to rejoin the fight within ~40 seconds on foot. */
+export const STAGING_DISTANCE = 300;
+/** Capture weight in a ring that locks a base's own reinforcement approaches. */
+export const ASSAULT_LOCK_WEIGHT = 1;
 
 /** Ownership unlocks reinforcements; a quiet approach determines where they
  * can arrive. No safety fallback may put a defender back inside the fight. */
@@ -52,6 +57,13 @@ export class ReinforcementPlanner {
     return true;
   }
 
+  /** Natural ground no steeper than about 15 degrees around a point. */
+  private level(point: Point): boolean {
+    for (const [dx, dz] of [[2, 0], [-2, 0], [0, 2], [0, -2]])
+      if (Math.abs(this.world.groundY(point.x + dx, point.z + dz) + .08 - point.y) > .55) return false;
+    return true;
+  }
+
   private ground(x: number, z: number, city?: { y: number; x: number; z: number; radius: number }): Point | null {
     const onStreet = city && Math.max(Math.abs(x - city.x), Math.abs(z - city.z)) < city.radius;
     const y = onStreet ? city.y + .08 : this.world.groundY(x, z) + .08;
@@ -81,6 +93,9 @@ export class ReinforcementPlanner {
     return points;
   }
 
+  /** Set by the frontier: a besieged base whose rally is closed (supply cut). */
+  supplyCut?: (base: CampaignBase) => boolean;
+
   baseOption(base: CampaignBase, player: ServerPlayer, actors: readonly ServerPlayer[], tick: number): SpawnOption {
     const controls = this.controls.filter(site => base.controlIds.includes(site.id));
     const held = controls.filter(site => site.owner === player.faction);
@@ -88,6 +103,20 @@ export class ReinforcementPlanner {
       x: base.x, y: base.y, z: base.z, available: false };
     if (base.owner !== player.faction) return { ...fallback,
       reason: `${held.length}/${controls.length} controls held. Capture ${Math.max(1, base.requiredPoints - held.length)} more; ${base.requiredPoints} of ${controls.length} unlock reinforcements.` };
+    // A base whose control is actively being taken cannot pour defenders out
+    // beside the fight; they deploy at a defense staging point instead, at the
+    // same distance as the attackers, so the larger force decides the zone.
+    // A lone infiltrator does not lock the base: it takes real capture
+    // strength (a human, or four bots) actually taking the zone.
+    const assaulted = held.some(site => {
+      if (!site.pressureFaction || site.pressureFaction === player.faction || !(site.progressRate ?? 0)) return false;
+      let weight = 0;
+      for (const actor of actors) if (actor.faction === site.pressureFaction && actor.state.alive && !actor.state.vehicle &&
+        inCaptureRange(site, actor.state.px, actor.state.py, actor.state.pz, !actor.isBot)) weight += actor.isBot ? BOT_CAPTURE_WEIGHT : 1;
+      return weight >= ASSAULT_LOCK_WEIGHT;
+    });
+    if (assaulted) return { ...fallback, reason: 'Under assault: reinforcements deploy at the defense staging point.' };
+    if (this.supplyCut?.(base)) return { ...fallback, reason: 'Supply cut: a control has been held by the enemy too long. Retake it to reopen this rally.' };
     for (const site of held) {
       const enemies = actors.some(p => p.state.alive && p.faction && p.faction !== player.faction && !p.state.airlift &&
         Math.abs(p.state.py - site.y) < 60 && Math.hypot(p.state.px - site.x, p.state.pz - site.z) < site.radius + 30);
@@ -98,6 +127,34 @@ export class ReinforcementPlanner {
         reason: `Safe approach to ${site.name}. Reinforcements arrive outside the capture zones.` };
     }
     return { ...fallback, reason: `Under attack. Reinforcements return after an approach is clear for ${REINFORCEMENT_QUIET_SECONDS} seconds; another safe base will be used meanwhile.` };
+  }
+
+  /** A supported assembly point a short run from an attacked control, on the
+   * side facing the attackers' territory (unit direction ux,uz from the
+   * control). It stays outside every capture ring. Null when the terrain
+   * around the control offers no such ground (deep water, the abyss...). */
+  stagingPoint(site: Territory, ux: number, uz: number): Point | null {
+    return this.stagingPoints(site, ux, uz, 1)[0] ?? null;
+  }
+
+  /** Up to `count` well separated staging points (see stagingPoint), so a
+   * single enemy patrol near one of them does not stall a whole assault. */
+  stagingPoints(site: Territory, ux: number, uz: number, count = 3, around = STAGING_DISTANCE): Point[] {
+    const city = this.world.collectCities().find(c => Math.max(Math.abs(site.x - c.x), Math.abs(site.z - c.z)) < c.radius);
+    const base = Math.atan2(uz, ux), points: Point[] = [];
+    for (const distance of [around, around - 50, around + 70, around + 150, around + 240]) {
+      for (const turn of [0, .22, -.22, .45, -.45, .75, -.75, 1.1, -1.1]) {
+        const x = site.x + Math.cos(base + turn) * distance, z = site.z + Math.sin(base + turn) * distance;
+        const inCity = city && Math.max(Math.abs(x - city.x), Math.abs(z - city.z)) < city.radius ? city : undefined;
+        const point = this.ground(x, z, inCity);
+        if (!point || points.some(p => Math.hypot(p.x - point.x, p.z - point.z) < 150)) continue;
+        // Reinforcements arrive on level ground, not a slope they slide down.
+        if (!inCity && !this.level(point)) continue;
+        points.push(point);
+        if (points.length >= count) return points;
+      }
+    }
+    return points;
   }
 
   reserveOption(reserve: SpawnOption, player: ServerPlayer, actors: readonly ServerPlayer[], tick: number): SpawnOption | undefined {

@@ -11,7 +11,7 @@ import { STRUCTURE_KIND, buildStructureFamily, generateUndergroundStructure,
   type StructureKind, type StructureSite, type UndergroundStructure } from './structures.js';
 export { STRUCTURE_KIND, type StructureKind, type StructureSite } from './structures.js';
 import { sdBoulder } from './rock-shape.js';
-import { Landscape, type MountainSite, type RoadSegment, type RoadSample } from './landscape.js';
+import { Landscape, type MountainSite, type RoadSegment, type RoadSample, type RoadNetworkSnapshot } from './landscape.js';
 import { buildCityBlock, cityLiftSites, capitalPlan, type CityDistrict, type CityLiftSite } from './cities.js';
 import { capitalBoundary, capitalSegments, capitalDistance, CAPITAL_SKY_HEIGHT, type CapitalSegment } from './capital-geometry.js';
 import { rainforestAt } from './rainforest.js';
@@ -25,7 +25,7 @@ import type { VehicleCollisionField, VehicleCollisionSelection } from './vehicle
 import { createJungleTempleSites, buildJungleTemplePlan, jungleTempleColumn, jungleTempleField, jungleTempleGrade,
   type JungleTempleSite, type TempleColumn } from './jungle-temples.js';
 export { CITY_RADIUS, type CityDistrict } from './cities.js';
-export type { MountainSite, RoadSegment, RoadSample } from './landscape.js';
+export type { MountainSite, RoadSegment, RoadSample, RoadNetworkSnapshot } from './landscape.js';
 export { CAVE_BIOME, caveBiomeAt, cavePathPoint, sampleCaveFloorLayers, type CaveFloorSpot, type CaveBiome, type CaveSite, type CaveColumn } from './caves.js';
 
 // The entire authoritative world - terrain, biomes, caves, boulders,
@@ -108,7 +108,7 @@ export type VegetationKind =
 export interface VegetationPlacement {
   rainforest?: boolean;
   x: number;
-  /** Terrain support height / bottom of the stem. */
+  /** Terrain support height at the stem's centre. */
   y: number;
   z: number;
   radius: number;
@@ -116,6 +116,12 @@ export interface VegetationPlacement {
   canopyRadius: number;
   kind: VegetationKind;
   yaw: number;
+  /** How far the stem continues below `y`, so a trunk on a slope meets the
+   * ground on its downhill side. The collider and the rendered stem share it. */
+  sink?: number;
+  /** Rainforest buttress roots: ground height where each of the four root
+   * planks meets the ground (angles yaw + k·π/3, reach 2.5·radius). */
+  roots?: number[];
 }
 
 interface StructData {
@@ -153,6 +159,8 @@ const STRUCT_CELL = 256;
 /** Includes the largest compound/pyramid plus terrain smoothing. */
 const STRUCT_MARGIN = 58;
 const BOULDER_CELL = 36;
+/** Footprint points (in half-extents) a boulder's base is checked against. */
+const BOULDER_FOOTPRINT: readonly (readonly [number, number])[] = [[1, 0], [-1, 0], [0, 1], [0, -1], [.7, .7], [-.7, .7], [.7, -.7], [-.7, -.7]];
 const BOULDER_MARGIN = 5;
 export const VEGETATION_CELL = 64;
 const VEGETATION_MARGIN = 4;
@@ -513,7 +521,13 @@ export class World {
       col.road = road;
     }
     col.h = gradeLiquidTerrain(this.seed, x, z, col.h);
-    if (canReachCoast(x,z) && islandCoastDistance(this.seed, x, z) > ISLAND_SHORE_START) { col.lavaY = -1000; col.lavaBasin = undefined; col.volc = 0; }
+    if (canReachCoast(x,z)) {
+      // The volcanic province fades out before the shore rather than ending in
+      // a hard contour (it read as a black-and-sand staircase); lava stops at it.
+      const shore = islandCoastDistance(this.seed, x, z);
+      if (shore > ISLAND_SHORE_START - 150) col.volc *= smoothstep(ISLAND_SHORE_START, ISLAND_SHORE_START - 150, shore);
+      if (shore > ISLAND_SHORE_START) { col.lavaY = -1000; col.lavaBasin = undefined; }
+    }
     if (!city && col.lavaBasin && col.lavaBasin.channel > .28) {
       const basin = col.lavaBasin;
       // Fade excavation across the upper bank. A hard height predicate here
@@ -571,6 +585,9 @@ export class World {
   collectRoadSegments(minX: number, maxX: number, minZ: number, maxZ: number): RoadSegment[] {
     return this.landscape.collectRoads(minX, maxX, minZ, maxZ);
   }
+  /** Routed links computed by another World of this seed (see RoadNetworkSnapshot). */
+  adoptRoadNetwork(snapshot: RoadNetworkSnapshot): boolean { return this.landscape.adoptRoadNetwork(snapshot); }
+  exportRoadNetwork(): RoadNetworkSnapshot { return this.landscape.exportRoadNetwork(); }
   *collectRoadSegmentSteps(minX: number, maxX: number, minZ: number, maxZ: number): Generator<void, RoadSegment[], void> {
     if (this.collectRoadSegments !== canonicalMapWorldCollector)
       return this.collectRoadSegments(minX, maxX, minZ, maxZ);
@@ -1548,10 +1565,22 @@ export class World {
           // Keep entrances, perimeter routes, and sight lines around
           // structures free of unlucky boulder placements.
           if (this.blockedByStructure(bx, bz, Math.max(size, hz) + 2.2)) continue;
-          // Rest on the first real terrain surface with only a shallow embed.
-          // Deeply burying the center can punch the bottom through a thin cave
-          // roof and make the primitive appear suspended in the room below.
-          const by = supportY + hy - 0.06;
+          // Rest on the lowest ground under the footprint, so a rock on a
+          // slope meets the ground on its downhill side instead of floating.
+          let low = supportY, overCave = !!(rockCol.cave || rockCol.caveBranches);
+          for (const [u, v] of BOULDER_FOOTPRINT) {
+            const fx = bx + u * size, fz = bz + v * hz, g = this.terrainGroundY(fx, fz);
+            if (g !== null && g < low) low = g;
+            const footing = this.column(fx, fz);
+            if (footing.cave || footing.caveBranches) overCave = true;
+          }
+          const sink = supportY - low;
+          // Too steep for this rock: it would be buried most of its height.
+          if (sink > hy * 0.9) continue;
+          // Over a cave a deep embed can punch through a thin roof and leave
+          // the rock suspended in the room below: skip it rather than float it.
+          if (overCave && sink > 0.25) continue;
+          const by = low + hy - 0.06;
           out.push({
             x: bx, y: by, z: bz,
             hx: size, hy, hz,
@@ -1700,6 +1729,14 @@ export class World {
         this.blockedByStructure(x, z, canopyRadius + 2.2)
       ) continue;
 
+      const yaw = unit(hash2i(s + 5 + salt, ci, cj)) * TAU;
+      // Below a cave the trunk must not poke through the chamber's roof.
+      const sink = col.cave || col.caveBranches ? Math.min(0.3, radius) : radius + 0.2;
+      const roots = rainforest ? [0, 1, 2, 3].map(k => {
+        const angle = yaw + k * Math.PI / 3, reach = radius * 2.5;
+        const rx = x + Math.cos(angle) * reach, rz = z + Math.sin(angle) * reach;
+        return this.terrainGroundY(rx, rz) ?? this.column(rx, rz).h;
+      }) : undefined;
       out.push({
         x,
         y: supportY + 0.015,
@@ -1709,7 +1746,9 @@ export class World {
         canopyRadius,
         kind,
         rainforest,
-        yaw: unit(hash2i(s + 5 + salt, ci, cj)) * TAU,
+        yaw,
+        sink,
+        ...(roots ? { roots } : {}),
       });
     }
 
@@ -2077,12 +2116,13 @@ export class World {
       const plant = vegetation[i];
       // The cylinder's radial field is at least either horizontal slab;
       // its full field is at least that radial field or its vertical slab.
+      const sink = plant.sink ?? 0, half = (plant.height + sink) * .5, mid = plant.y - sink + half;
       if(Math.abs(x-plant.x)-plant.radius>=d||Math.abs(z-plant.z)-plant.radius>=d||
-          Math.abs(y-(plant.y+plant.height*.5))-plant.height*.5>=d)continue;
+          Math.abs(y-mid)-half>=d)continue;
       const stem = sdCylinderY(
         x, y, z,
-        plant.x, plant.y + plant.height * 0.5, plant.z,
-        plant.radius, plant.height * 0.5,
+        plant.x, mid, plant.z,
+        plant.radius, half,
       );
       if (stem < d) d = stem;
     }
@@ -2386,7 +2426,11 @@ export class World {
     }
     // Natural provinces blend continuously; material labels remain useful for
     // footsteps without drawing a hard snow/desert/altitude contour on land.
-    if (mat === MAT.GRASS || mat === MAT.DIRT || mat === MAT.ROCK || mat === MAT.SAND || mat === MAT.SNOW || mat === MAT.ROAD) {
+    // Basalt joins the same blend and fades in by one factor on both sides of
+    // its 0.4 label threshold, so the volcanic edge is a band, not a staircase
+    // along the terrain triangles.
+    const ash = smoothstep(.35, .45, col.volc);
+    if (mat === MAT.GRASS || mat === MAT.DIRT || mat === MAT.ROCK || mat === MAT.SAND || mat === MAT.SNOW || mat === MAT.ROAD || mat === MAT.BASALT) {
       const moisture = clamp(col.moist, 0, 1);
       r = lerp(.50, .27, moisture); g = lerp(.54, .50, moisture); b = lerp(.26, .21, moisture);
       const soil = 1 - smoothstep(.60, .85, normalY);
@@ -2397,6 +2441,7 @@ export class World {
       r = lerp(r, .82, sand); g = lerp(g, .72, sand); b = lerp(b, .50, sand);
       const snow = snowCover(col, y, normalY);
       r = lerp(r, .90, snow); g = lerp(g, .92, snow); b = lerp(b, .96, snow);
+      r = lerp(r, .11, ash); g = lerp(g, .095, ash); b = lerp(b, .105, ash);
     }
     if (col.city && Math.abs(y - col.city.y) < 1.5) {
       const road = col.road;
@@ -2414,11 +2459,11 @@ export class World {
       const forest = col.rainforest!;
       r = lerp(r, .20, forest * .6); g = lerp(g, .31, forest * .5); b = lerp(b, .13, forest * .5);
     }
-    if (paintRoads && !col.city && mat !== MAT.CONCRETE && mat !== MAT.CAVE && mat !== MAT.LAVA && mat !== MAT.BASALT) {
+    if (paintRoads && !col.city && mat !== MAT.CONCRETE && mat !== MAT.CAVE && mat !== MAT.LAVA && ash < 1) {
       const road = col.road ?? this.landscape.roadAt(x, z);
       if (road) {
         const gravel = smoothstep(road.width + 3.5, road.width - 1.5, road.distance) *
-          smoothstep(4, 1, Math.abs(y - road.height));
+          smoothstep(4, 1, Math.abs(y - road.height)) * (1 - ash);
         const warm = col.desert > 0.5;
         const rr = road.trail ? 0.49 : warm ? 0.52 : 0.39;
         const rg = road.trail ? 0.37 : warm ? 0.43 : 0.37;

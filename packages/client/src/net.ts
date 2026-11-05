@@ -9,7 +9,7 @@ import type { JourneyState } from '@shared/universe';
 import {
   Msg, ByteReader,
   decodeWelcome, decodeSnapshot, decodeFire, decodeExplosion, decodeDeath,
-  decodeSpawn, decodeHit, decodePickupResult, decodeJoin, decodeScores,
+  decodeSpawn, decodeHit, decodePickupResult, decodeJoin, decodeScores, decodeXp, type XpEvent,
   decodeTeleport, decodeChat, type ChatMessage,
   encodeHello, encodePing,
   PROTOCOL_VERSION, TICK_RATE,
@@ -27,6 +27,8 @@ export interface NetHandlers {
   onFrontier?(state: FrontierState): void;
   onJourney?(state: JourneyState): void;
   onChat?(message: ChatMessage): void;
+  /** Experience reward (rank progression). */
+  onXp?(event: XpEvent): void;
   onWelcome(msg: WelcomeMsg): void;
   onSnapshot(snap: Snapshot): void;
   onFire(ev: FireEvent): void;
@@ -184,6 +186,7 @@ export class NetClient {
       case Msg.SLeave: h.onLeave(r.entity()); break;
       case Msg.SScores: h.onScores(decodeScores(r)); break;
       case Msg.SMessage: h.onMessage(r.str()); break;
+      case Msg.SXp: h.onXp?.(decodeXp(r)); break;
       case Msg.SChat: h.onChat?.(decodeChat(r)); break;
     }
   }

@@ -1,5 +1,5 @@
 import {
-  BTN, VEHICLE, clamp, wrapAngle,
+  BTN, HYPERSPEED_ENABLED, VEHICLE, clamp, wrapAngle,
   quantYaw, unquantYaw, quantPitch, unquantPitch,
   WEAPONS, type InputCmd,
   multiplyRotations, rotateVector, rotationFromEuler, vehicleQuaternion, type Rotation,
@@ -65,6 +65,8 @@ export class InputTracker {
   onUse: (() => boolean) | null = null;
   /** Playtest hyperspeed; persists across pointer-lock releases. */
   hyper = false;
+  /** H toggles hyperspeed only when it is enabled (see HYPERSPEED_ENABLED). */
+  hyperspeedEnabled = HYPERSPEED_ENABLED;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     const savedSens = localStorage.getItem('mmofps-sens');
@@ -158,7 +160,7 @@ export class InputTracker {
         this.usePulse = RELOAD_PULSE_COMMANDS;
         return;
       }
-      if (e.code === 'KeyH') {
+      if (e.code === 'KeyH' && this.hyperspeedEnabled) {
         // Playtest hyperspeed toggle (~10x run speed on foot).
         this.hyper = !this.hyper;
         this.onHyperToggle?.(this.hyper);

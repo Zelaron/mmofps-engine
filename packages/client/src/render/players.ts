@@ -142,8 +142,12 @@ export interface Rig {
   offGroundT: number;
   previousGrounded: boolean;
   previousVy: number;
+  /** World yaw of the line the feet step along (travel, or its reverse while backpedaling). */
   moveYaw: number;
-  bodyYaw: number;
+  /** Eased pelvis twist relative to the aim; always within LOWER_BODY_TWIST of the gun. */
+  hipTwist: number;
+  /** Eased chest twist relative to the aim (a fraction of the pelvis twist). */
+  torsoTwist: number;
   moving: boolean;
   backward: boolean;
   lastX: number;
@@ -156,6 +160,13 @@ export interface Rig {
 const UPPER_LEG = 0.435, LOWER_LEG = 0.405;
 const HIP_HEIGHT = 0.92;
 const ANKLE_HEIGHT = 0.085;
+/** Maximum pelvis twist away from the aim (radians). */
+export const MAX_NEW_MODELS_PER_FRAME = 3;
+export const LOWER_BODY_TWIST = 0.6;
+/** Maximum extra turn of the swinging legs beyond the pelvis (radians). */
+const LEG_SWING_TURN = 1.15;
+/** cos(travel - aim) beyond which a moving soldier switches between forward stride and backpedal. */
+const BACKPEDAL_DEADBAND = 0.3;
 
 /** Articulated field armor, fitted fatigues and practical equipment. */
 export function buildRig(id: number): Rig {
@@ -320,7 +331,7 @@ export function buildRig(id: number): Rig {
     legR: r.leg, kneeR: r.knee, footR: r.foot, torso, aim, head, gunMount, arms,
     phase: rng() * Math.PI * 2, air: 0, idleT: rng() * 10, lastWeapon: -1,
     run: 0, landing: 0, offGroundT: 0, previousGrounded: true, previousVy: 0,
-    lastX: NaN, lastY: NaN, lastZ: NaN, moveYaw: NaN, bodyYaw: NaN, moving: false, backward: false, bulk, torsoHeight,
+    lastX: NaN, lastY: NaN, lastZ: NaN, moveYaw: NaN, hipTwist: 0, torsoTwist: 0, moving: false, backward: false, bulk, torsoHeight,
   };
   swapGun(rig, 1);
   poseLeg(rig.legL, rig.kneeL, rig.footL, 0, ANKLE_HEIGHT - HIP_HEIGHT, 0, 0);
@@ -409,17 +420,16 @@ export function animateRig(rig: Rig, v: PlayerView, dt: number): void {
   const ground = 1 - rig.air;
   rig.idleT += dt;
 
-  if(!Number.isFinite(rig.moveYaw)||!continuous){rig.moveYaw=v.yaw;rig.bodyYaw=v.yaw;rig.moving=false;rig.backward=false;}
+  if(!Number.isFinite(rig.moveYaw)||!continuous){rig.moveYaw=v.yaw;rig.hipTwist=rig.torsoTwist=0;rig.moving=false;rig.backward=false;}
   if(distance>0.00001){
     const direction=Math.atan2(-dx,-dz);
-    if(!rig.moving)rig.backward=Math.cos(wrapAngle(direction-v.yaw))<-.35;
-    else {
-      // Direction is measured against the persistent lower-body frame, never
-      // against a rapidly aiming mouse/bot. A deadband preserves sidesteps.
-      const forwardness=Math.cos(wrapAngle(direction-rig.moveYaw));
-      if(forwardness<-.45)rig.backward=true;
-      else if(forwardness>.45)rig.backward=false;
-    }
+    // Forward/backpedal is judged against the AIM, the way the soldier is
+    // actually facing. (Judging it against the lower body let a running model
+    // keep its legs pointing along travel while it aimed the other way.) A
+    // deadband around the pure sidestep keeps aim jitter from flipping gait.
+    const facing=Math.cos(wrapAngle(direction-v.yaw));
+    if(!rig.moving)rig.backward=facing<-.1;
+    else if(rig.backward?facing>BACKPEDAL_DEADBAND:facing<-BACKPEDAL_DEADBAND)rig.backward=!rig.backward;
     const target=direction+(rig.backward?Math.PI:0);
     rig.moveYaw=wrapAngle(rig.moveYaw+THREE.MathUtils.clamp(wrapAngle(target-rig.moveYaw),-dt*5,dt*5));
     rig.moving=true;
@@ -427,17 +437,26 @@ export function animateRig(rig: Rig, v: PlayerView, dt: number): void {
     rig.moving=false;
     rig.moveYaw=wrapAngle(rig.moveYaw+THREE.MathUtils.clamp(wrapAngle(v.yaw-rig.moveYaw),-dt*3,dt*3));
   }
-  const relative=wrapAngle(rig.moveYaw-v.yaw);
+  // The pelvis turns partway toward the stepping line but never leaves the
+  // gun's frame; the legs swing along the remaining angle so feet still travel
+  // along the displayed path (sidesteps, diagonals and backpedals).
+  const stepRelative=wrapAngle(rig.moveYaw-v.yaw);
+  const hipTarget=THREE.MathUtils.clamp(stepRelative,-LOWER_BODY_TWIST,LOWER_BODY_TWIST);
+  rig.hipTwist+=(hipTarget-rig.hipTwist)*(1-Math.exp(-dt*14));
+  rig.hipTwist=THREE.MathUtils.clamp(rig.hipTwist,-LOWER_BODY_TWIST,LOWER_BODY_TWIST);
+  rig.torsoTwist+=(rig.hipTwist*.45-rig.torsoTwist)*(1-Math.exp(-dt*10));
+  const legWeight=Math.min(1,rig.run*4);
+  const legHeading=THREE.MathUtils.clamp(wrapAngle(stepRelative-rig.hipTwist),-LEG_SWING_TURN,LEG_SWING_TURN)*legWeight;
+  const relative=wrapAngle(rig.hipTwist+legHeading);
   // Roughly1.4m walking/3.2m sprinting cycles. Only displacement advances a
   // planted gait; aim jitter cannot reverse its phase at the strafe boundary.
   const cycleLength=1.4+Math.min(1,speed/PLAYER.RUN_SPEED)*1.8;
   if(v.grounded)rig.phase+=distance*Math.PI*2/cycleLength*(rig.backward?-1:1);
   rig.phase%=Math.PI*2;
-  rig.hips.rotation.y=relative;
-  const bodyTarget=rig.moving?rig.moveYaw+THREE.MathUtils.clamp(wrapAngle(v.yaw-rig.moveYaw),-.95,.95):v.yaw;
-  rig.bodyYaw=wrapAngle(rig.bodyYaw+THREE.MathUtils.clamp(wrapAngle(bodyTarget-rig.bodyYaw),-dt*4,dt*4));
-  rig.torso.rotation.y=wrapAngle(rig.bodyYaw-v.yaw);
-  const stride = 0.37 * rig.run * ground;
+  rig.hips.rotation.y=rig.hipTwist;
+  rig.torso.rotation.y=rig.torsoTwist;
+  // Side steps are shorter than forward strides.
+  const stride = 0.37 * rig.run * ground * (1 - 0.28 * Math.abs(Math.sin(legHeading)));
   const bob = (1 - Math.cos(rig.phase * 2)) * 0.018 * rig.run * ground;
   const hipY = HIP_HEIGHT - rig.run * 0.075 * ground - rig.landing + bob;
   rig.hips.position.y = hipY;
@@ -451,7 +470,7 @@ export function animateRig(rig: Rig, v: PlayerView, dt: number): void {
     const stance = phase < Math.PI;
     const z = stance ? -stride + 2 * stride * phase / Math.PI : stride * Math.cos(phase - Math.PI);
     const lift = stance ? 0 : Math.sin(phase - Math.PI) * 0.16 * rig.run;
-    poseLeg(leg, knee, foot, z, ANKLE_HEIGHT + lift - hipY, relative - rig.hips.rotation.y, rig.air);
+    poseLeg(leg, knee, foot, z, ANKLE_HEIGHT + lift - hipY, legHeading, rig.air);
   }
 
   const forward = distance > 0 ? (-dx * Math.sin(v.yaw) - dz * Math.cos(v.yaw)) / distance : 0;
@@ -536,11 +555,16 @@ export class PlayerModels {
     return m;
   }
 
-  /** Sync models to this frame's interpolated views. */
+  /** Sync models to this frame's interpolated views. A new soldier (rig and
+   * name texture) costs a few milliseconds to build; deploying into a crowded
+   * battle used to build dozens in one frame. At most MAX_NEW_MODELS_PER_FRAME
+   * appear per frame, the rest on the following frames. */
   update(views: PlayerView[], names: Map<number, string>, dt: number, localVehicle?: LocalVehiclePose): void {
     const present = new Set<number>();
+    let built = 0;
     for (const v of views) {
       present.add(v.id);
+      if (!this.models.has(v.id) && built++ >= MAX_NEW_MODELS_PER_FRAME) continue;
       const m = this.ensure(v.id, names.get(v.id) ?? `#${v.id}`);
       m.tag.material.color.set(FACTIONS[this.factions.get(v.id) ?? 0].color);
       m.root.position.set(v.x, v.y, v.z);
@@ -612,7 +636,7 @@ export class PlayerModels {
         // Entering a vehicle or dying breaks the displayed walking history.
         // Dismounts/respawns must not count that skipped travel as one stride.
         m.rig.lastX = m.rig.lastY = m.rig.lastZ = NaN;
-        m.rig.moveYaw=m.rig.bodyYaw=NaN;m.rig.moving=false;m.rig.backward=false;
+        m.rig.moveYaw=NaN;m.rig.hipTwist=m.rig.torsoTwist=0;m.rig.moving=false;m.rig.backward=false;
         m.rig.run = m.rig.air = m.rig.landing = m.rig.offGroundT = 0;
         m.rig.previousGrounded = v.grounded;
       }

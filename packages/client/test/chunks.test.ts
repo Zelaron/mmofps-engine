@@ -894,6 +894,35 @@ test('mixed-LOD seams publish with masks, cache unchanged boundaries, and retire
   assert.equal(manager.group.children.length, 0);
 });
 
+test('removing a horizon tile revisits only its perimeter and owned strips, and retires them', (t) => {
+  const manager = new ChunkManager(1337, 1), state = internals(manager);
+  t.after(() => manager.dispose());
+  manager.update(0, 200, 0);
+  t.mock.method(state, 'pump', () => {});
+  // A fine leaf directly on a horizon tile (no LOD1 tile installed between
+  // them): the horizon tile owns all four seam strips.
+  const horizon = state.columns.get('2:0,0')!, fine = state.columns.get('0:1,1')!;
+  complete(manager, horizon, fullSurface(horizon));
+  complete(manager, fine, fullSurface(fine, 2));
+  const seams = manager as any;
+  assert.equal(seams.seamEdges.size, 4);
+  assert.equal(seams.seamGroups.get(horizon).parts.size, 4);
+  const strip = seams.seamGroups.get(horizon).terrain.geometry;
+  let disposed = 0;
+  strip.addEventListener('dispose', () => disposed++);
+  const dirty: string[] = [];
+  const add = seams.seamDirty.add.bind(seams.seamDirty);
+  t.mock.method(seams.seamDirty, 'add', (key: string) => { dirty.push(key); return add(key); });
+  state.desired.delete(horizon.key); state.removeState(horizon);
+  assert.ok(dirty.length <= 64 + 4, `perimeter and owned strips only, not all 544 leaf edges (${dirty.length})`);
+  for (const key of seams.seamGroups.get(horizon).parts.keys()) assert.ok(dirty.includes(key), 'every owned strip is revisited');
+  state.syncCoarseVisibility(); seams.syncTerrainSeams();
+  assert.equal(seams.seamEdges.size, 0, 'no strip survives its owner');
+  assert.equal(seams.seamGroups.size, 0);
+  assert.equal(disposed, 1);
+  assert.ok(fine.installed, 'the fine leaf itself is untouched');
+});
+
 test('an incompatible replacement retains the published fine mesh and its coarse mask', (t) => {
   const manager = new ChunkManager(1337, 1), state = internals(manager);
   t.after(() => manager.dispose());
@@ -1312,6 +1341,11 @@ test('far terrain pages around the camera and evicts installed tiles after long 
   const state = internals(manager);
   for (const x of [0, 6500, -6500, 4000, 0]) {
     manager.update(x, 270, 0);
+    // Seam-checked retirement of old fine tiles is spread over frames with a
+    // small per-update budget; it must drain within a bounded number of them.
+    let frames = 1;
+    while ((manager as unknown as { retireBacklog: boolean }).retireBacklog && frames < 120) { manager.update(x, 270, 0); frames++; }
+    assert.equal((manager as unknown as { retireBacklog: boolean }).retireBacklog, false, `retirement drains (${frames} frames)`);
     const far = [...state.columns.values()].filter(s => s.lod === 2);
     assert.ok(far.length < 360, 'far tile count must not grow with world area or travel history');
     assert.ok(state.columns.size < 660, 'no installed near/far tiles stranded at old camera locations');
@@ -1327,6 +1361,82 @@ test('far terrain pages around the camera and evicts installed tiles after long 
     }
   }
   manager.dispose();
+});
+
+test('seam-checked retirement after a respawn spreads over frames, keeps old tiles until checked and drains', (t) => {
+  const manager = new ChunkManager(1337, 1), state = internals(manager) as unknown as ChunkInternals & {
+    retireBacklog: boolean; canRetireSeams(st: TestState): boolean };
+  t.after(() => manager.dispose());
+  let now = 1000, proofs = 0;
+  t.mock.method(performance, 'now', () => now);
+  const prove = state.canRetireSeams.bind(state);
+  t.mock.method(state, 'canRetireSeams', (st: TestState) => { proofs++; now += .5; return prove(st); });
+  manager.update(0, 270, 0);
+  for (const st of state.columns.values()) { st.installed = true; st.status = 'ready'; st.installedCaveDetail = st.caveDetail; }
+  // A 1.5 km respawn: old fine tiles stay inside the far ring, so each needs a seam proof.
+  proofs = 0; manager.update(1500, 270, 0);
+  const firstFrame = proofs;
+  assert.ok(firstFrame > 0 && firstFrame <= 9, `about 4 ms of proofs per frame, not all at once (${firstFrame})`);
+  assert.equal(state.retireBacklog, true);
+  const waiting = [...state.columns.values()].filter(st => st.retiring && st.lod < 2 && st.installed);
+  assert.ok(waiting.length > 20, 'unchecked old tiles remain drawn until their turn');
+  let frames = 1;
+  while (state.retireBacklog && frames < 200) { proofs = 0; manager.update(1500, 270, 0); assert.ok(proofs <= 9); frames++; }
+  assert.equal(state.retireBacklog, false, `the backlog drains (${frames} frames)`);
+  assert.ok(waiting.every(st => state.columns.get(st.key) !== st || !st.retiring || (st as TestState & { seamRetained?: boolean }).seamRetained),
+    'every deferred tile was eventually checked');
+});
+
+test('near seam edges close in the same frame while distant ones drain in budgeted slices', (t) => {
+  const manager = new ChunkManager(1337, 1);
+  const state = manager as unknown as { seamDirty: Set<string>; prepareSeam(key: string, replacements?: unknown): unknown; pump(): void };
+  t.after(() => manager.dispose());
+  let now = 1000;
+  t.mock.method(performance, 'now', () => now);
+  manager.update(0, 270, 0);
+  t.mock.method(state, 'pump', () => {});
+  const prepare = state.prepareSeam.bind(state), visited = new Set<string>();
+  t.mock.method(state, 'prepareSeam', (key: string, replacements?: unknown) => {
+    if (!replacements) { visited.add(key); now += .05; }
+    return prepare(key, replacements);
+  });
+  const far = Array.from({ length: 400 }, (_, i) => `x:${200 + i},200`), near = Array.from({ length: 24 }, (_, i) => `z:${i - 12},3`);
+  for (const key of [...far, ...near]) state.seamDirty.add(key);
+  manager.update(0, 270, 0);
+  assert.ok(near.every(key => visited.has(key)), 'edges around the fine rings never wait');
+  const first = far.filter(key => visited.has(key)).length;
+  assert.ok(first >= 40 && first < 150, `about 4 ms of distant edges per frame (${first})`);
+  let frames = 1;
+  while (state.seamDirty.size && frames < 40) { manager.update(0, 270, 0); frames++; }
+  assert.equal(state.seamDirty.size, 0, `distant edges drain (${frames} frames)`);
+  assert.ok(far.every(key => visited.has(key)));
+});
+
+test('distant coarse masks update in budgeted slices while near ones update at once', (t) => {
+  const manager = new ChunkManager(1337, 1);
+  const state = manager as unknown as { seamMaskDirty: Set<string>; columns: Map<string, { key: string; lod: number; cx: number; cz: number }>;
+    syncOneCoarse(st: unknown): void; pump(): void };
+  t.after(() => manager.dispose());
+  let now = 1000;
+  t.mock.method(performance, 'now', () => now);
+  manager.update(0, 270, 0);
+  t.mock.method(state, 'pump', () => {});
+  const sync = state.syncOneCoarse.bind(state), visited = new Set<string>();
+  t.mock.method(state, 'syncOneCoarse', (st: { key: string } | undefined) => { if (st) { visited.add(st.key); now += .2; } return sync(st); });
+  const tiles = [...state.columns.values()].filter(st => st.lod > 0);
+  const centre = (st: { lod: number; cx: number; cz: number }) => Math.hypot((st.cx + .5) * (st.lod === 1 ? 128 : 512), (st.cz + .5) * (st.lod === 1 ? 128 : 512));
+  const near = tiles.filter(st => st.lod === 1 && centre(st) < 900).map(st => st.key);
+  const far = tiles.filter(st => st.lod === 2 && centre(st) > 2400).map(st => st.key);
+  assert.ok(near.length > 4 && far.length > 60);
+  for (const key of [...far, ...near]) state.seamMaskDirty.add(key);
+  manager.update(0, 270, 0);
+  assert.ok(near.every(key => visited.has(key)), 'masks around the camera never wait');
+  const first = far.filter(key => visited.has(key)).length;
+  assert.ok(first < far.length / 2, `distant masks wait for later frames (${first} of ${far.length})`);
+  let frames = 1;
+  while (state.seamMaskDirty.size && frames < 80) { manager.update(0, 270, 0); frames++; }
+  assert.equal(state.seamMaskDirty.size, 0, `distant masks drain (${frames} frames)`);
+  assert.ok(far.every(key => visited.has(key)));
 });
 
 test('nearby ground detail starts before hundreds of distant horizon previews', () => {

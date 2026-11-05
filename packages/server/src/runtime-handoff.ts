@@ -6,7 +6,8 @@ import { ServerPlayer, type Game, type PlayerSink, type ServerVehicle, type Proj
 /** Full simulation state. SavedPlayer is deliberately smaller and is only for
  * login/crash recovery; using it for a live handoff would reset movement and
  * discard reloads, queued inputs, vehicle crews and explosives. */
-export type HandoffPlayer = Omit<ServerPlayer, 'sink' | 'discoveries' | 'fullPickupContacts'> & {
+/** Assist bookkeeping is transient combat state and does not cross a handoff. */
+export type HandoffPlayer = Omit<ServerPlayer, 'sink' | 'discoveries' | 'fullPickupContacts' | 'recentAttackers'> & {
   discoveries: string[]; fullPickupContacts: number[];
 };
 export interface HandoffHistory {
@@ -65,7 +66,7 @@ export function captureActors(game: Game, ids: readonly number[]): DetachedHando
   const record = cloneRecord<RuntimeHandoff>({
     version: 1, seed: game.seed, tick: game.tick,
     players: [...players.values()].map(p => {
-      const { sink: _sink, discoveries, fullPickupContacts, ...state } = p;
+      const { sink: _sink, discoveries, fullPickupContacts, recentAttackers: _recent, ...state } = p;
       return { ...state, discoveries: [...discoveries], fullPickupContacts: [...fullPickupContacts] };
     }),
     vehicles: [...vehicles.values()],

@@ -15,6 +15,7 @@ export * from './teleporters.js';
 export * from './encounters.js';
 export * from './weapons.js';
 export * from './protocol.js';
+export * from './progression.js';
 export * from './chat.js';
 export * from './liquids.js';
 export * from './crew.js';

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { clientOptions, workerOptions, encounterWorkerOptions, sceneryWorkerOptions, mapWorkerOptions, serverOptions, copyStatic } from './build.mjs';
+import { clientOptions, workerOptions, encounterWorkerOptions, sceneryWorkerOptions, mapWorkerOptions, roadWorkerOptions, serverOptions, copyStatic } from './build.mjs';
 import { ensureAssets } from './fetch-assets.mjs';
 
 // Dev mode: esbuild watch-rebuilds the client, workers and server; the server runs from
@@ -18,6 +18,7 @@ const ctxs = await Promise.all([
   context({ ...encounterWorkerOptions, minify: false }),
   context({ ...sceneryWorkerOptions, minify: false }),
   context({ ...mapWorkerOptions, minify: false }),
+  context({ ...roadWorkerOptions, minify: false }),
   context({ ...serverOptions }),
 ]);
 

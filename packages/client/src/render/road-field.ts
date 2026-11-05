@@ -1,48 +1,39 @@
 import * as THREE from 'three';
-import type { World, RoadSegment } from '@shared/worldgen';
+import type { RoadSegment, RoadNetworkSnapshot } from '@shared/worldgen';
+import type { TransportSnapshot } from '@shared/transport';
+import { collectRoads, rasterRoadSegment, type RoadFieldRequest, type RoadFieldResponse, type RoadGrid, type RoadWorld } from './road-raster.js';
 
-export interface RoadGrid { x: number; z: number; size: number; step: number }
-const RANGE = 32;
-/** Distance and height, independent of terrain vertices and terrain worker LOD. */
-export function rasterRoadSegment(data: Uint8Array, grid: RoadGrid, road: RoadSegment): void {
-  const {a,b,width} = road, {x:x0,z:z0,size,step}=grid;
-  const reach=width+RANGE, dx=b.x-a.x,dz=b.z-a.z,length2=dx*dx+dz*dz;
-  if(length2<1e-8 || road.id.startsWith('city:'))return;
-  const minX=Math.max(0,Math.floor((Math.min(a.x,b.x)-reach-x0)/step));
-  const maxX=Math.min(size-1,Math.ceil((Math.max(a.x,b.x)+reach-x0)/step));
-  const minZ=Math.max(0,Math.floor((Math.min(a.z,b.z)-reach-z0)/step));
-  const maxZ=Math.min(size-1,Math.ceil((Math.max(a.z,b.z)+reach-z0)/step));
-  for(let z=minZ;z<=maxZ;z++)for(let x=minX;x<=maxX;x++) {
-    const px=x0+(x+.5)*step-a.x,pz=z0+(z+.5)*step-a.z;
-    const t=Math.max(0,Math.min(1,(px*dx+pz*dz)/length2));
-    const distance=Math.hypot(px-dx*t,pz-dz*t)-width;
-    const encoded=Math.max(0,Math.min(255,Math.round((distance/RANGE*.5+.5)*255))), i=(z*size+x)*4;
-    if(encoded>=data[i])continue;
-    const height=Math.max(0,Math.min(65535,Math.round((a.y+(b.y-a.y)*t+512)*32)));
-    data[i]=encoded;data[i+1]=height>>8;data[i+2]=height&255;data[i+3]=road.trail?255:0;
-  }
+export { rasterRoadSegment, type RoadGrid } from './road-raster.js';
+
+/** The subset of a Worker that the road field uses (tests inject fakes). */
+export interface RoadFieldWorker {
+  postMessage(message: RoadFieldRequest): void;
+  onmessage: ((event: MessageEvent<RoadFieldResponse>) => void) | null;
+  onerror: ((event: Event) => void) | null;
+  terminate(): void;
 }
+export interface RoadFieldRemote {
+  create(): RoadFieldWorker; seed: number; transportSnapshot?: TransportSnapshot; cooperative?: boolean;
+  /** Receives the island's routed network once the worker has built it. */
+  onNetwork?(snapshot: RoadNetworkSnapshot): void;
+}
+/** A worker that has not answered for this long is replaced by local work. */
+const WORKER_TIMEOUT_MS = 60_000;
 
 function texture(data: Uint8Array<ArrayBuffer>, size: number): THREE.DataTexture {
   const map=new THREE.DataTexture(data,size,size);
   map.minFilter=map.magFilter=THREE.LinearFilter;map.generateMipmaps=false;map.needsUpdate=true;
   return map;
 }
-type RoadWorld = Pick<World, 'collectRoadSegments'> & Partial<Pick<World, 'collectRoadSegmentSteps'>>;
 type Layer = { grid?: RoadGrid; texture: THREE.DataTexture; job?: {
   grid: RoadGrid; data: Uint8Array<ArrayBuffer>; roads?: RoadSegment[]; index: number;
   collection?: Generator<void, RoadSegment[], void>;
-} };
-
-function* collectRoads(world: RoadWorld, grid: RoadGrid): Generator<void, RoadSegment[], void> {
-  const span = grid.size * grid.step;
-  if (typeof world.collectRoadSegmentSteps === 'function')
-    return yield* world.collectRoadSegmentSteps(grid.x, grid.x + span, grid.z, grid.z + span);
-  return world.collectRoadSegments(grid.x, grid.x + span, grid.z, grid.z + span);
-}
+}; request?: { id: number; grid: RoadGrid; sentAt: number } };
 
 /** Two bounded maps survive terrain replacement. New maps are rasterized in
- * small batches, then swapped atomically; travelling fast retains far coverage. */
+ * small batches, then swapped atomically; travelling fast retains far coverage.
+ * With a worker, collection and rasterization leave the main thread entirely;
+ * without one (or if it fails) the same work runs here in 1.5 ms slices. */
 export class RoadField {
   readonly uniforms = {
     roadNearMap: {value:texture(new Uint8Array([255,0,0,0]),1)},
@@ -52,7 +43,22 @@ export class RoadField {
   };
   private layers: Layer[] = [{texture:this.uniforms.roadNearMap.value},{texture:this.uniforms.roadFarMap.value}];
   private disposed = false;
-  constructor(private world: RoadWorld) {}
+  private worker: RoadFieldWorker | null = null;
+  private onNetwork: ((snapshot: RoadNetworkSnapshot) => void) | undefined;
+  private sequence = 0;
+  constructor(private world: RoadWorld, remote?: RoadFieldRemote) {
+    if (!remote) return;
+    try {
+      const worker = remote.create();
+      worker.onmessage = ({ data }) => this.receive(data);
+      worker.onerror = event => { event.preventDefault?.(); this.disconnect(); };
+      worker.postMessage({ type: 'init', seed: remote.seed, transportSnapshot: remote.transportSnapshot,
+        cooperative: remote.cooperative === true, network: !!remote.onNetwork });
+      this.worker = worker; this.onNetwork = remote.onNetwork;
+    } catch { this.worker = null; }
+  }
+  /** True while maps are built by a worker. */
+  get remote(): boolean { return this.worker !== null; }
   update(x: number,z: number): void {
     if(this.disposed || !Number.isFinite(x+z))return;
     for(let i=0;i<2;i++) {
@@ -60,6 +66,19 @@ export class RoadField {
       const layer=this.layers[i], size=i?2048:1024, step=i?6:2, span=size*step, quantum=i?1536:512;
       const grid={x:Math.floor(x/quantum)*quantum-span/2,z:Math.floor(z/quantum)*quantum-span/2,size,step};
       const current=layer.grid;
+      if(this.worker) {
+        // One request per layer at a time: work in progress is finished even
+        // after crossing a recenter cell, so fast travel cannot starve a map.
+        if(layer.request) {
+          if(performance.now()-layer.request.sentAt>WORKER_TIMEOUT_MS)this.disconnect();
+          else continue;
+        } else {
+          if(current&&current.x===grid.x&&current.z===grid.z)continue;
+          const id=++this.sequence;
+          layer.request={id,grid,sentAt:performance.now()};
+          try{this.worker.postMessage({type:'raster',id,layer:i,grid});continue;}catch{this.disconnect();}
+        }
+      }
       // Finish work already in progress even after crossing a recenter cell.
       // Otherwise a fast aircraft can continually restart the far map and
       // never publish any roads. Its wide footprint remains useful on arrival.
@@ -81,14 +100,34 @@ export class RoadField {
         while(job.index<end)rasterRoadSegment(job.data,job.grid,roads[job.index++]);
       }while(job.index<roads.length&&performance.now()<deadline);
       if(job.index<roads.length)continue;
-      const map=texture(job.data,job.grid.size);
-      layer.texture.dispose();layer.texture=map;layer.grid=job.grid;layer.job=undefined;
-      const prefix=i?'roadFar':'roadNear';this.uniforms[`${prefix}Map`].value=map;
-      this.uniforms[`${prefix}Bounds`].value.set(job.grid.x,job.grid.z,job.grid.size*job.grid.step);
+      layer.job=undefined;
+      this.publish(i,job.grid,job.data);
     }
+  }
+  private publish(i: number, grid: RoadGrid, data: Uint8Array<ArrayBuffer>): void {
+    const layer=this.layers[i], map=texture(data,grid.size);
+    layer.texture.dispose();layer.texture=map;layer.grid=grid;
+    const prefix=i?'roadFar':'roadNear';this.uniforms[`${prefix}Map`].value=map;
+    this.uniforms[`${prefix}Bounds`].value.set(grid.x,grid.z,grid.size*grid.step);
+  }
+  private receive(response: RoadFieldResponse): void {
+    if(this.disposed || !this.worker)return;
+    if(response?.type==='network'){this.onNetwork?.(response.snapshot);return;}
+    if(response?.type!=='raster')return;
+    const layer=this.layers[response.layer];
+    if(!layer || layer.request?.id!==response.id)return;
+    layer.request=undefined;
+    this.publish(response.layer,response.grid,response.data);
+  }
+  /** Falls back to local slices; requests in flight restart there. */
+  private disconnect(): void {
+    const worker=this.worker; this.worker=null;
+    for(const layer of this.layers)layer.request=undefined;
+    try{worker?.terminate();}catch{/* already gone */}
   }
   dispose(): void {
     this.disposed=true;
+    this.disconnect();
     for(const layer of this.layers){layer.job?.collection?.return([]);layer.texture.dispose();layer.job=undefined;}
   }
 }

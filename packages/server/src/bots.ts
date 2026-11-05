@@ -281,6 +281,13 @@ const GRENADE_MAX_FLIGHT_TIME = 12;
 /** Long artillery traces are expensive; 200 ms remains modest beside an 11.5 m blast. */
 const GRENADE_PLAN_TICKS = 12;
 const BOT_ACQUIRE_RANGE = 390;
+/** Enemies this close are engaged even when they are not on the march route. */
+const MARCH_ENGAGE_RANGE = 120;
+/** First shot at a newly acquired soldier waits 0.3–0.65 s. */
+const BOT_REACTION_MIN_TICKS = 18;
+const BOT_REACTION_SPREAD_TICKS = 21;
+/** Aim settles from 2.4× to 1× its miss radius over 1.2 s of tracking. */
+const BOT_AIM_SETTLE_TICKS = 72;
 /** Faction AA teams share a short firing slot, preserving a jet's escape window. */
 const antiAirShots = new WeakMap<Game, Map<number, number>>();
 const vehicleClaims = new WeakMap<Game, Map<number, {player:number;until:number}>>();
@@ -375,6 +382,9 @@ export class Bot {
   private weapon = 0;
 
   private enemyId = -1;
+  private aimTargetId = -1;
+  private aimSince = 0;
+  private fireReadyAt = 0;
   private losCheckAt = 0;
   private losOk = false;
   private losCursor = 0;
@@ -753,26 +763,56 @@ export class Bot {
           }
         }
 
+        // A fresh target needs a human-like reaction before the first shot,
+        // and aim tightens while the bot keeps tracking the same soldier.
+        if (enemy.id !== this.aimTargetId) {
+          this.aimTargetId = enemy.id; this.aimSince = tick;
+          this.fireReadyAt = tick + BOT_REACTION_MIN_TICKS + Math.floor(this.rng() * BOT_REACTION_SPREAD_TICKS);
+        }
         if (this.weapon !== GRENADE_WEAPON) {
-          const aimErr = 0.022 + dist * 0.00042;
-          yaw = Math.atan2(-ex, -ez) + (this.rng() - 0.5) * aimErr * 6;
-          pitch = Math.atan2(ey, distXZ) + (this.rng() - 0.5) * aimErr * 4;
+          const settle = Math.min(1, (tick - this.aimSince) / BOT_AIM_SETTLE_TICKS);
+          const targetSpeed = Math.min(1, Math.hypot(enemy.state.vx, enemy.state.vz) / PLAYER.RUN_SPEED);
+          // Lateral miss radius in metres: a body-sized cone that widens
+          // slowly with range, for a moving target and while unsettled.
+          const miss = (0.5 + distXZ * 0.011) * (2.4 - 1.4 * settle) * (1 + targetSpeed * 0.35) * (this.player.state.grounded ? 1 : 1.5);
+          const cone = miss / Math.max(4, dist);
+          yaw = Math.atan2(-ex, -ez) + (this.rng() - 0.5) * 2 * cone;
+          pitch = Math.atan2(ey, distXZ) + (this.rng() - 0.5) * 1.4 * cone;
         }
         const mayFire =
           !wasReloading &&
           !reloadQueued &&
+          // Projectiles already give their target flight time to react.
+          (tick >= this.fireReadyAt || WEAPONS[this.weapon]?.kind === 'projectile') &&
           weaponLoaded(p, this.weapon) &&
           (this.weapon !== GRENADE_WEAPON || grenadeReady);
         if (this.firing && mayFire) buttons |= BTN.FIRE;
+        // Having opened fire on this soldier (e.g. with artillery), the bot has
+        // already reacted; a weapon switch does not restart the reaction time.
+        if (buttons & BTN.FIRE) this.fireReadyAt = Math.min(this.fireReadyAt, tick);
 
-        // Strafe orbit, keep medium distance.
+        // Movement while fighting. Attackers keep pushing onto their nearby
+        // objective (that is how controls change hands); otherwise hold a
+        // weapon-appropriate range and strafe instead of charging blindly.
         if (tick >= this.strafeFlipAt) {
           this.strafeDir = this.rng() < 0.5 ? -1 : 1;
           this.strafeFlipAt = tick + Math.floor(40 + this.rng() * 60);
         }
-        buttons |= this.strafeDir > 0 ? BTN.RIGHT : BTN.LEFT;
-        if (distXZ > 26) buttons |= BTN.FORWARD;
-        else if (distXZ < 9) buttons |= BTN.BACK;
+        const { objective: pushObjective } = this.campaign(game);
+        const objectiveDistance = pushObjective ? Math.hypot(pushObjective.x - s.px, pushObjective.z - s.pz) : Infinity;
+        const holding = !!pushObjective && objectiveDistance < (pushObjective.radius ?? 30) * .7;
+        const [nearRange, farRange] = this.weapon === SCATTERGUN_WEAPON ? [5, 16] : this.weapon === SIDEARM_WEAPON ? [9, 30]
+          : this.weapon === ROCKET_WEAPON ? [24, 75] : [12, 48];
+        let wishX = 0, wishZ = 0;
+        if (pushObjective && !holding && objectiveDistance < 240 && this.player.health > 30) {
+          wishX = (pushObjective.x - s.px) / objectiveDistance; wishZ = (pushObjective.z - s.pz) / objectiveDistance;
+        } else if (distXZ > farRange) { wishX = ex / distXZ; wishZ = ez / distXZ; }
+        else if (distXZ < nearRange || this.player.health <= 30) { wishX = -ex / Math.max(1, distXZ); wishZ = -ez / Math.max(1, distXZ); }
+        // Express the wish direction in the aim frame (forward = -sin/-cos yaw).
+        const forwardAxis = -wishX * Math.sin(yaw) - wishZ * Math.cos(yaw), rightAxis = wishX * Math.cos(yaw) - wishZ * Math.sin(yaw);
+        if (forwardAxis > .38) buttons |= BTN.FORWARD; else if (forwardAxis < -.38) buttons |= BTN.BACK;
+        if (rightAxis > .38) buttons |= BTN.RIGHT; else if (rightAxis < -.38) buttons |= BTN.LEFT;
+        if (!(buttons & (BTN.LEFT | BTN.RIGHT))) buttons |= this.strafeDir > 0 ? BTN.RIGHT : BTN.LEFT;
 
         if (this.rng() < 0.004) buttons |= BTN.JUMP;
         if (this.rng() < 0.006 && s.dodgeCd <= 0) buttons |= BTN.DODGE;
@@ -1009,7 +1049,9 @@ export class Bot {
     if (!objective) return true;
     const s = this.player.state, e = enemy.state;
     const ex = e.px - s.px, ez = e.pz - s.pz, distance = Math.hypot(ex, ez);
-    if (distance <= 65) return true;
+    // Soldiers fight what they run into on the march; the combat movement
+    // keeps pushing toward a nearby objective while they do.
+    if (distance <= MARCH_ENGAGE_RANGE) return true;
     if (this.player.regenBlockUntil > game.tick && distance < 200) return true;
     const destination = order?.phase === 'assemble' ? order.staging : objective;
     const dx = destination.x - s.px, dz = destination.z - s.pz, remaining = Math.hypot(dx, dz);

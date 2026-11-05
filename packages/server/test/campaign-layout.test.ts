@@ -6,7 +6,7 @@ import { createMoveState, stepMove, BTN } from '@shared/movement';
 import { TICK_DT } from '@shared/constants';
 import { PLANETS } from '@shared/universe';
 import { vesperRoutes } from '@shared/vesper-city';
-import type { Territory } from '@shared/frontier';
+import { CAPTURE_HEIGHT, inCaptureRange, type Territory } from '@shared/frontier';
 import { campaignLayout, CAMPAIGN_CAPTURE_GAP } from '../src/campaign-layout.js';
 
 type Point = { x: number; z: number };
@@ -101,4 +101,34 @@ test('overlapping requested city positions relocate onto distinct supported capt
     assert.ok(capsuleClearance(world, site.x, site.y + .02, site.z) >= -.02);
     assert.ok(world.sdf(site.x, site.y - .12, site.z) <= 0);
   }
+});
+
+test('on a sloped relay every dry open patch of ground inside the ring counts for a player; bots keep the flag band', () => {
+  const world = new World(1337), layout = campaignLayout(world);
+  const open = (x: number, z: number) => {
+    const y = world.groundY(x, z);
+    return Math.abs(y - world.terrainHeight(x, z)) < .6 && !world.liquidAt(x, y + .5, z) ? y : null;
+  };
+  let sloped = 0, beyondFlag = 0;
+  for (const site of layout.territories) {
+    if (site.kind === 'city') { assert.equal(site.ground, undefined, `${site.id}: city streets are level`); continue; }
+    const flag = open(site.x, site.z);
+    if (flag === null || Math.abs(site.y - flag) > 1) { assert.equal(site.ground, undefined, `${site.id}: a deck flag keeps the flag band`); continue; }
+    if (site.ground) {
+      sloped++;
+      assert.ok(!inCaptureRange(site, site.x, site.ground[1] + CAPTURE_HEIGHT + .5, site.z, true), `${site.id}: high roofs do not count`);
+      assert.ok(!inCaptureRange(site, site.x, site.ground[0] - CAPTURE_HEIGHT - .5, site.z, true), `${site.id}: deep caves do not count`);
+      if (site.ground[1] > site.y + CAPTURE_HEIGHT) {
+        beyondFlag++;
+        assert.ok(!inCaptureRange(site, site.x, site.ground[1], site.z), `${site.id}: bots keep the flag band`);
+      }
+    }
+    // A finer grid than the layout's own sampling, out to just inside the edge.
+    for (let r = 3; r < site.radius + 3; r += 3) for (let a = 0; a < 48; a++) {
+      const reach = Math.min(r, site.radius - .01);
+      const x = site.x + Math.cos(a / 48 * Math.PI * 2) * reach, z = site.z + Math.sin(a / 48 * Math.PI * 2) * reach, y = open(x, z);
+      if (y !== null) assert.ok(inCaptureRange(site, x, y, z, true), `${site.id}: ground at ${x.toFixed(1)},${y.toFixed(1)},${z.toFixed(1)} is dead`);
+    }
+  }
+  assert.ok(sloped >= 5 && beyondFlag >= 1, `Meridian has sloped relays (${sloped}, ${beyondFlag} rising beyond the flag band)`);
 });

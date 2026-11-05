@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { buildRig, animateRig, PlayerModels } from '../src/render/players.js';
+import { buildRig, animateRig, PlayerModels, MAX_NEW_MODELS_PER_FRAME } from '../src/render/players.js';
 import { VEHICLE } from '@shared/index';
 import { weaponGripPoints } from '../src/render/weapon-models.js';
 import type { PlayerView } from '../src/interp.js';
@@ -196,6 +196,44 @@ test('steady strafing keeps one world-space gait while rapid aim jitter crosses 
   }
 });
 
+test('an aim flick while running turns the legs with the soldier instead of leaving them on the old heading', () => {
+  const rig = buildRig(8), state = view(), wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+  // Run north while aiming north, then keep running north while aiming south
+  // (a bot shooting behind itself on the march, or a player backpedalling).
+  for (let i = 0; i < 60; i++) { state.z -= 6 / 60; animateRig(rig, state, 1 / 60); }
+  assert.equal(rig.backward, false);
+  state.yaw = Math.PI;
+  for (let i = 0; i < 60; i++) {
+    state.z -= 6 / 60; animateRig(rig, state, 1 / 60);
+    assert.ok(Math.abs(rig.hips.rotation.y) <= 0.6 + 1e-9, `pelvis left the aim frame: ${rig.hips.rotation.y}`);
+  }
+  assert.equal(rig.backward, true, 'travel away from the aim is a backpedal');
+  const pelvisWorld = wrap(state.yaw + rig.hips.rotation.y);
+  assert.ok(Math.abs(wrap(pelvisWorld - Math.PI)) < 0.1, `pelvis should face the aim, got ${pelvisWorld}`);
+  const stepLine = wrap(state.yaw + rig.hips.rotation.y + rig.legL.rotation.y);
+  assert.ok(Math.abs(wrap(stepLine - Math.PI)) < 0.1, 'feet backpedal along the line of travel');
+});
+
+test('a soldier aiming anywhere while moving never twists its pelvis beyond the lower-body limit', () => {
+  const rig = buildRig(9), state = view(), wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+  for (let i = 0; i < 600; i++) {
+    state.x += 7 / 60;
+    state.yaw = wrap(Math.sin(i * 0.013) * 3.1 + Math.sin(i * 0.071));
+    animateRig(rig, state, 1 / 60);
+    assert.ok(Math.abs(rig.hips.rotation.y) <= 0.6 + 1e-9);
+    assert.ok(Math.abs(rig.torso.rotation.y) <= 0.6 * 0.45 + 1e-6);
+  }
+});
+
+test('diagonal running twists the pelvis toward travel and keeps the stride on the path', () => {
+  const rig = buildRig(10), state = view(), wrap = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+  // Forward-left at 45 degrees while aiming straight ahead.
+  for (let i = 0; i < 90; i++) { state.x -= 5 / 60; state.z -= 5 / 60; animateRig(rig, state, 1 / 60); }
+  assert.equal(rig.backward, false);
+  assert.ok(rig.hips.rotation.y > 0.4 && rig.hips.rotation.y <= 0.6, `pelvis twist ${rig.hips.rotation.y}`);
+  assert.ok(Math.abs(wrap(rig.hips.rotation.y + rig.legL.rotation.y - Math.PI / 4)) < 0.05, 'stride follows the diagonal');
+});
+
 test('turning movement can reverse into backpedaling without a180degree lower-body snap',()=>{
  const rig=buildRig(7),state=view();let previous=0;
  for(let i=0;i<180;i++){
@@ -228,4 +266,22 @@ test('a gunner renders one independent MG beside a single hull and follows local
   gunner.seat=0;gunner.vehicle=0;gunner.vehicleId=undefined;models.update([gunner],new Map(),1/60);
   assert.equal(internal.models.get(2)!.crew!.visible,false,'dismount removes the crew weapon');
  }finally{if(previous)Object.defineProperty(globalThis,'document',previous);else Reflect.deleteProperty(globalThis,'document');}
+});
+
+test('arriving at a crowded battle builds at most a few soldiers per frame, then all of them', () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  const context = { measureText: () => ({ width: 100 }), beginPath() {}, roundRect() {}, fill() {}, fillText() {} };
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => ({ getContext: () => context }) } });
+  try {
+    const models = new PlayerModels(), crowd = Array.from({ length: MAX_NEW_MODELS_PER_FRAME * 2 + 2 }, (_, i) => view({ id: 100 + i, x: i * 2 }));
+    const built = () => models.group.children.length;
+    models.update(crowd, new Map(), 1 / 60);
+    assert.equal(built(), MAX_NEW_MODELS_PER_FRAME);
+    models.update(crowd, new Map(), 1 / 60);
+    assert.equal(built(), MAX_NEW_MODELS_PER_FRAME * 2, 'existing soldiers keep updating while more appear');
+    models.update(crowd, new Map(), 1 / 60);
+    assert.equal(built(), crowd.length);
+  } finally {
+    if (previous) Object.defineProperty(globalThis, 'document', previous); else Reflect.deleteProperty(globalThis, 'document');
+  }
 });

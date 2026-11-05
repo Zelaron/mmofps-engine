@@ -214,6 +214,9 @@ export class SceneMgr {
   private contextLost = false;
   private lastPlayable = false;
   private worldPresented = false;
+  /** The first presentation of a world (removing the loading screen) also
+   * waits for this; frames are still rendered behind the loading screen. */
+  presentationGate?: () => boolean;
   private readonly lightDirection = new THREE.Vector3();
 
   constructor(canvas: HTMLCanvasElement) {
@@ -340,6 +343,15 @@ export class SceneMgr {
         this.quality.update(frameSeconds, !document.hidden)) this.updateResolution();
   }
 
+  /** Diagnostic: linked programs with their GL handles (for first-use timing). */
+  get programHandles(): { name: string; key: string; program: WebGLProgram | undefined }[] {
+    return (this.renderer.info.programs ?? []).map(entry => ({ name: entry.name, key: String((entry as unknown as { cacheKey?: string }).cacheKey ?? ''), program: entry.program }));
+  }
+  /** Diagnostic: linked shader programs (name and a short cache key). */
+  get programNames(): string[] {
+    return (this.renderer.info.programs ?? []).map(program => `${program.name} ${String((program as unknown as { cacheKey?: string }).cacheKey ?? '')}`);
+  }
+
   get renderStats(): { calls: number; triangles: number; pixelRatio: number; geometries: number; textures: number; contactShadowPasses: number;
     shaderPrograms: number; shadersPending: boolean; shaderQueueFallbacks: number; worldPresented: boolean } {
     const info = this.renderer.info;
@@ -398,6 +410,6 @@ export class SceneMgr {
     this.sun.target.updateMatrixWorld();
     if (!this.shaderPreparation.poll()) return;
     this.contactLighting.render(this.scene, this.camera, !!this.liquidKind);
-    this.worldPresented = playable;
+    this.worldPresented = playable && (this.worldPresented || (this.presentationGate?.() ?? true));
   }
 }

@@ -9,7 +9,8 @@ import {setVehicleColliders} from '@shared/vehicle-collision';
 import {VEHICLE} from '@shared/vehicles';
 
 const meridian={seed:1337,x:8099.963859451707,y:79.49807336383007,z:4377.507626967795,vx:-9.347892812736763,vy:0,vz:1.6931922399964983,yaw:1.749984457579788};
-const cinder={seed:7331,x:7072.075880783605,y:14.325353453655675,z:5365.971624359769,vx:-4.835925930248344,vy:2.1410775141426894,vz:7.660301239870689,yaw:2.469133825700425};
+// Boulders now rest on their lowest footing (2026-11); this walk grazes a real primitive on Cinder's capital outskirts.
+const cinder={seed:7331,x:7116.440953266132,y:8.096203300524241,z:5371.873491596787,vx:-6.405715989973827,vy:0,vz:6.405715989973826,yaw:2.356194490192345};
 function fixture(pose=meridian){
   const world=new World(pose.seed),sim=new BotSimulation();
   const players=Array.from({length:BOT_LOD_MIN_POPULATION},(_,i)=>{

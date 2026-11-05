@@ -25,6 +25,8 @@ export const Msg = {
   COutpost: 8,
   CHarvest: 9,
   CRespawn: 29,
+  /** Out of combat: move to a reinforcement point now (payload: option id). */
+  CDeploy: 31,
 
   SWelcome: 10,
   SSnapshot: 11,
@@ -45,6 +47,7 @@ export const Msg = {
   SJourney: 26,
   SOutposts: 27,
   SResources: 28,
+  SXp: 30,
 } as const;
 
 const textEncoder = new TextEncoder();
@@ -788,12 +791,16 @@ export function decodeTeleport(r: ByteReader): TeleportEvent {
   };
 }
 
-export interface JoinEvent { id: number; name: string }
-export function encodeJoin(id: number, name: string): Uint8Array {
-  return new ByteWriter(32).u8(Msg.SJoin).entity(id).str(name).finish();
+export interface JoinEvent { id: number; name: string; bot?: boolean }
+/** Roster entry. A trailing flag byte marks bots so clients can keep the
+ * kill feed free of reinforcement churn. */
+export function encodeJoin(id: number, name: string, bot = false): Uint8Array {
+  return new ByteWriter(33).u8(Msg.SJoin).entity(id).str(name).u8(bot ? 1 : 0).finish();
 }
 export function decodeJoin(r: ByteReader): JoinEvent {
-  return { id: r.entity(), name: r.str() };
+  const event: JoinEvent = { id: r.entity(), name: r.str() };
+  if (r.remaining) event.bot = (r.u8() & 1) === 1;
+  return event;
 }
 
 export function encodeLeave(id: number): Uint8Array {

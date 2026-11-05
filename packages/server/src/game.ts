@@ -4,7 +4,7 @@ import {
   unquantYaw, lockedHullDamageFactor,
   TICK_RATE, TICK_DT, SNAPSHOT_EVERY, PLAYER, WORLD, NET, SWIMMING,
   createMoveState, stepMove, fallDamage,
-  type MoveState, type InputCmd, BTN,
+  type MoveState, type InputCmd, BTN, HYPERSPEED_ENABLED,
   WEAPONS, pelletDir,
   RAILGUN_ID, NUKE_LAUNCHER_ID, RAIL_CHARGE, NUKE_MARKER, NUKE_BOMB,
   createFullAmmoLoadout, refillWeaponAmmo, cancelReload, stepWeaponState,
@@ -42,9 +42,11 @@ import { airliftPose, airliftDuration, AIRLIFT_CHARGE_SECONDS } from '@shared/ai
 import { setVehicleColliders, updateVehicleCollider, withVehicleColliders, type VehicleColliderPose } from '@shared/vehicle-collision';
 import { Wildlife, type Creature } from './wildlife.js';
 import { Frontier } from './frontier.js';
+import { awardXp, progressStatus, recordHit, rewardBase, rewardCapture, rewardKill, rewardWar, advanceDaily } from './progression.js';
+import { XP_REASON, XP_VALUES } from '@shared/progression';
 import { OutpostSystem } from './outposts.js';
 import { SpatialIndex } from './spatial-index.js';
-import { FACTIONS, type Faction, type SpawnOption } from '@shared/frontier';
+import { FACTIONS, WAR_REDEPLOY_WEAPON, WILDLIFE_WEAPON, type Faction, type SpawnOption } from '@shared/frontier';
 import { botCampaignRole, botRoleId } from './bots.js';
 import { aircraftThreatFor } from './aircraft-threat.js';
 import { BotSimulation } from './bot-simulation.js';
@@ -91,6 +93,32 @@ export class ServerPlayer {
   deaths = 0;
   spree = 0;
   ping = 0;
+  /** Persistent career progression (humans). */
+  xp = 0;
+  careerKills = 0;
+  captures = 0;
+  warsWon = 0;
+  bestStreak = 0;
+  /** Daily orders: the UTC day they belong to, progress per order and a
+   * completed-order bitmask (see dailyOrders in shared/progression). */
+  dailyDay = 0;
+  dailyProgress: number[] = [0, 0, 0];
+  dailyDone = 0;
+  /** This war only (reset when the next war begins): the debrief. */
+  warKills = 0;
+  warDeaths = 0;
+  warCaptures = 0;
+  warXp = 0;
+  /** Enemy soldier who last killed this player (revenge bonus). */
+  lastKilledBy = -1;
+  /** Earliest tick this soldier may use instant redeploy again. */
+  deployReadyAt = 0;
+  /** Earliest tick this soldier may deploy in another fighter jet. */
+  jetReadyAt = 0;
+  /** Tick a bot began waiting for its assault staging to clear (-1 = not waiting). */
+  deployWaitSince = -1;
+  /** Recent attackers by id → tick of their last hit, for assist credit. */
+  readonly recentAttackers = new Map<number, number>();
   inputQueue: InputCmd[] = [];
   lastCmd: InputCmd | null = null;
   lastProcessedSeq = 0;
@@ -176,6 +204,10 @@ export interface ServerVehicle {
   campaignFaction?: Faction;
   campaignBaseId?: string;
   campaignHome?: { x: number; y: number; z: number; heading: number };
+  /** A fighter launched by airborne deployment; removed once wrecked or abandoned. */
+  deployed?: boolean;
+  /** Tick a deployed hull was left without a crew (-1 while crewed). */
+  abandonedAt?: number;
 }
 
 interface VehicleSite {
@@ -219,6 +251,27 @@ export function vehicleDistrictActive(seed: number, cx: number, cz: number): boo
  * ordinary interest radius via their driver's entity.
  */
 const VEHICLE_INTEREST_RADIUS = 1800;
+/** Instant redeploy: allowed this long after the last hit taken, then cools down. */
+const DEPLOY_COMBAT_GRACE_SECONDS = 6;
+const DEPLOY_COOLDOWN_SECONDS = 15;
+/** Airborne deployment: cooldown per soldier, cap per faction, launch speed. */
+const JET_DEPLOY_COOLDOWN_TICKS = 45 * TICK_RATE;
+const JET_DEPLOY_FACTION_CAP = 4;
+const JET_DEPLOY_SPEED = 85;
+const JET_DEPLOY_ALTITUDE = 260;
+/** Launch this far behind the friendly base, so a pilot can orient before enemy air defenses. */
+const JET_DEPLOY_BEHIND = 1300;
+const JET_ABANDON_TICKS = 40 * TICK_RATE;
+/** Off-screen travel: a bot this far from its objective, unseen by any human
+ * and out of combat, redeploys at its forward staging instead of marching. */
+const BOT_REDEPLOY_DISTANCE = 1200;
+const BOT_REDEPLOY_HUMAN_RANGE = 900;
+const BOT_REDEPLOY_MARCH_TICKS = 20 * TICK_RATE;
+const BOT_REDEPLOY_PER_PASS = 6;
+/** Bounded spawn-option evaluations per pass (each one scans reinforcement options). */
+const BOT_REDEPLOY_CHECKS_PER_PASS = 12;
+/** Longest a bot waits for its own assault staging before using another base. */
+const BOT_STAGING_WAIT_TICKS = 8 * TICK_RATE;
 const MAX_SNAPSHOT_VEHICLES = 24;
 
 interface QueuedEvent {
@@ -306,6 +359,8 @@ export class Game {
   private readonly ownedArtillery = new Map<number, Projectile[]>();
   private readonly homingObstructions = new WeakMap<ServerPlayer, Map<number, { fraction: number; tick: number }>>();
   private readonly rewardedBosses = new WeakSet<Creature>();
+  /** Per bot: objective it is marching to and since when. */
+  private readonly marches = new Map<number, { target: string; since: number }>();
 
   teleporterPads: TeleporterPad[] = [];
   private caveLoot: CaveLootSpot[] = [];
@@ -329,11 +384,15 @@ export class Game {
   private rng: () => number;
   /** Loot activity must never perturb the deterministic player spawn stream. */
   private lootRng: () => number;
+  private readonly hyperspeed: boolean;
 
   constructor(
     readonly seed: number,
-    options: { vehicles?: boolean; teleporters?: boolean; wildlife?: boolean; frontier?: boolean; entityNamespace?: number; entityAllocator?: EntityAllocator } = {},
+    options: { vehicles?: boolean; teleporters?: boolean; wildlife?: boolean; frontier?: boolean; entityNamespace?: number; entityAllocator?: EntityAllocator;
+      /** Honour playtest hyperspeed from humans (default HYPERSPEED_ENABLED). */
+      hyperspeed?: boolean } = {},
   ) {
+    this.hyperspeed = options.hyperspeed ?? HYPERSPEED_ENABLED;
     if (options.entityNamespace !== undefined && options.entityAllocator) throw new Error('Choose a reserved allocator or a legacy namespace');
     this.entityAllocator = options.entityAllocator;
     this.idRange = options.entityNamespace === undefined ? LOCAL_ENTITY_RANGE : namespaceRange(options.entityNamespace);
@@ -341,7 +400,13 @@ export class Game {
     this.frontier = options.frontier ? new Frontier(this.world) : null;
     if (this.frontier) {
       this.frontier.mobileSpawns = p => this.mobileSpawnOptions(p);
+      this.frontier.airSpawns = p => this.airSpawnOptions(p);
       this.frontier.spawnActors = () => this.players.values();
+      this.frontier.warStarted = () => this.redeployForWar();
+      this.frontier.warDecided = war => rewardWar(this.players.values(), war.victor);
+      this.frontier.captured = event => rewardCapture(event.participants, event.site, event.neutralized);
+      this.frontier.baseChanged = (base, owner) => { if (owner) rewardBase(this.players.values(), base, owner); };
+      this.frontier.progress = p => progressStatus(p);
     }
     this.wildlifeEnabled = options.wildlife ?? false;
     this.wildlife = new Wildlife(this.world, (id, amount) => {
@@ -349,10 +414,11 @@ export class Game {
       if (!player || this.tick < player.spawnProtectedUntil) return;
       const hull = this.vehicles.get(player.vehicleId);
       if (hull) this.damageVehicle(hull, amount, null, 255);
-      else this.damage(player, amount, player, 255, 0, 0, 0);
+      else this.damage(player, amount, player, WILDLIFE_WEAPON, 0, 0, 0);
     }, (creature, attacker) => this.dropCreatureLoot(creature, attacker), this.idRange, this.entityAllocator,
-    { protectedAreas: () => this.frontier?.bases.filter(b => b.owner !== 0).map(b => ({ x: b.x, z: b.z, radius: 80 })) ?? [] });
+    { protectedAreas: () => this.frontier?.protectedAreas() ?? [] });
     if (this.frontier) this.frontier.threatReports = p => this.wildlife.threatReports(p.state.px, p.state.pz);
+    if (this.frontier) this.frontier.airfields = () => this.airfieldReports();
     this.rng = mulberry32(seed ^ 0x51ce7);
     this.lootRng = mulberry32(seed ^ 0x10_07_5eed);
     // Bounded districts and filtered runway candidates keep vehicle setup
@@ -721,6 +787,123 @@ export class Game {
     return result.slice(0, 12);
   }
 
+  /** Fighter deployment: airborne over the faction's held ground nearest its
+   * current operation, flying toward the fight. Humans only; never automatic. */
+  private airSpawnOptions(player: ServerPlayer): SpawnOption[] {
+    if (!this.frontier || !player.faction || player.isBot) return [];
+    const order = this.frontier.order(player);
+    const owned = this.frontier.bases.filter(b => b.owner === player.faction);
+    if (!owned.length) return [];
+    const goal = order ?? owned[0];
+    const anchor = owned.reduce((a, b) => Math.hypot(a.x - goal.x, a.z - goal.z) <= Math.hypot(b.x - goal.x, b.z - goal.z) ? a : b);
+    let dx = goal.x - anchor.x, dz = goal.z - anchor.z, length = Math.hypot(dx, dz);
+    if (length < 1) { dx = -anchor.x; dz = -anchor.z; length = Math.hypot(dx, dz) || 1; }
+    const ux = dx / length, uz = dz / length;
+    const limit = WORLD.BORDER - 900;
+    const x = clamp(anchor.x - ux * JET_DEPLOY_BEHIND, -limit, limit), z = clamp(anchor.z - uz * JET_DEPLOY_BEHIND, -limit, limit), heading = Math.atan2(-ux, -uz);
+    let ground = -Infinity;
+    for (let d = 0; d <= 2400; d += 300) for (const side of [-120, 0, 120])
+      ground = Math.max(ground, this.world.groundY(x + ux * d - uz * side, z + uz * d + ux * side));
+    const y = Math.max(ground, 0) + JET_DEPLOY_ALTITUDE;
+    let active = 0;
+    for (const v of this.vehicles.values()) {
+      const pilot = this.players.get(v.occupant);
+      if (v.deployed && v.respawnAtTick < 0 && pilot && !pilot.isBot && pilot.faction === player.faction) active++;
+    }
+    const cooling = this.tick < player.jetReadyAt, full = active >= JET_DEPLOY_FACTION_CAP;
+    return [{ id: 'air-jet', name: 'Fighter jet · airborne', kind: 'air', x, y, z, heading, baseId: anchor.id,
+      available: !cooling && !full,
+      reason: cooling ? `Fighter ready in ${Math.ceil((player.jetReadyAt - this.tick) / TICK_RATE)} s.`
+        : full ? 'All faction fighter slots are flying. Try again shortly.'
+        : `Launch airborne over ${anchor.name}, heading for ${order ? order.name.replace(/^(Capture|Defend) /, '') : 'the front'}.` }];
+  }
+
+  /** Seat a deploying soldier in a fresh fighter already in level flight. */
+  private launchJet(p: ServerPlayer, heading: number): void {
+    const s = p.state;
+    const v = this.spawnVehicleAt({ type: VEHICLE.JET, x: s.px, y: s.py - .05, z: s.pz, heading });
+    v.deployed = true; v.abandonedAt = -1; v.occupant = p.id; v.campaignFaction = p.faction;
+    p.vehicleId = v.id; p.spawnProtectedUntil = -1;
+    s.vehicle = VEHICLE.JET; s.vehicleVariant = 0; s.seat = 0; s.vehicleId = v.id; s.transportRoute = undefined;
+    s.heading = heading; s.vehiclePitch = 0; s.vehicleRoll = 0; s.boosting = false; s.vehicleRotation = undefined;
+    s.vx = -Math.sin(heading) * JET_DEPLOY_SPEED; s.vy = 0; s.vz = -Math.cos(heading) * JET_DEPLOY_SPEED;
+    s.grounded = false; s.boostFuel = 1;
+    p.vehFireCd = 0.5; p.vehAltCd = 1;
+    p.jetReadyAt = this.tick + JET_DEPLOY_COOLDOWN_TICKS;
+  }
+
+  /** Bots never spend minutes marching across empty country where no human
+   * can see them: an idle, unobserved bot far from its objective quietly
+   * redeploys at the objective's forward staging (the ordinary respawn path).
+   * Bots near any human keep moving physically. */
+  private redeployDistantBots(): void {
+    const frontier = this.frontier!;
+    const humans: ServerPlayer[] = [];
+    for (const p of this.players.values()) if (!p.isBot && p.state.alive) humans.push(p);
+    let moved = 0, checked = 0;
+    for (const p of this.players.values()) {
+      if (!p.isBot || !p.state.alive || p.state.vehicle !== VEHICLE.NONE || p.airlift || p.state.airlift) { this.marches.delete(p.id); continue; }
+      const role = botCampaignRole(botRoleId(p));
+      if (role === 'pilot' || role === 'aircrew' || role === 'sailor' || role === 'navalcrew') continue;
+      const order = frontier.order(p);
+      if (!order) { this.marches.delete(p.id); continue; }
+      const march = this.marches.get(p.id);
+      if (!march || march.target !== order.targetId) { this.marches.set(p.id, { target: order.targetId, since: this.tick }); continue; }
+      if (this.tick - march.since < BOT_REDEPLOY_MARCH_TICKS || this.tick < p.regenBlockUntil) continue;
+      const goal = order.phase === 'assemble' ? order.staging : order;
+      if (Math.hypot(goal.x - p.state.px, goal.z - p.state.pz) < BOT_REDEPLOY_DISTANCE) continue;
+      if (humans.some(h => Math.hypot(h.state.px - p.state.px, h.state.pz - p.state.pz) < BOT_REDEPLOY_HUMAN_RANGE)) continue;
+      let threatened = false;
+      for (const q of this.playerIndex.query(p.state.px, p.state.pz, 160)) {
+        if (q.state.alive && this.areEnemies(p, q) && Math.hypot(q.state.px - p.state.px, q.state.pz - p.state.pz) < 160) { threatened = true; break; }
+      }
+      if (threatened) continue;
+      // Only worthwhile when a safe deployment near the objective exists now.
+      if (++checked > BOT_REDEPLOY_CHECKS_PER_PASS) break;
+      const near = frontier.spawnOptions(p, this.tick).some(o => o.kind !== 'air' && Math.hypot(o.x - goal.x, o.z - goal.z) < 700);
+      if (!near) continue;
+      p.state.alive = false; p.health = 0; p.state.vx = p.state.vy = p.state.vz = 0;
+      cancelReload(p); this.clearFallDamageCredit(p);
+      p.respawnAtTick = this.tick + 2 * TICK_RATE; p.spawnProtectedUntil = -1;
+      this.events.push({ bytes: encodeDeath(p.id, p.id, WAR_REDEPLOY_WEAPON), x: p.state.px, z: p.state.pz, radius: NET.INTEREST_RADIUS * 1.5 });
+      this.marches.delete(p.id);
+      if (++moved >= BOT_REDEPLOY_PER_PASS) break;
+    }
+  }
+
+  /** A new war begins: every soldier redeploys from the rotated home regions
+   * through the ordinary respawn flow (staggered, safety-checked), and depot
+   * vehicles return home under their base's new owner. */
+  private redeployForWar(): void {
+    for (const p of this.players.values()) {
+      p.warKills = p.warDeaths = p.warCaptures = p.warXp = 0;
+      if (p.state.vehicle !== VEHICLE.NONE) this.releaseVehicleSeat(p);
+      p.airlift = undefined; p.state.airlift = undefined;
+      p.state.vx = p.state.vy = p.state.vz = 0;
+      p.preferredSpawnId = ''; p.lastDeath = undefined;
+      p.spree = 0;
+      if (p.state.alive) {
+        p.state.alive = false; p.health = 0;
+        cancelReload(p); this.clearFallDamageCredit(p);
+        this.events.push({ bytes: encodeDeath(p.id, p.id, WAR_REDEPLOY_WEAPON) });
+      }
+      // Humans get a short deployment choice; bots trickle in over 3 s so the
+      // safety-checked spawn searches do not land on a single tick.
+      p.respawnAtTick = this.tick + (p.isBot ? 20 + (p.id * 7919) % 160 : 6 * TICK_RATE);
+      p.spawnProtectedUntil = -1;
+      this.frontier?.send(p, this.players.values(), this.tick);
+    }
+    for (const v of this.vehicles.values()) {
+      if (v.deployed) { this.vehicles.delete(v.id); continue; }
+      if (!v.campaignHome || !v.campaignBaseId || v.transportRoute) continue;
+      v.x = v.campaignHome.x; v.y = v.campaignHome.y + .05; v.z = v.campaignHome.z; v.heading = v.campaignHome.heading;
+      v.health = vehicleDefinition(v.type, v.variant)!.maxHealth; v.occupant = -1; v.gunner = -1;
+      v.respawnAtTick = -1; v.motionState = undefined;
+      v.campaignFaction = this.frontier?.bases.find(b => b.id === v.campaignBaseId)?.owner ?? 0;
+    }
+    this.projectiles.clear(); this.ownedArtillery.clear();
+  }
+
   requestRespawn(player: ServerPlayer, id: string): boolean {
     if (!this.frontier || id.length > 80) return false;
     if (id && !this.frontier.spawnOptions(player, this.tick).some(option => option.id === id)) return false;
@@ -1069,6 +1252,10 @@ export class Game {
     v.respawnAtTick = this.tick + Math.round(def.respawnSeconds * TICK_RATE);
     updateVehicleCollider(this.world, this.tick, this.vehicleCollider(v));
     const occupants = [this.players.get(v.occupant), this.players.get(v.gunner ?? -1)];
+    if (attacker && this.frontier && occupants.some(o => o && o.faction !== attacker.faction) && !v.transportRoute) {
+      awardXp(attacker, XP_VALUES.vehicle, XP_REASON.VEHICLE);
+      advanceDaily(attacker, 'vehicles');
+    }
     v.occupant = -1; v.gunner = -1;
     for (const occupant of occupants) if (occupant && occupant.vehicleId === v.id) {
       const s = occupant.state;
@@ -1111,6 +1298,14 @@ export class Game {
         else { carryTransit(this.world, state, before, now); carryCityLift(this.world, state, before, now); }
         v.x = state.px; v.y = state.py; v.z = state.pz; v.heading = state.heading;
       }
+      if (v.deployed) {
+        // Deployed fighters never respawn: a wreck or an abandoned hull leaves.
+        if (v.occupant >= 0 || (v.gunner ?? -1) >= 0) v.abandonedAt = -1;
+        else if ((v.abandonedAt ?? -1) < 0) v.abandonedAt = this.tick;
+        if ((v.respawnAtTick >= 0 && this.tick >= v.respawnAtTick) ||
+            (v.respawnAtTick < 0 && (v.abandonedAt ?? -1) >= 0 && this.tick - v.abandonedAt! > JET_ABANDON_TICKS)) this.vehicles.delete(v.id);
+        continue;
+      }
       if (v.respawnAtTick < 0 || this.tick < v.respawnAtTick) continue;
       if (this.vehicleSites.length === 0) { v.respawnAtTick = -1; continue; }
       // Respawn elsewhere: pick a random matching site clear of players.
@@ -1151,28 +1346,30 @@ export class Game {
 
   /** Campaign reinforcements use held bases; arena fixtures retain their
    * existing nearby-player spawn policy. Selection is revalidated at spawn. */
-  private pickSpawn(excludeId: number): { x: number; y: number; z: number } | null {
+  private pickSpawn(excludeId: number): { x: number; y: number; z: number; air?: number } | null {
     if (this.frontier) {
       const player = this.players.get(excludeId);
       if (!player) return null;
-      const options = this.frontier.spawnOptions(player, this.tick);
-      const order = player.isBot ? this.frontier.order(player) : undefined;
+      const available = this.frontier.spawnOptions(player, this.tick);
+      const air = available.find(option => option.kind === 'air' && option.id === player.preferredSpawnId);
+      if (air) return { x: air.x, y: air.y, z: air.z, air: air.heading ?? 0 };
+      const options = available.filter(option => option.kind !== 'air');
+      // Bots deploy for their squad's operation; humans without a chosen base
+      // join the nearest active operation (usually its forward staging).
+      const order = this.frontier.order(player);
+      // An assault squad briefly waits for its forward staging to clear rather
+      // than deploying kilometres away and spending minutes marching back.
+      if (player.isBot && order && order.phase !== 'defend' && player.respawnAtTick >= 0 &&
+          !options.some(option => option.id === `assault-${order.targetId}`) && this.frontier.hasAssaultStaging(player, order.targetId)) {
+        if (player.deployWaitSince < 0) player.deployWaitSince = this.tick;
+        if (this.tick - player.deployWaitSince < BOT_STAGING_WAIT_TICKS) return null;
+      }
       options.sort((a, b) => Number(b.id === player.preferredSpawnId) - Number(a.id === player.preferredSpawnId) ||
         (order ? Math.hypot(a.x - order.x, a.z - order.z) - Math.hypot(b.x - order.x, b.z - order.z) : 0));
-      const actors = [...this.players.values()], policy = this.frontier.reinforcementPlanner;
+      const actors = [...this.players.values()];
       for (const anchor of options) {
-        for (let attempt = 0; attempt < 24; attempt++) {
-          const angle = this.rng() * Math.PI * 2, radius = 3 + this.rng() * 14;
-          const x = anchor.x + Math.cos(angle) * radius, z = anchor.z + Math.sin(angle) * radius;
-          // Preserve the rally's pedestrian floor below towers and bridges.
-          const y = anchor.y;
-          if (!policy.supported({ x, y, z }) ||
-            !policy.safe(player, { x, y, z }, actors, this.tick)) continue;
-          if (actors.some(q => q.id !== player.id && q.state.alive && Math.abs(q.state.py - y) < 3 && Math.hypot(q.state.px - x, q.state.pz - z) < 2)) continue;
-          return { x, y, z };
-        }
-        if (policy.safe(player, anchor, actors, this.tick) && policy.supported(anchor))
-          return { x: anchor.x, y: anchor.y, z: anchor.z };
+        const point = this.placeAt(player, anchor, actors);
+        if (point) return point;
       }
       // Stay in the deployment window until a vetted approach is available.
       // Falling back to an occupied flag recreates an endless defender pileup.
@@ -1193,6 +1390,68 @@ export class Game {
       if (near) return near;
     }
     return this.world.findSpawn(this.rng);
+  }
+
+  /** A safe, supported, uncrowded standing point near a reinforcement anchor. */
+  private placeAt(player: ServerPlayer, anchor: { x: number; y: number; z: number }, actors: readonly ServerPlayer[]): { x: number; y: number; z: number } | null {
+    const policy = this.frontier!.reinforcementPlanner;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const angle = this.rng() * Math.PI * 2, radius = 3 + this.rng() * 14;
+      const x = anchor.x + Math.cos(angle) * radius, z = anchor.z + Math.sin(angle) * radius;
+      // Preserve the rally's pedestrian floor below towers and bridges.
+      const y = anchor.y;
+      if (!policy.supported({ x, y, z }) ||
+        !policy.safe(player, { x, y, z }, actors, this.tick)) continue;
+      if (actors.some(q => q.id !== player.id && q.state.alive && Math.abs(q.state.py - y) < 3 && Math.hypot(q.state.px - x, q.state.pz - z) < 2)) continue;
+      return { x, y, z };
+    }
+    if (policy.safe(player, anchor, actors, this.tick) && policy.supported(anchor))
+      return { x: anchor.x, y: anchor.y, z: anchor.z };
+    return null;
+  }
+
+  /** Runway sites, and whether a fighter jet is parked on each, free to board. */
+  private airfieldReports(): { x: number; z: number; ready: boolean }[] {
+    const out: { x: number; z: number; ready: boolean }[] = [];
+    for (const site of this.vehicleSites) {
+      if (site.type !== VEHICLE.JET) continue;
+      let ready = false;
+      for (const v of this.vehicles.values()) {
+        if (v.type === VEHICLE.JET && !v.deployed && v.respawnAtTick < 0 && v.occupant < 0 &&
+          Math.hypot(v.x - site.x, v.z - site.z) < 80) { ready = true; break; }
+      }
+      out.push({ x: Math.round(site.x), z: Math.round(site.z), ready });
+    }
+    return out;
+  }
+
+  /** Out of combat, a soldier can move straight to any available reinforcement
+   * point (or launch in a fighter) instead of walking there. Returns a reason
+   * when refused. Combat, airlift and the short cooldown still apply. It does
+   * not become the remembered respawn choice (only a pick on the map does):
+   * otherwise one deployment would pin every later one, and every respawn,
+   * to that point after the fight had moved on. */
+  deployNow(player: ServerPlayer, id: string): string | null {
+    if (!this.frontier || id.length > 80) return 'Deployment is not available on this server.';
+    const s = player.state;
+    if (!s.alive) return null; // the respawn selection already handles the dead
+    if (player.airlift || s.airlift || s.transportRoute) return 'Finish your current trip before redeploying.';
+    if (this.tick < player.regenBlockUntil - (PLAYER.REGEN_DELAY - DEPLOY_COMBAT_GRACE_SECONDS) * TICK_RATE)
+      return `You are in combat. Redeploy is ready ${DEPLOY_COMBAT_GRACE_SECONDS} s after your last hit.`;
+    if (this.tick < player.deployReadyAt) return `Redeploy ready in ${Math.ceil((player.deployReadyAt - this.tick) / TICK_RATE)} s.`;
+    const option = this.frontier.spawnOptions(player, this.tick).find(o => o.id === id);
+    if (!option) return 'That deployment is no longer available. Pick another on the map.';
+    const actors = [...this.players.values()];
+    const point = option.kind === 'air' ? { x: option.x, y: option.y, z: option.z } : this.placeAt(player, option, actors);
+    if (!point) return 'That rally is crowded right now. Try again in a moment.';
+    if (s.vehicle !== VEHICLE.NONE) this.releaseVehicleSeat(player);
+    const from = { x: s.px, y: s.py, z: s.pz };
+    s.px = point.x; s.py = point.y; s.pz = point.z; s.vx = s.vy = s.vz = 0; s.grounded = false;
+    player.deployReadyAt = this.tick + DEPLOY_COOLDOWN_SECONDS * TICK_RATE;
+    player.spawnProtectedUntil = this.tick + 3 * TICK_RATE; player.recallSince = -1;
+    if (option.kind === 'air') this.launchJet(player, option.heading ?? 0);
+    this.events.push({ bytes: encodeTeleport({ id: player.id, fromX: from.x, fromY: from.y, fromZ: from.z, toX: s.px, toY: s.py, toZ: s.pz }) });
+    return null;
   }
 
   private allocateEntity(cursor: 'nextVehicleId' | 'nextPlayerId' | 'nextProjectileId' | 'nextPickupId', active: { has(id: number): boolean; size: number }): number {
@@ -1234,7 +1493,7 @@ export class Game {
     else { p.state.alive = false; p.health = 0; p.respawnAtTick = this.tick + TICK_RATE; }
     if (spawn && this.frontier && isBot) this.stageVehicleCrew(p);
     if (this.frontier) p.spawnProtectedUntil = this.tick + 3 * TICK_RATE;
-    this.events.push({ bytes: encodeJoin(id, name) });
+    this.events.push({ bytes: encodeJoin(id, name, isBot) });
     this.events.push({ bytes: encodeSpawn(id, p.state.px, p.state.py, p.state.pz) });
     return p;
   }
@@ -1246,7 +1505,7 @@ export class Game {
     player.state.vx = player.state.vy = player.state.vz = 0;
     this.players.set(player.id, player);
     this.botSimulation.invalidateRoster();
-    this.events.push({ bytes: encodeJoin(player.id, player.name) });
+    this.events.push({ bytes: encodeJoin(player.id, player.name, player.isBot) });
     this.events.push({ bytes: encodeSpawn(player.id, player.state.px, player.state.py, player.state.pz) });
   }
 
@@ -1283,7 +1542,7 @@ export class Game {
     const arrival = prepareArrival(this, record, sinks, originals);
     for (const p of arrival.players) {
       this.players.set(p.id, p);
-      this.events.push({ bytes: encodeJoin(p.id, p.name) });
+      this.events.push({ bytes: encodeJoin(p.id, p.name, p.isBot) });
     }
     this.botSimulation.invalidateRoster();
     for (const v of arrival.record.vehicles) this.vehicles.set(v.id, v);
@@ -1302,7 +1561,7 @@ export class Game {
   sendRoster(p: ServerPlayer): void {
     if (!p.sink) return;
     for (const q of this.players.values()) {
-      if (q.id !== p.id) p.sink.send(encodeJoin(q.id, q.name));
+      if (q.id !== p.id) p.sink.send(encodeJoin(q.id, q.name, q.isBot));
     }
     p.sink.send(this.buildScores());
     const allegiance = !this.frontier ? '' : p.faction
@@ -1328,8 +1587,9 @@ export class Game {
 
   queueInput(p: ServerPlayer, cmd: InputCmd): void {
     if (p.hasQueuedSeq && !seqNewer(cmd.seq, p.lastQueuedSeq)) return;
-    // H is a human playtest shortcut; bots keep normal movement and damage.
-    if (p.isBot) cmd = { ...cmd, buttons: cmd.buttons & ~BTN.HYPER };
+    // H is a human playtest shortcut, disabled unless this game allows it;
+    // bots keep normal movement and damage either way.
+    if (p.isBot || !this.hyperspeed) cmd = { ...cmd, buttons: cmd.buttons & ~BTN.HYPER };
     p.lastInputAtTick = this.tick;
     p.lastQueuedSeq = cmd.seq >>> 0;
     p.hasQueuedSeq = true;
@@ -1370,6 +1630,7 @@ export class Game {
     this.updateRespawnsAndRegen();
     this.recordHistory();
     if (this.frontier && this.tick % 12 === 0) this.frontier.step(this.players.values(), this.tick, 12 / TICK_RATE);
+    if (this.frontier instanceof Frontier && this.tick % 60 === 30) this.redeployDistantBots();
     if (this.tick % SNAPSHOT_EVERY === 0) this.broadcast();
     if (this.tick % 60 === 0) { this.camps.step(); this.broadcastScores(); }
   }
@@ -2566,7 +2827,10 @@ export class Game {
     // send BTN.HYPER.
     if (victim.lastCmd && (victim.lastCmd.buttons & BTN.HYPER) !== 0) return;
     if (attacker.id !== victim.id && this.tick < victim.spawnProtectedUntil) return;
-    if (amount > 0 && attacker.id !== victim.id) this.frontier?.recordCombat(victim.state.px, victim.state.pz, [victim.faction, attacker.faction], this.tick);
+    if (amount > 0 && attacker.id !== victim.id) {
+      this.frontier?.recordCombat(victim.state.px, victim.state.pz, [victim.faction, attacker.faction], this.tick);
+      recordHit(victim, attacker, this.tick);
+    }
     if (amount > 0) victim.recallSince = -1;
     victim.health -= amount;
     victim.regenBlockUntil = this.tick + PLAYER.REGEN_DELAY * TICK_RATE;
@@ -2576,6 +2840,7 @@ export class Game {
   }
 
   private kill(victim: ServerPlayer, attacker: ServerPlayer, weaponId: number): void {
+    const spreeBefore = victim.spree;
     const motion = { x: victim.state.px, y: victim.state.py, z: victim.state.pz,
       vx: clamp(victim.state.vx, -100, 100), vy: clamp(victim.state.vy, -60, 65), vz: clamp(victim.state.vz, -100, 100),
       yaw: victim.lastCmd ? unquantYaw(victim.lastCmd.yaw) : victim.state.heading };
@@ -2590,14 +2855,14 @@ export class Game {
     victim.airlift=undefined;victim.state.airlift=undefined;
     victim.state.alive = false;
     victim.state.vx = 0; victim.state.vy = 0; victim.state.vz = 0;
-    victim.deaths++;
+    victim.deaths++; victim.warDeaths++;
     victim.respawnAtTick = this.tick + PLAYER.RESPAWN_SECONDS * 60;
     victim.spawnProtectedUntil = -1;
     this.frontier?.send(victim, this.players.values(), this.tick);
     cancelReload(victim);
     this.clearFallDamageCredit(victim);
-    if (attacker.id !== victim.id) attacker.frags++;
-    else attacker.frags--;
+    if (attacker.id !== victim.id) { attacker.frags++; attacker.warKills++; }
+    else if (weaponId !== WILDLIFE_WEAPON) attacker.frags--;
     this.stats.kills++;
     this.events.push({ bytes: encodeDeath(victim.id, attacker.id, weaponId, motion) });
     if (attacker.id !== victim.id) this.dropPickups(victim);
@@ -2617,6 +2882,7 @@ export class Game {
         attacker.spree === 25 ? 'is GODLIKE' : null;
       if (label) this.events.push({ bytes: encodeServerMessage(`${attacker.name} ${label}! (${attacker.spree} kills)`) });
     }
+    if (this.frontier) rewardKill(victim, attacker, this.tick, spreeBefore, this.frontier.territories, this.players);
   }
 
   private updateRespawnsAndRegen(): void {
@@ -2643,9 +2909,10 @@ export class Game {
           // an empty, unselectable railgun/nuke launcher.
           if (WEAPONS[p.weapon]?.spawnEmpty) p.weapon = 0;
           this.clearFallDamageCredit(p);
-          p.respawnAtTick = -1;
+          p.respawnAtTick = -1; p.deployWaitSince = -1;
           if (this.frontier) p.spawnProtectedUntil = this.tick + 3 * TICK_RATE;
           if (this.frontier && p.isBot) this.stageVehicleCrew(p);
+          if (spawn.air !== undefined) this.launchJet(p, spawn.air);
           p.inputQueue.length = 0;
           p.lastCmd = null;
           this.events.push({ bytes: encodeSpawn(p.id, p.state.px, p.state.py, p.state.pz) });
@@ -2761,6 +3028,7 @@ export class Game {
       // must never be changed by a local simulation reward.
       player.salvage += gained;
       player.sink?.send(encodeServerMessage(`${def.name} bounty: +${gained} salvage.`));
+      awardXp(player, XP_VALUES.boss, XP_REASON.BOSS);
     }
 
     // One shared cache per kill, regardless of party size. Dead contributors
