@@ -1,6 +1,6 @@
 # THE MMOFPS
 
-A browser first-person shooter set in one large, persistent world at war. Three factions — the Terran Accord, the Helix Combine and the Vanguard Pact — fight over cities, harbors and forward bases with infantry, vehicles, boats and fighter jets, while bots fill each world to 192 soldiers. Open the page and you're in the fight: no menu, no login, no tutorial.
+A browser first-person shooter set in one large, persistent world at war. Three factions (the Terran Accord, the Helix Combine and the Vanguard Pact) fight over cities, harbors and forward bases with infantry, vehicles, boats and fighter jets, while bots fill each world to 192 soldiers. Open the page and you're in the fight: no menu, no login, no tutorial.
 
 ## Quick start
 
@@ -32,7 +32,7 @@ Characters are tied to an anonymous browser cookie and saved in `data/`. Hosting
 | WASD, mouse | Move and aim |
 | Space / double-tap a direction | Jump / dodge |
 | Left mouse, R | Shoot, reload |
-| 1–9, 0, mouse wheel | Choose a weapon |
+| 1-9, 0, mouse wheel | Choose a weapon |
 | E | Enter a vehicle or join its crew |
 | G | Tactical map: respawn point, DEPLOY NOW, fighter jet |
 | M / O | Minimap / star chart |

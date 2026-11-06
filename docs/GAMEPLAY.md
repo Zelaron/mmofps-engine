@@ -20,7 +20,7 @@ The rules in detail. The [README](../README.md) has the short version.
 | Double-tap a direction | Dodge, with the original air control and momentum |
 | Mouse / touch FIRE | Shoot |
 | R | Reload |
-| 1–9, 0, mouse wheel | Choose a weapon |
+| 1-9, 0, mouse wheel | Choose a weapon |
 | E | Enter a vehicle, join a compatible crew, or open a nearby airlift pod's destination map |
 | B / FIELD CAMP | Open construction: choose a module, rotate its preview and build ahead of you |
 | Hold F | Extract a nearby glowing xenolite seam (see [Salvage](#salvage-and-field-camps)) |
@@ -54,7 +54,7 @@ Allies cannot damage each other; the other two factions are enemies. Wildlife, f
 - When several factions stand in a ring, the one that clearly outnumbers the others keeps progressing at the rate of its margin; a narrow lead holds the ring contested. A human counts as much as four bots, and the advantage speeds capture up to three human equivalents. Leaving the ring pauses your contribution, and progress resumes where it stopped.
 - **Height.** On a hillside ring, a player counts anywhere on the open ground inside it, uphill or downhill; bots count only near the flag's height. Roofs and caves don't count, and the panel says how far above or below the ground you are. Where the flag stands on a street or a deck (cities, harbor quays and approaches), only its level counts, within 6 m. Harbors use the walkable quay, not the submerged ferry berth.
 - Friendly controlled districts heal you faster after combat. Neutralizations and captures are announced on screen.
-- Regional city controls are roughly 385–576 m apart; capital controls sit in districts 905–1,902 m apart. Capture rings never overlap.
+- Regional city controls are roughly 385-576 m apart; capital controls sit in districts 905-1,902 m apart. Capture rings never overlap.
 - A base whose control has been held by an attacker for 150 seconds has its **supply cut**: its own rally closes and its defenders stage farther out (about 650 m) until the control is retaken.
 
 ## Respawning and reinforcements
@@ -89,21 +89,21 @@ Allies cannot damage each other; the other two factions are enemies. Wildlife, f
 - Each world adapts its population between **96 and 192 soldiers** (including humans) across the three factions. Humans replace bots. `BOTS` changes the maximum.
 - Under sustained server load, safe distant reserves are retired first; nearby battles, vehicle crews and expeditions are protected.
 - Six-soldier squads share a base objective, assemble, and use transport and airlift links for long trips. Out-of-sight bots far from their objective redeploy at forward staging instead of marching across the map; bots near a player always move physically.
-- Bots react 0.3–0.65 s before their first shot at a new target, aim tighter the longer they track, keep pushing onto nearby objectives while fighting, back off when badly hurt and engage enemies within 120 m on the march. They fight dangerous creatures they meet but don't organize creature hunts.
+- Bots react 0.3-0.65 s before their first shot at a new target, aim tighter the longer they track, keep pushing onto nearby objectives while fighting, back off when badly hurt and engage enemies within 120 m on the march. They fight dangerous creatures they meet but don't organize creature hunts.
 
 ## Experience, ranks and daily orders
 
 - XP is awarded immediately with an on-screen ribbon: enemy kills (100, or 150 for a human), assists (40), killstreaks, revenge and shutdowns, kills near an objective (defender 50, attacker 30), destroying a crewed vehicle (150), neutralizing (150) or capturing (250) a control, securing a base (300), and war victory (1,500) or service (400).
 - Sixty ranks run from Recruit I to Warlord III; promotions get a banner and fanfare.
-- Three **daily orders** a day (UTC, the same for everyone; one is always a kill order) pay 300–1,300 XP each. The rank panel shows the next one; the tactical map lists all three.
+- Three **daily orders** a day (UTC, the same for everyone; one is always a kill order) pay 300-1,300 XP each. The rank panel shows the next one; the tactical map lists all three.
 - When a war is decided, a **debrief** card shows the result, your eliminations, deaths, captures and XP for that war, and the war's top soldier.
 - XP, career kills, captures, wars won and best streak are saved with your character.
 
 ## Creatures and bosses
 
 - **Meridian** has shamblers, fast revenants and heavy plague brutes, plus the rare **Ossuary Titan**. **Cinder** has ash crawlers and the **Cinder Colossus**; **Nacre** has reef prowlers and the **Tide Behemoth**. Native fauna remain everywhere.
-- Bosses have 12,000–15,000 health, name and health plates, and recovery windows. Damaging a boss provokes faster pursuit up to 1,200 m for 45 seconds, refreshed by further hits.
-- Bosses fire ranged blasts up to 950–1,100 m, with a fixed target marker, visible charging and an incoming-impact warning. Move out of the marked area or take solid cover; owned-base safe zones stay protected.
+- Bosses have 12,000-15,000 health, name and health plates, and recovery windows. Damaging a boss provokes faster pursuit up to 1,200 m for 45 seconds, refreshed by further hits.
+- Bosses fire ranged blasts up to 950-1,100 m, with a fixed target marker, visible charging and an incoming-impact warning. Move out of the marked area or take solid cover; owned-base safe zones stay protected.
 - Boss kills pay **salvage to every qualifying hunter**: 500 for an Ossuary Titan, 650 for a Cinder Colossus, 600 for a Tide Behemoth. You qualify with at least 1% of the boss's health in damage and a hit within the last two minutes; dying before the kill doesn't forfeit it.
 - Each kill leaves a shared, loaded **Nuke Launcher**, two ammunition crates and health at the corpse. Participants have 90 seconds to claim the cache before it becomes public; the drops last five minutes.
 - Creature rosters and rewards are defined per planet in `packages/shared/src/wildlife.ts`.

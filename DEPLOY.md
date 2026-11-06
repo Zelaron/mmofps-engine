@@ -22,7 +22,7 @@ The build automatically downloads two fixed-version font files and checks their 
 | `PORT`, `HOST` | `8080`, `0.0.0.0` | Gateway address, or an external worker's listen address. |
 | `DATA_DIR` | `data` in cluster mode | Universe SQLite database and a separate directory per local world. |
 | `MAX_PLAYERS` | `64` | Human admission limit per world; not a proven capacity claim. |
-| `BOTS` | `192` | Maximum bot-filled population target per planet, including humans. Default adaptive range: 96–192. |
+| `BOTS` | `192` | Maximum bot-filled population target per planet, including humans. Default adaptive range: 96-192. |
 | `SESSION_COOKIE_SECURE` | unset | Set to `1` when browsers use HTTPS through a reverse proxy; marks the anonymous session cookie `Secure`. Leave unset for direct local HTTP. |
 | `PLANETS` | `meridian` | Worlds that make up the universe: `all`, or a list such as `meridian,cinder`. The first is the entry world; characters saved on a world outside the list return there with their inventory. The star chart and orbital travel stay hidden while only one world is enabled. |
 | `LOCAL_PLANETS` | every enabled world | Enabled worlds supervised locally (must be a subset of `PLANETS`). An empty value starts only gateway/coordinator. |
