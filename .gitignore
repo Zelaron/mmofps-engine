@@ -24,14 +24,11 @@ Thumbs.db
 /packages/client/public/fonts/*.ttf
 /packages/client/public/fonts/*.tmp
 
-# Local migration records and retired deployment examples
+# Local migration records
 /docs/baseline-manifest.json
 /docs/SESSION-RECOVERY.md
 /docs/LEGACY_DEPLOY.md
 /docs/LEGACY_ARCHITECTURE.md
-/deploy/update.sh
-/deploy/mmofps-update.service
-/deploy/mmofps-update.timer
 
 # Test runner output
 /playwright-report/

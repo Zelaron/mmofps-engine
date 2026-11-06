@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly update of THE MMOFPS (Monday 00:00, server local time)
+
+[Timer]
+OnCalendar=Mon *-*-* 00:00:00
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

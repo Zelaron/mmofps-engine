@@ -4,7 +4,7 @@ A browser first-person shooter set in one large, persistent world at war. Three 
 
 ## Quick start
 
-Requires Node.js 22.11 or newer. The repository is private, so cloning needs your GitHub credentials.
+Requires Node.js 22.11 or newer.
 
 ```sh
 git clone https://github.com/Zelaron/mmofps-engine.git
@@ -74,6 +74,10 @@ The full rules are in the [gameplay reference](docs/GAMEPLAY.md).
 | `npm run test:<name>:browser` | Browser checks; run `npx playwright install chromium` first |
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how the client, server and worlds fit together.
+
+## Contributing
+
+Pull requests are welcome. Whatever is on `main` goes live on [mmofps.com](https://mmofps.com) every Monday at midnight (Stockholm time), once it builds and the tests pass.
 
 ## Status
 

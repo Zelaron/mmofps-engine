@@ -1,27 +1,41 @@
 [Unit]
-Description=MMOFPS game server
+Description=THE MMOFPS game server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=mmofps
-WorkingDirectory=/opt/mmofps/app
-ExecStart=/usr/bin/node --experimental-sqlite packages/server/dist/server.cjs
-Restart=always
-RestartSec=3
-Environment=PORT=8080
-Environment=BOTS=192
+Group=mmofps
+WorkingDirectory=/opt/mmofps/current
+ExecStart=/opt/mmofps/node/bin/node --experimental-sqlite packages/server/dist/server.cjs
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
 Environment=HOST=127.0.0.1
-Environment=DATA_DIR=/opt/mmofps/app/data
+Environment=PORT=8080
+Environment=DATA_DIR=/opt/mmofps/data
+Environment=BOTS=128
 Environment=MAX_PLAYERS=64
 Environment=SESSION_COOKIE_SECURE=1
-TimeoutStopSec=20
-# Hardening (optional but cheap)
+# Share the machine politely: at most two cores and 3 GB, half the CPU share
+# of an ordinary service when the machine is busy, and low disk priority. The
+# game sheds bots on its own when its ticks run slow.
+CPUQuota=200%
+CPUWeight=50
+MemoryHigh=2500M
+MemoryMax=3G
+IOWeight=50
+Nice=5
+# Hardening
 NoNewPrivileges=true
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/opt/mmofps/data
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target

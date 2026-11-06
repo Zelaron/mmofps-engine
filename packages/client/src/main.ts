@@ -306,10 +306,13 @@ function presentWeapon(weapon: number, playSound = true): void {
 }
 
 // -- overlay state machine --------------------------------------------------
+const contributeLink = document.getElementById('center-contribute');
 function updateOverlay(): void {
   // Track the state this overlay actually used. A welcome and first draw can
   // both happen between frame comparisons during a quick rejoin.
   overlayWorldPresented = sceneMgr.renderStats.worldPresented;
+  // The open-source note shows while the game loads or reconnects, not on deaths.
+  if (contributeLink) contributeLink.hidden = !(disconnected || transferring || !pred || !pred.initialized || !overlayWorldPresented);
   if (disconnected) {
     hud.showCenter(reconnectStopped ? 'SESSION CLOSED' : 'RECONNECTING', reconnectStopped ? 'Refresh to rejoin from this tab.' : 'Restoring your place in the world…');
     return;

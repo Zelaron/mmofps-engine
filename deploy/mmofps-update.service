@@ -1,0 +1,14 @@
+[Unit]
+Description=Weekly update of THE MMOFPS from GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mmofps/bin/update.sh
+# Build and test in the background: lowest CPU and disk priority.
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=10
+MemoryMax=4G
+TimeoutStartSec=3h

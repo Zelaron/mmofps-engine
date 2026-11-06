@@ -1,6 +1,6 @@
 # Running THE MMOFPS
 
-Use Node.js 22.11 or newer and npm. Authenticate Git with an account that can read the private repository, then:
+Use Node.js 22.11 or newer and npm, then:
 
 ```sh
 git clone https://github.com/Zelaron/mmofps-engine.git
@@ -45,19 +45,43 @@ docker run -d --name mmofps --restart unless-stopped --stop-timeout 20 -p 8080:8
 
 The image builds from source, includes the downloaded fonts, uses the same maximum adaptive population of 192 as the Node and systemd configurations, and runs as the Node image's unprivileged user. The named volume keeps saves across container replacement. Only the gateway port needs publishing. For public hosting, put HTTPS in front of the container and set `SESSION_COOKIE_SECURE=1`; the direct HTTP command above is for local use. `.dockerignore` excludes installed dependencies, bundles, local captures, credentials and saves from the build context. Docker itself is optional; the Node commands above are the directly verified installation path.
 
-## Linux service and HTTPS
+## Linux service with weekly updates
 
-For systemd, put a built checkout at `/opt/mmofps/app`, create a service account named `mmofps`, and give that account ownership of the writable `data/` directory. Adjust the user, checkout path and Node executable in `deploy/mmofps.service` for your host. Install it with:
+This is how mmofps.com runs: a systemd service behind an HTTPS reverse proxy, updated from GitHub every Monday at midnight.
+
+Layout under `/opt/mmofps`:
+
+| Path | Contents |
+| --- | --- |
+| `node/` | Node.js 22 for the game only (the system's Node is left alone) |
+| `releases/<commit>/` | One built and tested checkout per version |
+| `current` | Symlink to the running release |
+| `data/` | Saved characters and worlds, shared by every release |
+| `bin/update.sh` | Installed copy of `deploy/update.sh` |
+| `home/` | Home directory of the `mmofps` service user (npm cache) |
+
+Install once, as root:
 
 ```sh
-sudo cp deploy/mmofps.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now mmofps
+useradd --system --home-dir /opt/mmofps/home --shell /usr/sbin/nologin mmofps
+mkdir -p /opt/mmofps/{node,releases,data,bin,home}
+chown mmofps: /opt/mmofps/{releases,data,home}
+# Unpack a Node.js 22 linux-x64 tarball into /opt/mmofps/node (check its SHA256).
+install -m 755 deploy/update.sh /opt/mmofps/bin/update.sh
+cp deploy/mmofps.service deploy/mmofps-update.service deploy/mmofps-update.timer /etc/systemd/system/
+systemctl daemon-reload
+/opt/mmofps/bin/update.sh            # first build, test and start
+systemctl enable mmofps mmofps-update.timer
+systemctl start mmofps-update.timer
 ```
 
-The service template binds the gateway to loopback for a reverse proxy and sets `SESSION_COOKIE_SECURE=1`. `deploy/Caddyfile` reads its hostname from Caddy's `DOMAIN` environment variable, with `localhost` as a local default. Set your public hostname, configure its DNS and allow the proxy's HTTP/HTTPS ports before using it publicly. Caddy forwards WebSocket and HTTP traffic to the gateway on port 8080. Direct Node and Docker startup bind to all interfaces by default; their `HOST` setting can be changed as shown above.
+`update.sh` clones the newest `main` into a new release folder, then runs `npm ci`, `npm run build` and `npm run check` as the `mmofps` user. Only if all of that passes does it switch `current` and restart the game. If the new version doesn't report healthy within two minutes, it switches back to the previous release. It keeps the last three releases. Its output is in `journalctl -u mmofps-update`.
 
-To update a checkout, stop the service, back up `data/`, use `git pull --ff-only`, run `npm ci` and `npm run build`, then start the service. `npm run check` can validate an update before starting it. There is no automatic updater or deployment workflow enabled by this repository.
+The updater runs from its installed copy, so a push to the repository cannot change it. After changing `deploy/update.sh`, review it and copy it to `/opt/mmofps/bin/` again.
+
+**Resource limits.** `mmofps.service` caps the game at two CPU cores and 3 GB of memory. When the machine is busy, the game gets half the CPU share of an ordinary service. The update runs at the lowest CPU and disk priority. Adjust `BOTS` in the service to trade bots for CPU.
+
+**HTTPS.** The service listens on `127.0.0.1:8080` and sets `SESSION_COOKIE_SECURE=1`. For Apache, add `deploy/apache-mmofps.conf` inside the site's HTTPS `<VirtualHost>`. It forwards WebSockets and keeps `/.well-known/` on disk for certificate renewal. For Caddy, `deploy/Caddyfile` does the same with automatic certificates.
 
 ## Compatibility and saved worlds
 

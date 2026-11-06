@@ -125,6 +125,9 @@
   #center-wrap.hide { opacity: 0; }
   #center-msg { font-size: 44px; font-weight: 800; letter-spacing: 0.06em; text-shadow: 0 4px 18px rgba(0,0,0,0.8); }
   #center-sub { font-size: 17px; color: #b7c2d2; }
+  #center-contribute { margin-top: 10px; font-size: 13px; color: #8fb3d9; text-decoration: none; pointer-events: auto; }
+  #center-contribute:hover { text-decoration: underline; }
+  #center-contribute[hidden] { display: none; }
 
   /* Scoreboard */
   #scoreboard { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -332,6 +335,7 @@
   <div id="center-wrap">
     <div id="center-msg">THE MMOFPS</div>
     <div id="center-sub">Connecting…</div>
+    <a id="center-contribute" href="https://github.com/Zelaron/mmofps-engine" target="_blank" rel="noopener">Open source: help build it at github.com/Zelaron/mmofps-engine</a>
   </div>
 
   <div id="scoreboard">
@@ -344,7 +348,7 @@
 
   <div id="debug"></div>
   <div id="hyperspeed-status" hidden>HYPERSPEED ×10 · INVULNERABLE · NO CAPTURES OR XP · H TO DISABLE</div>
-  <div id="hint">Click to look · WASD move · double-tap dodge · R reload · 1-9 / 0 / wheel weapons · G tactical map · M minimap · Tab scores · [ ] sensitivity · F3 debug</div>
+  <div id="hint">Click to look · WASD move · double-tap dodge · R reload · 1-9 / 0 / wheel weapons · G tactical map · M minimap · Tab scores · [ ] sensitivity · F3 debug · Open source: github.com/Zelaron/mmofps-engine</div>
 </div>
 <script src="/app.js" defer></script>
 </body>
