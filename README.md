@@ -77,7 +77,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how the client, server and worlds fit
 
 ## Contributing
 
-Pull requests are welcome. Whatever is on `main` goes live on [mmofps.com](https://mmofps.com) every Monday at midnight (Stockholm time), once it builds and the tests pass.
+Pull requests are welcome. Whatever is on `main` goes live on [mmofps.com](https://mmofps.com) every Monday at 08:00 UTC, once it builds and the tests pass.
 
 ## Status
 

@@ -47,7 +47,7 @@ The image builds from source, includes the downloaded fonts, uses the same maxim
 
 ## Linux service with weekly updates
 
-This is how mmofps.com runs: a systemd service behind an HTTPS reverse proxy, updated from GitHub every Monday at midnight.
+This is how mmofps.com runs: a systemd service behind an HTTPS reverse proxy, updated from GitHub every Monday at 08:00 UTC.
 
 Layout under `/opt/mmofps`:
 
