@@ -34,7 +34,7 @@ test('DEPLOY NOW goes to the current order\'s staging unless the soldier chose a
   ];
   const order = { baseId: 'base-ironhaven', targetId: 'ironhaven-0', name: 'Capture Ironhaven', x: 4600, z: 0,
     phase: 'attack' as const, squad: 0, staging: { x: 4500, y: 0, z: 0 } };
-  assert.equal(deployNowTarget(options, null, order), 'assault-ironhaven-0', 'the hint "G → DEPLOY NOW" means: to the fight');
+  assert.equal(deployNowTarget(options, null, order), 'assault-ironhaven-0', 'the hint "HOLD Q: DEPLOY NOW" means: to the fight');
   assert.equal(deployNowTarget(options, 'base-home', order), 'base-home', 'an explicit choice wins');
   assert.equal(deployNowTarget(options, 'base-quay', order), 'assault-ironhaven-0', 'an unavailable choice falls back');
   // Without a usable point at the order, the usable point nearest to it, never

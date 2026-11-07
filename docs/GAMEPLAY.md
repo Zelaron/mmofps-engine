@@ -25,6 +25,7 @@ The rules in detail. The [README](../README.md) has the short version.
 | B / FIELD CAMP | Open construction: choose a module, rotate its preview and build ahead of you |
 | Hold F | Extract a nearby glowing xenolite seam (see [Salvage](#salvage-and-field-camps)) |
 | G | Tactical map: territory, battles, your next respawn point, DEPLOY NOW, fighter jet, allegiance |
+| Hold Q | DEPLOY NOW toward your squad's order without opening the map |
 | M | Minimap and compass |
 | O | Star chart and travel to other worlds |
 | Tab | Scores |
@@ -69,8 +70,8 @@ Allies cannot damage each other; the other two factions are enemies. Wildlife, f
 
 ## Getting to the fight
 
-- New players spawn at their faction's most active operation: recent combat, contested controls and assaults first. The squad order on the HUD points there and suggests **G → DEPLOY NOW** when it is more than 700 m away.
-- **DEPLOY NOW** (tactical map): when you haven't been hit for six seconds, move straight to an available reinforcement point instead of walking. A 15-second cooldown follows. Unless you picked a point on the map, it takes you to your order's staging, or to the nearest point that gets you at least 250 m closer. Deploying doesn't change your remembered respawn point.
+- New players spawn at their faction's most active operation: recent combat, contested controls and assaults first. The squad order on the HUD points there and suggests **DEPLOY NOW** when it is more than 700 m away. After a minute that far away, a one-time reminder per life says so too.
+- **DEPLOY NOW** (tactical map): when you haven't been hit for six seconds, move straight to an available reinforcement point instead of walking. A 15-second cooldown follows. Unless you picked a point on the map, it takes you to your order's staging, or to the nearest point that gets you at least 250 m closer. Holding **Q** for half a second does the same without opening the map. Deploying doesn't change your remembered respawn point.
 - **FIGHTER JET** (tactical map): under the same out-of-combat rule, launch in a fighter that is already flying over your nearest base, heading for your order. There is a 45-second cooldown and a limit of four human fighters per faction at once; the button says when it is ready. The same option appears in the respawn list.
 - The tactical map marks every airfield and whether a jet is parked there.
 - A stationary, healthy friendly **jeep** away from friendly bases becomes a mobile rally point when its approach passes the same capture-zone, enemy-distance and recent-combat checks. Drive it forward, park, and let reinforcements spawn beside it.

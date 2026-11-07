@@ -864,7 +864,7 @@ frontier = new FrontierUI(faction => net.send(new ByteWriter(2).u8(Msg.CFaction)
   }
   updateOverlay();
 }, () => orbital?.toggle(true), id => net.send(new ByteWriter(100).u8(Msg.CRespawn).str(id).finish()),
-  id => net.send(new ByteWriter(100).u8(Msg.CDeploy).str(id).finish()));
+  id => net.send(new ByteWriter(100).u8(Msg.CDeploy).str(id).finish()), text => hud.showAnnounce(text));
 orbital = new OrbitalUI(destination => net.send(new ByteWriter(2).u8(Msg.CPlanet).u8(destination).finish()), (open, resume) => {
   if (frontier?.respawning) {
     if (open) orbital?.toggle(false, false);

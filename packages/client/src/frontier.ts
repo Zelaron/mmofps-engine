@@ -11,6 +11,13 @@ import { contactColor, declutterMapLoot, EMPTY_MAP_INTEL, type MapIntel } from '
 import { CREATURE_DEFS } from '@shared/wildlife';
 import { placeMapLabels, shortControlName, type MapLabelCandidate, type MapLabelBox } from './map-labels.js';
 
+/** Holding Q this long deploys now; a stray tap does nothing. */
+const QUICK_DEPLOY_HOLD_MS = 500;
+/** Beyond this distance from the squad's objective, DEPLOY NOW is suggested. */
+const FAR_FROM_ORDER_METRES = 700;
+/** Once per life, after this long that far away, a reminder is shown. */
+const FAR_REMINDER_SECONDS = 60;
+
 /** The atlas is available during play. It never blocks first arrival. */
 export class FrontierUI {
   readonly element = document.createElement('section');
@@ -41,6 +48,9 @@ export class FrontierUI {
   private readonly orderPanel = document.createElement('p');
   private readonly transitHint = document.createElement('p');
   private dead = false;
+  private quickDeployTimer: ReturnType<typeof setTimeout> | null = null;
+  private farSince: number | null = null;
+  private farReminded = false;
   private respawnReceivedAt = 0;
   private deathAt = 0;
   private mapOpenAt = 0;
@@ -55,7 +65,7 @@ export class FrontierUI {
 
   constructor(private readonly enlist: (faction: Faction) => void, private readonly onOpen: (open: boolean, resume: boolean) => void,
     system: () => void = () => {}, private readonly selectSpawn: (id: string) => void = () => {},
-    private readonly deployNow: (id: string) => void = () => {}) {
+    private readonly deployNow: (id: string) => void = () => {}, private readonly announce: (text: string) => void = () => {}) {
     this.bar.id = 'frontier-bar';
     this.bar.innerHTML = `<div class="world-brand"><b>THE MMOFPS<span>01</span></b><span>MERIDIAN SYSTEM</span></div>
       <div class="world-location">Arriving on the frontier</div><button id="atlas-open" aria-label="Open tactical map (G)"><kbd>G</kbd><span>TACTICAL MAP</span> ↗</button>
@@ -132,12 +142,36 @@ export class FrontierUI {
     window.addEventListener('keydown', e => {
       if ((e.target as HTMLElement)?.matches('input,textarea,[contenteditable]')) return;
       if ((e.code === 'KeyG' || (e.code === 'Escape' && this.open)) && !e.repeat) { e.preventDefault(); this.toggle(); }
+      if (e.code === 'KeyQ' && !e.repeat && !this.open && !this.dead && !this.quickDeployTimer && document.pointerLockElement) {
+        this.quickDeployTimer = setTimeout(() => { this.quickDeployTimer = null; this.deployToOrder(); }, QUICK_DEPLOY_HOLD_MS);
+      }
       if (this.open && e.code === 'Tab') {
         const targets = [...this.element.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"]')].filter(target => target.getClientRects().length > 0);
         const index = targets.indexOf(document.activeElement as HTMLElement);
         e.preventDefault(); targets[(index + (e.shiftKey ? targets.length - 1 : 1)) % targets.length]?.focus();
       }
     });
+    window.addEventListener('keyup', e => { if (e.code === 'KeyQ') this.cancelQuickDeploy(); });
+    window.addEventListener('blur', () => this.cancelQuickDeploy());
+  }
+  private cancelQuickDeploy(): void {
+    if (this.quickDeployTimer) clearTimeout(this.quickDeployTimer);
+    this.quickDeployTimer = null;
+  }
+  /** DEPLOY NOW without the map, to the destination its button would use.
+   * The server still requires being out of combat and off cooldown. */
+  deployToOrder(): boolean {
+    const state = this.reinforcements, order = this.state?.order;
+    if (this.dead || !state) return false;
+    const spawns = orderedReinforcements(state.options, this.state?.bases ?? [], this.x, this.z, this.state?.territories);
+    const target = deployNowTarget(spawns, state.selected, order, { x: this.x, z: this.z });
+    if (!target) {
+      this.announce(order ? `No deployment point is closer to your order (${order.name}) right now.` : 'No deployment point is available right now.');
+      return false;
+    }
+    this.farSince = null;
+    this.deployNow(target);
+    return true;
   }
   toggle(value = !this.open, resume = true): void {
     if (this.dead && value && performance.now() < this.mapOpenAt) return;
@@ -191,6 +225,7 @@ export class FrontierUI {
   setAlive(alive: boolean, mapDelayMs = 0): void {
     if (this.dead === !alive) return;
     this.dead = !alive;
+    if (this.dead) { this.cancelQuickDeploy(); this.farSince = null; this.farReminded = false; }
     const sidebar=this.element.querySelector('.atlas-sidebar')!;
     sidebar.prepend(this.element.querySelector(this.dead?'.respawn-panel':'.atlas-intelligence')!);
     if (this.dead) { this.deathAt = performance.now(); this.mapOpenAt = this.deathAt + Math.max(0, mapDelayMs); }
@@ -688,8 +723,16 @@ export class FrontierUI {
       const relative = Math.atan2(Math.sin(angle), Math.cos(angle));
       const arrow = Math.abs(relative) < .5 ? '↑' : Math.abs(relative) > 2.6 ? '↓' : relative > 0 ? '←' : '→';
       // Far from the fight: point out the instant redeploy instead of a long walk.
-      this.orderPanel.textContent = `${arrow} SQUAD ${order.squad + 1} · ${order.phase.toUpperCase()} · ${order.name} · ${distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${Math.round(distance)} m`}${distance > 700 ? ' · G → DEPLOY NOW' : ''}`;
-    }
+      const far = distance > FAR_FROM_ORDER_METRES;
+      this.orderPanel.textContent = `${arrow} SQUAD ${order.squad + 1} · ${order.phase.toUpperCase()} · ${order.name} · ${distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${Math.round(distance)} m`}${far ? ' · HOLD Q: DEPLOY NOW' : ''}`;
+      if (far && !this.dead) {
+        this.farSince ??= seconds;
+        if (!this.farReminded && seconds - this.farSince >= FAR_REMINDER_SECONDS) {
+          this.farReminded = true;
+          this.announce(`Far from your squad? Hold Q to DEPLOY NOW toward ${order.name}, or press G to pick a point.`);
+        }
+      } else this.farSince = null;
+    } else this.farSince = null;
     if (this.open) {
       const pods = this.world?.collectTransportPlan().pods ?? [];
       const nearest = pods.reduce((best, pod) => !best || Math.hypot(pod.x - x, pod.z - z) < Math.hypot(best.x - x, best.z - z) ? pod : best, null as typeof pods[number] | null);

@@ -111,7 +111,7 @@ try {
     assert.equal(server.game.frontier!.war.pushEndsAt, -1, 'a base flip calls the push off');
 
     // DEPLOY NOW from far away: the map's button takes the soldier to the
-    // staging of their current order (what the HUD's "G → DEPLOY NOW" means).
+    // staging of their current order (what the HUD's "HOLD Q: DEPLOY NOW" means).
     const f = server.game.frontier!, firstOrder = f.order(player)!;
     const rear = f.bases.filter(b => b.owner === player.faction)
       .sort((a, b) => Math.hypot(b.x - firstOrder.x, b.z - firstOrder.z) - Math.hypot(a.x - firstOrder.x, a.z - firstOrder.z))[0];
