@@ -1,6 +1,6 @@
 # THE MMOFPS
 
-A browser first-person shooter set in one large, persistent world at war, playable now at **[mmofps.com](https://mmofps.com)**. Three factions (the Terran Accord, the Helix Combine and the Vanguard Pact) fight over cities, harbors and forward bases with infantry, vehicles, boats and fighter jets, while bots fill each world with up to 192 soldiers. Open the page and you're in the fight: no menu, no login, no tutorial. The site runs this repository's `main` branch and redeploys automatically every Monday at 08:00 UTC.
+A browser first-person shooter set in one large, persistent world at war, playable now at **[mmofps.com](https://mmofps.com)**. Three factions (the Terran Accord, the Helix Combine and the Vanguard Pact) fight over cities, harbors and forward bases with infantry, vehicles, boats and fighter jets, while bots fill each world with up to 192 soldiers. Designed to be playable within seconds, with as few clicks as possible. The site runs this repository's `main` branch and redeploys automatically every Monday at 08:00 UTC.
 
 ## Quick start
 
