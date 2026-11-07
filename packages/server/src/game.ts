@@ -60,6 +60,15 @@ import { captureActors, prepareArrival, validateHandoff, type RuntimeHandoff, ty
 const NATIVE_WEAPON_TRACE = World.prototype.trace;
 // These thin weapons have no gameplay effect on a terrain-only impact.
 const DISTANT_MISS_WEAPONS: readonly number[] = [0, 1, 2, 7, 8, 200, 204, 214];
+/** A human's handheld weapon advances one tick per command, as the shooter's
+ * client predicts it, so its shots land on the predicted commands. Every
+ * server tick funds one command. Unspent ticks are kept long enough for a
+ * client to catch up after a stalled frame (it resynchronizes instead beyond
+ * a 30-tick gap), and a stream may run as far ahead as the client's largest
+ * prediction lead. Commands beyond that no longer advance the weapon, so
+ * sending more cannot raise the rate of fire. */
+const HUMAN_WEAPON_CREDIT_TICKS = 36;
+const HUMAN_WEAPON_LEAD_TICKS = 30;
 
 export interface PlayerSink {
   send(bytes: Uint8Array): void;
@@ -121,6 +130,8 @@ export class ServerPlayer {
   readonly recentAttackers = new Map<number, number>();
   inputQueue: InputCmd[] = [];
   lastCmd: InputCmd | null = null;
+  /** Server ticks of handheld weapon time a human has not spent on commands. */
+  weaponTicks = 0;
   lastProcessedSeq = 0;
   lastQueuedSeq = 0;
   hasQueuedSeq = false;
@@ -1650,6 +1661,7 @@ export class Game {
 
   private processPlayer(p: ServerPlayer): void {
     let applied = 0;
+    if (!p.isBot) p.weaponTicks = Math.min(p.weaponTicks + 1, HUMAN_WEAPON_CREDIT_TICKS);
     // All commands in a packet burst share one physical tick. Give each a
     // real interval: repeating the same transport timestamp loses jump
     // velocity and advances an airborne passenger against a frozen ship.
@@ -1658,14 +1670,28 @@ export class Game {
       const cmd = p.inputQueue.shift()!;
       p.lastProcessedSeq = cmd.seq;
       p.lastCmd = cmd;
-      this.applyCmd(p, cmd, TICK_DT / count, this.tick - 1 + (applied + 1) / count);
+      const dt = TICK_DT / count;
+      this.applyCmd(p, cmd, dt, this.tick - 1 + (applied + 1) / count, p.isBot ? dt : this.humanWeaponDt(p));
       applied++;
     }
     // Brief jitter repeats input; a disconnected or hidden tab stops moving/firing.
-    if (applied === 0 && p.lastCmd) this.applyCmd(p, this.frontier && this.tick - p.lastInputAtTick > 15 ? { ...p.lastCmd, buttons: 0 } : p.lastCmd);
+    // Bots deliberately reuse their last thought. A human's repeat only moves:
+    // the late command itself fires, on the command the client predicted.
+    if (applied === 0 && p.lastCmd) this.applyCmd(p, this.frontier && this.tick - p.lastInputAtTick > 15 ? { ...p.lastCmd, buttons: 0 } : p.lastCmd,
+      TICK_DT, this.tick, p.isBot ? TICK_DT : null);
   }
 
-  private applyCmd(p: ServerPlayer, cmd: InputCmd, dt = TICK_DT, movementTick = this.tick): void {
+  /** One tick of handheld weapon time for a human command, or none (edges
+   * such as a weapon switch or reload press still apply) once the command
+   * stream has run too far ahead of the server clock. */
+  private humanWeaponDt(p: ServerPlayer): number {
+    if (p.weaponTicks <= -HUMAN_WEAPON_LEAD_TICKS) return 0;
+    p.weaponTicks--;
+    return TICK_DT;
+  }
+
+  /** `weaponDt` advances the handheld weapon; null leaves it untouched. */
+  private applyCmd(p: ServerPlayer, cmd: InputCmd, dt = TICK_DT, movementTick = this.tick, weaponDt: number | null = dt): void {
     if (cmd.buttons & (BTN.FIRE | BTN.ALTFIRE)) p.spawnProtectedUntil = -1;
     if (p.state.airlift) {
       this.botSimulation.resetMovement(p);
@@ -1805,8 +1831,8 @@ export class Game {
         p.lockTargetId = -1; p.lockVehicleId = -1; p.lockTicks = 0; p.lockState = LOCK_NONE;
       } else {
         this.updateHomingLock(p, cmd);
-        const weaponStep = stepWeaponState(p, cmd.weapon, cmd.buttons, dt);
-        if (weaponStep.firedWeapon >= 0) {
+        const weaponStep = weaponDt === null ? null : stepWeaponState(p, cmd.weapon, cmd.buttons, weaponDt);
+        if (weaponStep && weaponStep.firedWeapon >= 0) {
           this.fire(p, cmd, weaponStep.firedWeapon);
         }
       }

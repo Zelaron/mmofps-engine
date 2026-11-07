@@ -411,14 +411,16 @@ export function encodeSnapshot(w: ByteWriter, snap: Snapshot): void {
   w.u16(clamp(Math.round(you.dodgeCd * 1000), 0, 65535));
   w.u8(clamp(Math.ceil(you.health), 0, 255));
   w.u8(you.weapon);
-  w.u16(clamp(Math.round(you.cooldown * 1000), 0, 65535));
+  // Weapon timers stay exact: prediction replays from them, and a rounded
+  // value can move a shot or reload whose timer ends on a tick boundary.
+  w.f64(you.cooldown);
   for (let i = 0; i < WEAPONS.length; i++) {
     const ammo = you.ammo[i];
     w.u16(clamp(Math.round(ammo?.magazine ?? 0), 0, 65535));
     w.u16(clamp(Math.round(ammo?.reserve ?? 0), 0, 65535));
   }
   w.u8(you.reloadWeapon < 0 ? 255 : clamp(you.reloadWeapon, 0, 254));
-  w.u16(clamp(Math.round(you.reloadCooldown * 1000), 0, 65535));
+  w.f64(you.reloadCooldown);
   const yourVariant = validVehicleVariant(you.vehicle, you.vehicleVariant);
   w.u8(you.vehicle | (yourVariant ? 128 : 0));
   if (yourVariant) w.u8(yourVariant);
@@ -529,13 +531,13 @@ export function decodeSnapshot(r: ByteReader): Snapshot {
   you.dodgeCd = r.u16() / 1000;
   you.health = r.u8();
   you.weapon = r.u8();
-  you.cooldown = r.u16() / 1000;
+  you.cooldown = r.f64();
   for (let i = 0; i < WEAPONS.length; i++) {
     you.ammo.push({ magazine: r.u16(), reserve: r.u16() });
   }
   const reloadWeapon = r.u8();
   you.reloadWeapon = reloadWeapon === 255 ? -1 : reloadWeapon;
-  you.reloadCooldown = r.u16() / 1000;
+  you.reloadCooldown = r.f64();
   const yourType = r.u8();
   you.vehicle = yourType & 127;
   if (yourType & 128) you.vehicleVariant = validVehicleVariant(you.vehicle, r.u8());

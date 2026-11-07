@@ -151,8 +151,11 @@ test('four rapid touch taps each spend one sidearm round through three-command s
       for (let command = 0; command < 3; command++) game.queueInput(player, input.sample(seq++, 0, 0));
       game.step();
       assert.equal(player.ammo[0].magazine, before - tap - 1, 'the authoritative server receives the tap once');
-      for (let tick = 0; tick < 24; tick++) game.step();
+      for (let tick = 0; tick < 4; tick++) game.step();
       assert.equal(player.ammo[0].magazine, before - tap - 1, 'repeating the released last command cannot repeat the shot');
+      // The sidearm cycles on the commands the client keeps sending, as predicted.
+      for (let tick = 0; tick < 20; tick++) { game.queueInput(player, input.sample(seq++, 0, 0)); game.step(); }
+      assert.equal(player.ammo[0].magazine, before - tap - 1, 'later samples after the release cannot repeat the shot');
     }
   });
 });

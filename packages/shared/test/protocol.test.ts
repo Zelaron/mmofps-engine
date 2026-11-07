@@ -60,7 +60,7 @@ test('snapshot roundtrip preserves entities and player state', () => {
       px: f(12.5), py: f(34.25), pz: f(-1000.75),
       vx: f(1.5), vy: f(-9.25), vz: f(0),
       grounded: true, alive: true,
-      dodgeCd: 0.5, health: 87, weapon: 3, cooldown: 0.25,
+      dodgeCd: 0.5, health: 87, weapon: 3, cooldown: 0.105 - 5 / 60,
       ammo: WEAPONS.map((_, i) => ([
         { magazine: 17, reserve: 123 },
         { magazine: 0, reserve: 32 },
@@ -71,7 +71,7 @@ test('snapshot roundtrip preserves entities and player state', () => {
         { magazine: 5, reserve: 2 },
       ][i] ?? { magazine: i + 1, reserve: 12 * i })),
       reloadWeapon: 3,
-      reloadCooldown: 1.234,
+      reloadCooldown: 1.8 - 61 / 60,
       reloadHeld: true,
       vehicle: 2, heading: unquantYaw(quantYaw(0.75)),
       boostFuel: 128 / 255, vehicleHealth: 640, lockState: 1,
@@ -116,15 +116,11 @@ test('snapshot roundtrip preserves entities and player state', () => {
 
   assert.equal(out.tick, snap.tick);
   assert.equal(out.lastSeq, snap.lastSeq);
-  assert.deepEqual(
-    { ...out.you, dodgeCd: 0, cooldown: 0, reloadCooldown: 0 },
-    { ...snap.you, dodgeCd: 0, cooldown: 0, reloadCooldown: 0 },
-  );
+  // Weapon timers arrive exactly so prediction replays shots on the same tick.
+  assert.deepEqual({ ...out.you, dodgeCd: 0 }, { ...snap.you, dodgeCd: 0 });
   assert.ok(Math.abs(out.you.dodgeCd - snap.you.dodgeCd) < 0.002);
   assert.ok(Math.abs(out.you.boostFuel - snap.you.boostFuel) < 0.01);
   assert.deepEqual(out.vehicles, snap.vehicles);
-  assert.ok(Math.abs(out.you.cooldown - snap.you.cooldown) < 0.002);
-  assert.ok(Math.abs(out.you.reloadCooldown - snap.you.reloadCooldown) < 0.002);
 
   snap.you.jumpAscent = true;
   const jumping = new ByteWriter(); encodeSnapshot(jumping, snap);
