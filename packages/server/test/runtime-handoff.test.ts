@@ -142,6 +142,19 @@ test('checked wire order remains stable while installed optional movement fields
   assert.equal(JSON.stringify(wire), serialized, 'installation cannot reorder or mutate the receipt payload');
 });
 
+test('handoffs staged before human weapon time was tracked arrive without banked ticks', () => {
+  const source = game(), p = source.addPlayer('Staged', null, false, 100_000);
+  p.weaponTicks = 12;
+  const wire = captureActors(source, [p.id]).record;
+  assert.equal(wire.players[0].weaponTicks, 12, 'current payloads carry the weapon time');
+  delete (wire.players[0] as Partial<typeof wire.players[0]>).weaponTicks;
+  const wrong = copy(wire) as unknown as { players: Record<string, unknown>[] };
+  wrong.players[0].weaponTicks = 'wrong type';
+  assert.throws(() => checkedHandoff(wrong as unknown as RuntimeHandoff), /Incomplete handoff player/);
+  const destination = game(1), [arrived] = destination.acceptHandoff(wire, sinks(wire));
+  assert.equal(arrived.weaponTicks, 0);
+});
+
 test('legacy handoffs may omit optional movement fields but still require all original field types', () => {
   const source = game(), p = source.addPlayer('Legacy', null, false, 100_000);
   const wire = captureActors(source, [p.id]).record;

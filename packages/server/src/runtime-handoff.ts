@@ -97,6 +97,8 @@ function validateRecord(record: RuntimeHandoff): void {
   uniqueIds(record.projectiles, 'projectile');
   const byPlayer = new Map(record.players.map(p => [p.id, p])), byVehicle = new Map(record.vehicles.map(v => [v.id, v]));
   for (const p of record.players) {
+    // Payloads staged before human weapon time was tracked carry no banked ticks.
+    if ((p as Partial<HandoffPlayer>).weaponTicks === undefined) p.weaponTicks = 0;
     if (Object.keys(p).some(k => !playerFields!.has(k)) || typeof p.name !== 'string' || typeof p.isBot !== 'boolean' ||
         !p.state || !Array.isArray(p.ammo) || !Array.isArray(p.inputQueue) || p.inputQueue.length > 120 ||
         !Array.isArray(p.discoveries) || !Array.isArray(p.fullPickupContacts)) throw new Error('Invalid handoff player');
