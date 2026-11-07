@@ -42,9 +42,13 @@ export interface NetHandlers {
   onLeave(id: number): void;
   onScores(rows: ScoreRow[]): void;
   onMessage(text: string): void;
+  /** The server speaks another protocol: this client build is out of date. */
+  onOutdated?(serverVersion: number): void;
   onClose(code: number, reason: string): void;
 }
 
+/** Closing a socket from a script is limited to 1000 and 3000-4999. */
+export const CLOSE_OUTDATED = 4002;
 const MS_PER_TICK = 1000 / TICK_RATE;
 
 export class NetClient {
@@ -86,6 +90,8 @@ export class NetClient {
       this.connected = false;
       if (this.pingTimer) clearInterval(this.pingTimer);
       this.pingTimer = null;
+      const refused = /^protocol v(\d+) required$/.exec(event.reason ?? '');
+      if (refused) this.handlers.onOutdated?.(Number(refused[1]));
       this.handlers.onClose(event.code, event.reason);
     };
     ws.onerror = () => { if (this.ws === ws) ws.close(); };
@@ -158,7 +164,8 @@ export class NetClient {
             `Protocol mismatch: server v${version}, client v${PROTOCOL_VERSION}. ` +
             'Refresh after updating the game.',
           );
-          this.ws?.close(1002, 'Protocol version mismatch');
+          h.onOutdated?.(version);
+          this.ws?.close(CLOSE_OUTDATED, 'Client update required');
           break;
         }
         r.off--;

@@ -10,6 +10,7 @@ import { World, PLAYER, TICK_RATE, clamp, createFullAmmoLoadout,
 import { Prediction } from '../src/prediction.js';
 import { SceneMgr, createSky } from '../src/render/scene.js';
 import { ShaderPreparation } from '../src/render/shader-preparation.js';
+import { CLOSE_OUTDATED } from '../src/net.js';
 
 const candidate = readFileSync('packages/client/src/main.ts', 'utf8').replaceAll('\r\n', '\n');
 // Keep the historical failing baseline local to this regression. The current
@@ -66,7 +67,8 @@ function sourceHarness(source: string): string {
   return `
     let world = new World(1337), pred = new Prediction(world);
     let predTick = -1, tickAccum = 0, seq = 1, fps = 60, lastFrame = 0, lastSceneDraw = -Infinity;
-    let disconnected = false, reconnectStopped = false, reconnects = 0;
+    let disconnected = false, reconnectStopped = false, reconnects = 0, clientOutdated = false;
+    const CLOSE_OUTDATED = ${CLOSE_OUTDATED};
     let nearbyCreatures = [], latestFrontierState = null, resourceState = null, scores = [];
     const names = new Map(), inputs = [], pendingVehicleShots = { clear() {} };
     const chat = undefined, resourcesUI = undefined, airlift = undefined, camps = undefined;

@@ -3,7 +3,7 @@ import type { OutpostAction } from '@shared/outposts';
 import type { WebSocket, RawData } from 'ws';
 import {
   Msg, ByteReader, decodeInput, encodeWelcome, encodePong, NET,
-  PROTOCOL_VERSION, decodeClientChat, encodeServerMessage,
+  PROTOCOL_VERSION, decodeClientChat, encodeServerMessage, encodeVersionNotice,
 } from '@shared/index';
 import type { Game, ServerPlayer, PlayerSink } from './game.js';
 import { ChatRoom, chatRoomFor } from './chat.js';
@@ -69,6 +69,8 @@ export class PlayerConn implements PlayerSink {
         if (type !== Msg.CHello) { this.ws.close(1002, 'hello first'); return; }
         const version = r.u8();
         if (version !== PROTOCOL_VERSION) {
+          // An open tab from before an update learns why and reloads instead of retrying.
+          this.ws.send(encodeVersionNotice());
           this.ws.close(1002, `protocol v${PROTOCOL_VERSION} required`);
           return;
         }

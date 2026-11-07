@@ -67,7 +67,9 @@ export async function startGateway(coordinator: Coordinator, options: GatewayOpt
       });
       downstream.on('pong', () => { link.alive = true; });
       downstream.on('close', () => finish()); downstream.on('error', () => finish());
-      upstream.on('close', (code, reason) => finish(code === 4001 ? 4001 : 1013, reason.toString().slice(0, 100) || 'World connection interrupted'));
+      // A takeover by another tab and a protocol refusal are final for this
+      // client; any other world close is a transient interruption to retry.
+      upstream.on('close', (code, reason) => finish(code === 4001 || code === 1002 ? code : 1013, reason.toString().slice(0, 100) || 'World connection interrupted'));
       upstream.on('error', () => finish());
     });
   });

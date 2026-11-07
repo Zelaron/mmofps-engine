@@ -366,6 +366,12 @@ function validateWelcomePads(pads: readonly TeleporterPad[]): void {
   }
 }
 
+/** Sent to a client built for another protocol before refusing it. Every
+ * client version reads a welcome's version byte before anything else. */
+export function encodeVersionNotice(): Uint8Array {
+  return Uint8Array.of(Msg.SWelcome, PROTOCOL_VERSION);
+}
+
 export function encodeWelcome(yourId: number, seed: number, tick: number, teleporters: readonly TeleporterPad[] = []): Uint8Array {
   validateWelcomePads(teleporters);
   const w = new ByteWriter(24 + teleporters.length * 27).u8(Msg.SWelcome).u8(PROTOCOL_VERSION)

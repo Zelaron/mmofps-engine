@@ -28,7 +28,7 @@ import {
   type Snapshot, type WelcomeMsg, type FireEvent, type ScoreRow,
   type TeleportEvent,
 } from '@shared/index';
-import { NetClient } from './net.js';
+import { CLOSE_OUTDATED, NetClient } from './net.js';
 import { InputTracker } from './input.js';
 import { ChatPanel } from './chat.js';
 import { AirliftMap } from './airlift.js';
@@ -291,6 +291,8 @@ function beginRedeploy(): void {
 let reconnectAttempt = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectStopped = false;
+/** The server runs another protocol; `updateReloading` once a reload is under way. */
+let clientOutdated = false, updateReloading = false;
 let transferring = false;
 let fps = 60;
 let statTimer = 0;
@@ -305,6 +307,23 @@ function presentWeapon(weapon: number, playSound = true): void {
   if (playSound) audio.weaponSwitch();
 }
 
+/** Reload once to fetch the client matching the server. If that already
+ * happened in the last minute (a stale cache or a rollback), ask instead of
+ * reloading in a loop. Blocked storage counts as a recent reload. */
+function reloadForUpdate(): void {
+  clientOutdated = true; reconnectStopped = true;
+  if (!updateReloading) {
+    const key = 'mmofps-update-reload';
+    let last = Date.now();
+    try { last = Number(sessionStorage.getItem(key)) || 0; } catch { /* storage blocked */ }
+    if (Date.now() - last >= 60_000) {
+      try { sessionStorage.setItem(key, String(Date.now())); updateReloading = true; } catch { /* storage blocked */ }
+    }
+    if (updateReloading) location.reload();
+  }
+  updateOverlay();
+}
+
 // -- overlay state machine --------------------------------------------------
 const contributeLink = document.getElementById('center-contribute');
 function updateOverlay(): void {
@@ -313,6 +332,11 @@ function updateOverlay(): void {
   overlayWorldPresented = sceneMgr.renderStats.worldPresented;
   // The open-source note shows while the game loads or reconnects, not on deaths.
   if (contributeLink) contributeLink.hidden = !(disconnected || transferring || !pred || !pred.initialized || !overlayWorldPresented);
+  if (clientOutdated) {
+    hud.showCenter(updateReloading ? 'UPDATING' : 'NEW VERSION',
+      updateReloading ? 'Loading the latest version of the game…' : 'Refresh the page to load the latest version.');
+    return;
+  }
   if (disconnected) {
     hud.showCenter(reconnectStopped ? 'SESSION CLOSED' : 'RECONNECTING', reconnectStopped ? 'Refresh to rejoin from this tab.' : 'Restoring your place in the world…');
     return;
@@ -774,6 +798,7 @@ const net = new NetClient({
     hud.showAnnounce(text);
   },
   onChat(message): void { chat?.add(message); },
+  onOutdated(): void { reloadForUpdate(); },
 
   onClose(code): void {
     nearbyCreatures = [];
@@ -787,7 +812,7 @@ const net = new NetClient({
     audio.stopLift();
     disconnected = true;
     if (camps) camps.receive({ enabled: false, sites: camps.state.sites });
-    reconnectStopped = [4001, 1002, 1008].includes(code);
+    reconnectStopped = clientOutdated || [4001, 1002, 1008, CLOSE_OUTDATED].includes(code);
     pickupModels.clear();
     updateOverlay();
     if (!reconnectStopped) scheduleReconnect();

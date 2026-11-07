@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { NetClient, type NetHandlers } from '../src/net.js';
+import { CLOSE_OUTDATED, NetClient, type NetHandlers } from '../src/net.js';
 import { ByteWriter, createFullAmmoLoadout, encodeSnapshot, encodePong, encodeWelcome, encodeLeave,
   ENT_PROJECTILE, Msg, NET, PROTOCOL_VERSION, TANK_CANNON, TICK_RATE,
   type Snapshot, type WelcomeMsg, type TeleporterPad } from '@shared/index';
@@ -26,10 +26,11 @@ test('initial admission and reconnect send no gameplay packets before the world 
   Object.defineProperty(globalThis, 'WebSocket', { value: Socket, configurable: true });
   Object.defineProperty(globalThis, 'location', { value: { protocol: 'http:', host: '127.0.0.1:8081' }, configurable: true });
   const closes: number[] = [], welcomes: number[] = [], leaves: number[] = [];
-  const layouts: WelcomeMsg[] = [], messages: string[] = [];
+  const layouts: WelcomeMsg[] = [], messages: string[] = [], outdated: number[] = [];
   const ignore = () => {};
   const handlers: NetHandlers = {
     onWelcome(message) { welcomes.push(message.yourId); layouts.push(message); }, onClose(code) { closes.push(code); },
+    onOutdated(version) { outdated.push(version); },
     onSnapshot: ignore, onFire: ignore, onExplosion: ignore, onDeath: ignore, onSpawn: ignore,
     onHit: ignore, onPickupResult: ignore, onTeleport: ignore, onJoin: ignore, onLeave: id => leaves.push(id),
     onScores: ignore, onMessage: text => messages.push(text),
@@ -62,9 +63,16 @@ test('initial admission and reconnect send no gameplay packets before the world 
     assert.deepEqual(leaves, [0xfffffffe, 0xfffffffe]);
     client.connect('Explorer'); const incompatible = Socket.instances.at(-1)!; incompatible.open();
     incompatible.onmessage({ data: Uint8Array.of(Msg.SWelcome, PROTOCOL_VERSION - 1).buffer });
-    assert.equal(client.connected, false); assert.equal(closes.at(-1), 1002);
+    assert.equal(client.connected, false);
+    assert.equal(closes.at(-1), CLOSE_OUTDATED, 'a script may only close with 1000 or 3000-4999');
+    assert.ok(CLOSE_OUTDATED >= 3000 && CLOSE_OUTDATED <= 4999);
     assert.match(messages.at(-1)!, /Protocol mismatch/);
+    assert.deepEqual(outdated, [PROTOCOL_VERSION - 1], 'an outdated build is reported so the page can reload');
     assert.equal(layouts.length, 2, 'version mismatch is handled before reading a changed packet body');
+    // A refusal whose version notice never arrived is still recognised by its reason.
+    client.connect('Explorer'); const refused = Socket.instances.at(-1)!; refused.open();
+    refused.close(1002, `protocol v${PROTOCOL_VERSION + 1} required`);
+    assert.deepEqual(outdated, [PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1]); assert.equal(closes.at(-1), 1002);
   } finally {
     for (const socket of Socket.instances) if (socket.readyState !== 3) socket.close();
     if (oldSocket) Object.defineProperty(globalThis, 'WebSocket', oldSocket); else Reflect.deleteProperty(globalThis, 'WebSocket');
