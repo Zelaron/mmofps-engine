@@ -16,7 +16,7 @@ const output = arg('output', 'war-dynamics');
 // --observer=hot to follow the hottest battle every 30 s) so nearby bots
 // run their full-detail paths, as they do around a real player.
 const observerArg = arg('observer', '');
-if (!/^[a-z0-9-]+$/i.test(output) || !(seconds >= 10 && seconds <= 3600) || !(population >= 3 && population <= 384)) throw new Error('Invalid arguments');
+if (!/^[a-z0-9-]+$/i.test(output) || !(seconds >= 10 && seconds <= 7200) || !(population >= 3 && population <= 384)) throw new Error('Invalid arguments');
 
 const started = performance.now();
 // The observer stand-in relies on playtest hyperspeed's invulnerability.

@@ -122,12 +122,15 @@ export const CAPTURE_MAX_RATE = 3;
 export const WAR_REDEPLOY_WEAPON = 253;
 /** A creature's attack: a death, but not a suicide (no frag penalty). */
 export const WILDLIFE_WEAPON = 251;
-export const WAR_MINUTES = 45;
+/** Long enough to explore caves, find superweapons and still fight for bases. */
+export const WAR_MINUTES = 120;
 export const WAR_VICTORY_SHARE = 2 / 3;
 /** A war in which no base has changed hands for this long enters a final
  * push. A frozen front then ends in a climax and a fresh war, instead of
- * grinding on to the time limit (a 45-minute Meridian war froze from minute 7). */
-export const STALEMATE_SECONDS = 360;
+ * grinding on to the time limit (an early Meridian war froze from minute 7).
+ * Base flips are rare on a map this size: a 6-minute window ended every
+ * simulated war after 15-30 minutes. */
+export const STALEMATE_SECONDS = 900;
 /** Length of the final push: then the time-limit rule decides the war,
  * unless a base changes hands first. */
 export const FINAL_PUSH_SECONDS = 180;

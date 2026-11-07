@@ -8,8 +8,8 @@ const SHORT_NAMES = ['', 'Accord', 'Helix', 'Vanguard'] as const;
 const RIBBON_MS = 2600;
 
 function clock(seconds: number): string {
-  const s = Math.max(0, Math.floor(seconds)), m = Math.floor(s / 60);
-  return `${m}:${String(s % 60).padStart(2, '0')}`;
+  const s = Math.max(0, Math.floor(seconds)), m = Math.floor(s / 60), ss = String(s % 60).padStart(2, '0');
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
 }
 
 function hours(seconds: number): string {

@@ -41,7 +41,7 @@ Characters are tied to an anonymous browser cookie and saved in `data/`. Hosting
 
 Phones get on-screen controls automatically.
 
-**The war.** Each faction starts with a home city, a harbor and a forward base; the rest of the map is up for grabs. Every base has three capture points, and holding two of them makes it yours. Stand in a capture ring to take it, and outnumber the enemy to keep the capture going. A faction wins by holding 8 of the 12 bases, or the most bases when 45 minutes run out. If no base changes hands for 6 minutes, a 3-minute final push decides it sooner. Then a new war starts with the home regions rotated.
+**The war.** Each faction starts with a home city, a harbor and a forward base; the rest of the map is up for grabs. Every base has three capture points, and holding two of them makes it yours. Stand in a capture ring to take it, and outnumber the enemy to keep the capture going. A faction wins by holding 8 of the 12 bases, or the most bases when 2 hours run out. If no base changes hands for 15 minutes, a 3-minute final push decides it sooner. Then a new war starts with the home regions rotated.
 
 **Getting to the fight.** You spawn at your faction's busiest operation, and the order panel shows where to go. Out of combat, **G → DEPLOY NOW** puts you at the front, and **G → FIGHTER JET** launches you in a jet that's already flying.
 
@@ -69,7 +69,7 @@ The full rules are in the [gameplay reference](docs/GAMEPLAY.md).
 | Command | Purpose |
 |---|---|
 | `npm run check` | Typecheck and run the unit tests |
-| `npm run test:war -- --seconds=2700` | Simulate a 45-minute war headlessly and report how much the front moves |
+| `npm run test:war -- --seconds=7200` | Simulate a 2-hour war headlessly and report how much the front moves |
 | `npm run test:play:browser` | A scripted player session in a real browser |
 | `npm run test:<name>:browser` | Browser checks; run `npx playwright install chromium` first |
 

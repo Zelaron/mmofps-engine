@@ -41,8 +41,8 @@ Allies cannot damage each other; the other two factions are enemies. Wildlife, f
 ## Wars
 
 - **Homes and fronts.** Each faction starts with a home city, the harbor behind it and a forward base on a road facing the middle of the three homes. On Meridian: the Accord at Meridian city and Southwatch, the Helix Combine at Vesper Reach and Northstar, and the Vanguard Pact at Aurelia Bastion and Estuary. Ironhaven, Westgate Harbor and Halcyon Quay start neutral. Bases are linked into a front-line lattice: squads attack bases next to their own territory (or where they already hold a foothold), and mass two squads on one control before opening another.
-- **Winning.** Holding **8 of the 12 bases** wins outright. Otherwise, after **45 minutes**, the faction holding the most bases (then the most controls) wins, with sudden death on an exact tie.
-- **Final push.** If no base changes hands for **6 minutes**, a **3-minute final push** starts. The war strip shows the countdown and everyone is told. Taking a base calls it off ("DEADLOCK BROKEN"); otherwise the faction holding the most territory wins when it ends. The clock counts from the war's last base flip, or from minute 5 if there has been none.
+- **Winning.** Holding **8 of the 12 bases** wins outright. Otherwise, after **2 hours**, the faction holding the most bases (then the most controls) wins, with sudden death on an exact tie.
+- **Final push.** If no base changes hands for **15 minutes**, a **3-minute final push** starts. The war strip shows the countdown and everyone is told. Taking a base calls it off ("DEADLOCK BROKEN"); otherwise the faction holding the most territory wins when it ends. The clock counts from the war's last base flip, or from minute 5 if there has been none.
 - **The next war.** Everyone gets a victory or service bonus, a 30-second intermission follows, and the next war begins with the home regions rotated between the factions. Everyone redeploys (this is not a death). War number and wins persist across restarts.
 - The war strip at the top of the screen shows the clock, the bases each faction holds and the number needed to win.
 
