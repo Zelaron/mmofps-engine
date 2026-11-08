@@ -272,6 +272,8 @@ const JET_RUNWAY_START_AHEAD = 10;
 /** A runway start needs no enemy within this distance. */
 const JET_RUNWAY_SAFE_RADIUS = 600;
 const JET_ABANDON_TICKS = 40 * TICK_RATE;
+/** A destroyed hull waits this long for a parked hull to clear its pad. */
+const VEHICLE_PAD_WAIT_TICKS = 30 * TICK_RATE;
 /** Off-screen travel: a bot this far from its objective, unseen by any human
  * and out of combat, redeploys at its forward staging instead of marching. */
 const BOT_REDEPLOY_DISTANCE = 1200;
@@ -830,7 +832,7 @@ export class Game {
       reason: cooling ? `Fighter ready in ${Math.ceil((player.jetReadyAt - this.tick) / TICK_RATE)} s.`
         : full ? 'All faction fighter slots are flying. Try again shortly.'
         : !best.safe ? 'Enemies are near every runway. Try again shortly.'
-        : `Take off from the runway near ${best.base.name}, then fly to ${order ? order.name.replace(/^(Capture|Defend) /, '') : 'the front'}.` }];
+        : `${best.base.owner === player.faction ? 'Take off from the runway near' : `Your faction holds no runway. Take off from ${FACTIONS[best.base.owner].name} ground near`} ${best.base.name}, then fly to ${order ? order.name.replace(/^(Capture|Defend) /, '') : 'the front'}.` }];
   }
 
   /** Seat a deploying soldier in a fresh fighter, at rest on its runway. */
@@ -1352,6 +1354,13 @@ export class Game {
           const dz = q.state.pz - candidate.z;
           const clearance = v.campaignHome ? vehicleDefinition(v.type, v.variant)!.radius + 1 : 50;
           if (q.state.alive && dx * dx + dz * dz < clearance * clearance) { blocked = true; break; }
+        }
+        // Hulls are solid to each other: wait for a parked hull to leave the
+        // pad, but not forever, since an abandoned one may never move.
+        if (!blocked && this.tick - v.respawnAtTick < VEHICLE_PAD_WAIT_TICKS) for (const other of this.vehicles.values()) {
+          if (other === v || other.respawnAtTick >= 0 || !(other.health > 0)) continue;
+          const room = vehicleDefinition(v.type, v.variant)!.radius + vehicleDefinition(other.type, other.variant)!.radius + 1.5;
+          if (Math.hypot(other.x - candidate.x, other.z - candidate.z) < room) { blocked = true; break; }
         }
         if (!blocked) { site = candidate; break; }
       }

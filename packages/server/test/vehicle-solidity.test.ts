@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BTN, ByteReader, VEHICLE, createMoveState, decodeSnapshot, vehicleDefinition,
+import { BTN, ByteReader, TICK_RATE, VEHICLE, createMoveState, decodeSnapshot, vehicleDefinition,
   capsuleClearance, type InputCmd } from '@shared/index';
 import { withVehicleColliders } from '@shared/vehicle-collision';
 import { Game, ServerPlayer, type ServerVehicle } from '../src/game.js';
@@ -95,6 +95,21 @@ test('a driven jeep stops at a parked tank in authority and prediction alike', (
   assert.ok(Math.abs(prediction.state.pz - f.player.state.pz) < .5, `prediction agrees: ${prediction.state.pz} vs ${f.player.state.pz}`);
   assert.ok(f.hull.health < vehicleDefinition(VEHICLE.JEEP)!.maxHealth, 'ramming at speed is a crash for the rammer');
   assert.equal(tank.x, 0, 'the parked hull is an obstacle, not pushed');
+});
+
+test('a destroyed hull waits for a parked hull to clear its pad, but not forever', () => {
+  const f = fixture(), internal = f.game as unknown as { vehicleSites: unknown[]; updateVehicles(): void };
+  internal.vehicleSites.push({ type: VEHICLE.JEEP, x: 0, z: 0, heading: 0 });
+  f.hull.campaignHome = { x: 0, y: 0, z: 0, heading: 0 };
+  const parked: ServerVehicle = { ...f.hull, id: 10007, x: 1.5, campaignHome: undefined };
+  f.game.vehicles.set(parked.id, parked);
+  f.hull.health = 0; f.hull.respawnAtTick = f.game.tick + 1;
+  const advance = (seconds: number) => { for (let i = 0; i < seconds * TICK_RATE; i++) { f.game.tick++; internal.updateVehicles(); } };
+  advance(25);
+  assert.ok(f.hull.respawnAtTick >= 0, 'the replacement waits while another hull sits on its pad');
+  advance(10);
+  assert.equal(f.hull.respawnAtTick, -1, 'an abandoned hull cannot hold the pad forever');
+  assert.equal(f.hull.health, vehicleDefinition(VEHICLE.JEEP)!.maxHealth);
 });
 
 test('destroyed and removed hulls disappear from authority and client collision immediately', () => {
