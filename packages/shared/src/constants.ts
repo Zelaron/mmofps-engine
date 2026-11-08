@@ -1,7 +1,7 @@
 // Central tunables for the whole game. The server is the authority for all of
 // them; the client mirrors them through the shared simulation code.
 
-export const PROTOCOL_VERSION = 34;
+export const PROTOCOL_VERSION = 35;
 
 export const TICK_RATE = 60;
 export const TICK_DT = 1 / TICK_RATE;
