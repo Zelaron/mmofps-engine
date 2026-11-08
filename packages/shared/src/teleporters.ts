@@ -67,6 +67,11 @@ export function surfaceSpot(world: World, x: number, z: number): number | null {
   // groundY returns 0 as a miss sentinel; also reject bowls/overhangs where
   // the first surface from the sky is far from the column height.
   if (Math.abs(gy - col.h) > 1.2) return null;
+  // Dry land only: the seabed and lake beds pass the height and flatness
+  // checks, but a pad or weapon drop under water is useless.
+  for (const [dx, dz] of [[0, 0], [1.6, 0], [-1.6, 0], [0, 1.6], [0, -1.6]] as const) {
+    if (world.liquidAt(x + dx, gy + .05, z + dz)) return null;
+  }
   // Standing clearance for the arriving player.
   if (world.sdf(x, gy + 1.0, z) < 0.4 || world.sdf(x, gy + 1.9, z) < 0.3) return null;
   return gy;

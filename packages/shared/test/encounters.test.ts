@@ -70,6 +70,7 @@ function layeredWorld(): { world: World; samples: { sites: number; columns: numb
     collectCaveSites() { samples.sites++; return []; },
     column() { samples.columns++; return { h: 24, entr: 0, volc: 0, lavaY: -1000 }; },
     groundY() { return 24; },
+    liquidAt() { return undefined; },
     roofedAbove(_x: number, y: number, _z: number) { return y < 24; },
     sdf,
     trace(x: number, y: number, z: number, dx: number, dy: number, dz: number, distance: number) {

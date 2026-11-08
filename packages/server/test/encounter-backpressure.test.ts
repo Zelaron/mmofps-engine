@@ -57,7 +57,7 @@ test('backlog allows one encounter advance every six ticks, leaves vehicle work 
 function layeredWorld(): World {
   return {
     seed: 1337, collectCaveSites: () => [],
-    column: () => ({ h: 24, entr: 0, volc: 0, lavaY: -1000 }), groundY: () => 24,
+    column: () => ({ h: 24, entr: 0, volc: 0, lavaY: -1000 }), groundY: () => 24, liquidAt: () => undefined,
     roofedAbove: (_x: number, y: number) => y < 24,
     sdf: (_x: number, y: number) => Math.max(y - 24, Math.min(y + 23, -16 - y), Math.min(y + 37, -30 - y)),
     trace(x: number, y: number, z: number, dx: number, dy: number, dz: number, distance: number) {
