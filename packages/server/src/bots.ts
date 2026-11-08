@@ -268,6 +268,22 @@ const BOT_NAMES = [
   'Roger Boar', 'Russell Dough', 'Orlando Broom',
 ];
 
+/** Successive spiral points never line up: pi * (3 - sqrt 5) radians apart. */
+const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+/** Distinct objective spots per faction before the layout repeats. */
+const SPOT_COUNT = 64;
+
+/** A soldier's own spot at an objective or staging point: a sunflower layout
+ * over the ring per faction, rotated a third of a turn between factions.
+ * Spots used to repeat, so soldiers stood inside each other while capturing. */
+export function campaignSpot(player:{id:number;botRosterIndex?:number},destination:{x:number;y?:number;z:number},radius=32):{x:number;y?:number;z:number} {
+  const slot=Math.max(0,botRoleId(player)-1),member=Math.floor(slot/3);
+  const angle=member*GOLDEN_ANGLE+(slot%3)*TAU/3;
+  const spread=Math.min(12,radius*.4)*Math.sqrt(.09+.91*((member%SPOT_COUNT)+.5)/SPOT_COUNT);
+  return {x:destination.x+Math.sin(angle)*spread,y:destination.y,z:destination.z+Math.cos(angle)*spread};
+}
+/** Settled soldiers closer than this to someone on foot step apart (metres). */
+const PERSONAL_SPACE = .9;
 const SIDEARM_WEAPON = 0;
 const PULSE_RIFLE_WEAPON = 1;
 const SCATTERGUN_WEAPON = 2;
@@ -453,6 +469,8 @@ export class Bot {
   private campaignState: { order?: CampaignOrder; objective: Territory | null } | undefined;
   private readonly companionOrders = new Map<number, CampaignOrder | undefined>();
   private lastThought: InputCmd | undefined;
+  /** A replacement pad this thought's soldier waits beside and must not step onto. */
+  private padKeepOut: {x:number;z:number;radius:number} | undefined;
   private thoughtTick = -1;
   private crewSpotting: CrewBoard | undefined;
   private crewRevision = -1;
@@ -546,7 +564,8 @@ export class Bot {
     if (!crewWake && !perceptionWake && !walkingWake && this.lastThought && this.thoughtTick !== game.tick && this.wasAlive === this.player.state.alive &&
       !(this.lastThought.buttons & thoughtEdges) && game.shouldThinkBot?.(this.player) === false) return this.lastThought;
     this.thoughtTick = game.tick;
-    const command=this.thinkFresh(game);
+    this.padKeepOut=undefined;
+    const command=this.keepApart(game,this.thinkFresh(game));
     if(this.perception){
       const enemy=game.players.get(this.enemyId);
       this.perception.target=this.enemyId;this.perception.targetHull=enemy?.vehicleId??-1;
@@ -639,7 +658,13 @@ export class Bot {
       if(replacement) {
         this.vehicleGoal=-1;this.wasAlive=true;
         this.stuckCheckAt=tick+90;this.stuckX=s.px;this.stuckZ=s.pz;
-        return {seq:++this.seq,buttons:0,weapon:this.weapon,yaw,pitch:0,renderTick:Math.max(0,tick-NET.INTERP_TICKS),renderFrac:0};
+        // Wait beside the pad, never on it: a hull can't respawn onto a soldier.
+        const home=replacement.campaignHome!,clear=vehicleDefinition(replacement.type,replacement.variant)!.radius+2.5;
+        this.padKeepOut={x:home.x,z:home.z,radius:clear};
+        const dx=s.px-home.x,dz=s.pz-home.z,d=Math.hypot(dx,dz),ox=d>1e-3?dx/d:1,oz=d>1e-3?dz/d:0;
+        const leave=d<clear&&this.safeStep(game,ox,oz);
+        return {seq:++this.seq,buttons:leave?BTN.FORWARD:0,weapon:this.weapon,yaw:leave?Math.atan2(-ox,-oz):yaw,pitch:0,
+          renderTick:Math.max(0,tick-NET.INTERP_TICKS),renderFrac:0};
       }
       const boardingDuty=!!game.frontier && dutyVehicle!==0 && [...game.vehicles.values()].some(v=>v.type===dutyVehicle &&
         v.respawnAtTick<0 && v.campaignFaction===p.faction && Math.hypot(v.x-s.px,v.z-s.pz)<120 &&
@@ -914,10 +939,11 @@ export class Bot {
           }
         }
 
-        // Stuck? Hop and consider a new target.
+        // Stuck? Hop and consider a new target. A baseline from before a long
+        // pause in thinking (a wait or a skipped stretch) can't prove that.
         if (tick >= this.stuckCheckAt) {
           const moved = Math.hypot(s.px - this.stuckX, s.pz - this.stuckZ);
-          if (moved < 0.6 && s.grounded && (buttons&BTN.FORWARD)!==0 && (!this.walkSafety.lease||this.walkSafety.lease.mode==='wall')) {
+          if (tick - this.stuckCheckAt < 60 && moved < 0.6 && s.grounded && (buttons&BTN.FORWARD)!==0 && (!this.walkSafety.lease||this.walkSafety.lease.mode==='wall')) {
             buttons |= BTN.JUMP;
             if(this.pickupId>=0){this.failedPickupId=this.pickupId;this.failedPickupUntil=tick+600;this.pickupId=-1;}
             if(this.vehicleGoal>=0){this.failedVehicleId=this.vehicleGoal;this.failedVehicleUntil=tick+600;this.vehicleGoal=-1;}
@@ -1113,8 +1139,7 @@ export class Bot {
     const p=this.player,s=p.state,tick=game.tick;
     const order=this.campaign(game).order;
     const destination=order?.phase==='assemble'?order.staging:objective;
-    const angle=(Math.floor(Math.max(0,botRoleId(p)-1)/3)%6)*TAU/6,spread=Math.min(12,(objective.radius??32)*.4);
-    const goal={x:destination.x+Math.sin(angle)*spread,y:destination.y,z:destination.z+Math.cos(angle)*spread};
+    const goal=campaignSpot(p,destination,objective.radius);
     const key=`${objective.id??''}:${Math.round(goal.x/24)},${Math.round(goal.z/24)}`;
     const groundKey=`${objective.id??''}:${order?.phase}:${goal.x},${goal.z}`;
     if(s.vehicle===VEHICLE.NONE&&this.groundDetour.active){
@@ -1175,6 +1200,53 @@ export class Bot {
     this.walkEscape={goal:key,points,index:0,until:tick+1200};
     this.walkAvoidUntil=this.walkScanAt=0;
     this.targetX=points[0].x;this.targetZ=points[0].z;
+  }
+
+  /** Soldiers on foot never stand or walk inside each other. An idle soldier
+   * steps clear (strafing, so its aim holds), a walker right behind another
+   * going the same way pauses until a gap opens, and a fighter strafes away.
+   * Exact overlaps part by id, so the result stays deterministic. */
+  private keepApart(game:Game,cmd:InputCmd):InputCmd {
+    const p=this.player,s=p.state;
+    if(!s.alive||s.vehicle||p.airlift||s.airlift||!s.grounded||s.swimming||cmd.buttons&(BTN.USE|BTN.JUMP|BTN.DODGE))return cmd;
+    const fx=-Math.sin(cmd.yaw),fz=-Math.cos(cmd.yaw),rx=Math.cos(cmd.yaw),rz=-Math.sin(cmd.yaw);
+    let ax=0,az=0,crowded=false,behind=false;
+    for(const q of game.playersNear?.(s.px,s.pz,PERSONAL_SPACE*2)??game.players.values()){
+      const o=q.state;
+      if(q===p||!o.alive||o.vehicle||q.airlift||o.airlift||Math.abs(o.py-s.py)>1.5)continue;
+      const dx=s.px-o.px,dz=s.pz-o.pz,d=Math.hypot(dx,dz);
+      if(d>=PERSONAL_SPACE)continue;
+      crowded=true;
+      if(d>1e-3){ax+=dx/d;az+=dz/d;}else ax+=p.id<q.id?1:-1;
+      // Walking abreast counts as a tie, so exactly one of the pair waits.
+      const speed=Math.hypot(o.vx,o.vz),ahead=-(dx*fx+dz*fz);
+      if(speed>1&&o.vx*fx+o.vz*fz>.7*speed&&(ahead>.25||ahead>-.25&&p.id>q.id))behind=true;
+    }
+    if(!crowded)return cmd;
+    const lateral=BTN.LEFT|BTN.RIGHT,moving=cmd.buttons&(BTN.FORWARD|BTN.BACK|lateral);
+    if(cmd.buttons&(BTN.FIRE|BTN.ALTFIRE)||moving&lateral){
+      const right=ax*rx+az*rz>0;this.strafeDir=right?1:-1;
+      return {...cmd,buttons:cmd.buttons&~lateral|(right?BTN.RIGHT:BTN.LEFT)};
+    }
+    if(moving)return behind?{...cmd,buttons:cmd.buttons&~BTN.FORWARD}:cmd;
+    // Boarding and pickups need the soldier to stay where it stopped.
+    const away=Math.hypot(ax,az);
+    if(away<1e-6||this.pickupId>=0||this.vehicleGoal>=0)return cmd;
+    for(const [x,z] of [[ax,az],[-az,ax],[az,-ax]]){
+      const along=(x*fx+z*fz)/away,side=(x*rx+z*rz)/away;
+      const buttons=(along>.38?BTN.FORWARD:along<-.38?BTN.BACK:0)|(side>.38?BTN.RIGHT:side<-.38?BTN.LEFT:0);
+      const sx=(buttons&BTN.FORWARD?fx:buttons&BTN.BACK?-fx:0)+(buttons&BTN.RIGHT?rx:buttons&BTN.LEFT?-rx:0);
+      const sz=(buttons&BTN.FORWARD?fz:buttons&BTN.BACK?-fz:0)+(buttons&BTN.RIGHT?rz:buttons&BTN.LEFT?-rz:0);
+      const len=Math.hypot(sx,sz),pad=this.padKeepOut;
+      if(pad&&len>0&&Math.hypot(s.px+sx/len*1.9-pad.x,s.pz+sz/len*1.9-pad.z)<pad.radius)continue;
+      if(len>0&&this.safeStep(game,sx/len,sz/len))return {...cmd,buttons:cmd.buttons|buttons};
+    }
+    return cmd;
+  }
+  /** Firm, dry footing a stride away in a unit direction. */
+  private safeStep(game:Game,dx:number,dz:number):boolean {
+    const s=this.player.state,x=s.px+dx*1.2,z=s.pz+dz*1.2;
+    return game.world.trace(x,s.py+.6,z,0,-1,0,2.2,false).hit&&!game.world.liquidAt(x,s.py+.3,z);
   }
 
   private walkCourse(game:Game,yaw:number):number {

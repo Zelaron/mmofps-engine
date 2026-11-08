@@ -7,7 +7,7 @@ import { setVehicleColliders } from '@shared/vehicle-collision';
 import { VEHICLE } from '@shared/vehicles';
 import type { CampaignOrder, Territory } from '@shared/frontier';
 import { connectedGround, GroundDetour, supportedTerrainRise } from '../src/bot-ground-navigation.js';
-import { Bot } from '../src/bots.js';
+import { Bot, campaignSpot } from '../src/bots.js';
 import { Game, ServerPlayer } from '../src/game.js';
 import type { Frontier } from '../src/frontier.js';
 
@@ -168,26 +168,29 @@ function botFixture(){
   world.collectTransportPlan=()=>({routes:[],pods:[],stations:[],harbors:[],lifts:[],solids:[],bridges:[],accesses:[]});
   const p=new ServerPlayer(19,'detouring infantry',null,true,start);p.faction=1;p.state.grounded=true;
   game.players.set(p.id,p);game.shouldThinkBot=()=>true;
-  const objective:Territory={id:'held',name:'Objective',kind:'relay',x:100,y:0,z:-12,radius:30,owner:1,influence:1,contested:false};
-  const order:CampaignOrder={baseId:'base',targetId:objective.id,name:'Travel',x:100,z:-12,phase:'attack',squad:1,staging:{x:100,y:0,z:-12}};
+  // The objective sits so that soldier 19's own spot is the detour goal.
+  const offset=campaignSpot(p,{x:0,z:0},30),home=goal.x-offset.x;
+  const objective:Territory={id:'held',name:'Objective',kind:'relay',x:home,y:0,z:goal.z-offset.z,radius:30,owner:1,influence:1,contested:false};
+  const order:CampaignOrder={baseId:'base',targetId:objective.id,name:'Travel',x:objective.x,z:objective.z,phase:'attack',squad:1,staging:{x:objective.x,y:0,z:objective.z}};
+  const spot=campaignSpot(p,objective,30),key=`held:attack:${spot.x},${spot.z}`;
   Object.defineProperty(game,'frontier',{value:{territories:[objective],order:()=>order} as unknown as Frontier});
   const bot=new Bot(p,1337),internal=bot as unknown as {groundDetour:GroundDetour;campaignCourse(g:Game,o:Territory):void;
     campaignState:unknown;routeGoal:string;route:{x:number;y:number;z:number}[];routeIndex:number;navigationAt:number;
     walkProgress:{x:number;z:number;best:number;at:number;seen:number};targetX:number;targetZ:number};
-  const activate=()=>{game.tick+=200;internal.groundDetour.begin(world,p.state,goal,'held:attack:100,0',100,game.tick);assert.ok(internal.groundDetour.active);};
-  return {game,world,p,bot,internal,objective,order,activate};
+  const activate=()=>{game.tick+=200;internal.groundDetour.begin(world,p.state,goal,key,100,game.tick);assert.ok(internal.groundDetour.active);};
+  return {game,world,p,bot,internal,objective,order,activate,home,key};
 }
 
 test('the real quiet input branch reaches short contour points and cancels changed goals, combat, boarding and death',()=>{
   const f=botFixture();f.activate();
   f.p.state.px=2;let command=f.bot.think(f.game);
   assert.ok(command.buttons&BTN.FORWARD,'a two-metre-away contour point must not inherit the ordinary three-metre stop threshold');
-  f.objective.x=105;f.game.tick++;f.bot.think(f.game);
+  f.objective.x=f.home+5;f.game.tick++;f.bot.think(f.game);
   assert.equal(f.internal.groundDetour.active,false,'same-ID effective coordinate changes cancel immediately');
-  f.objective.x=100;f.activate();f.order.phase='assemble';f.game.tick++;f.bot.think(f.game);
+  f.objective.x=f.home;f.activate();f.order.phase='assemble';f.game.tick++;f.bot.think(f.game);
   assert.equal(f.internal.groundDetour.active,false,'a new staging phase cancels even when its coordinates coincide');
   f.order.phase='attack';
-  f.objective.x=100;f.activate();
+  f.objective.x=f.home;f.activate();
   const enemy=new ServerPlayer(50,'close attacker',null,true,{x:10,y:.006,z:0});enemy.faction=2;enemy.state.grounded=true;
   f.game.players.set(enemy.id,enemy);f.game.tick++;f.bot.think(f.game);
   assert.equal(f.internal.groundDetour.active,false,'normal close combat releases the walking recovery');
@@ -211,7 +214,7 @@ test('recovery keeps the blocked road waypoint and its distance rather than cutt
 
 test('campaign navigation resumes its cave escape immediately after a surface detour loses surface admission',()=>{
   const f=botFixture();f.activate();
-  f.internal.groundDetour.follow(f.world,f.p.state,'held:attack:100,0',f.game.tick);
+  f.internal.groundDetour.follow(f.world,f.p.state,f.key,f.game.tick);
   const exit={x:8,y:-6,z:4};
   Object.assign(f.internal,{walkEscape:{goal:'held:4,0',points:[exit],index:0,until:f.game.tick+600}});
   f.p.state.py=-6;f.game.tick++;

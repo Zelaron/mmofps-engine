@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { BTN, CREATURE, CREATURE_DEFS, LOCK_LOCKED, PICKUP_WEAPON, VEHICLE, vehicleDefinition, rocketHullDamageFactor,
   BOT_AA_LAUNCH_INTERVAL, type ColumnData } from '@shared/index';
 import type { RoadSegment } from '@shared/landscape';
-import { Bot, botCampaignRole, botRoleId } from '../src/bots.js';
+import { Bot, botCampaignRole, botRoleId, campaignSpot } from '../src/bots.js';
 import { campaignRoadRoute } from '../src/bot-navigation.js';
 import { Game, ServerPlayer, type ServerPickup, type ServerVehicle } from '../src/game.js';
 import type { Frontier } from '../src/frontier.js';
@@ -78,12 +78,12 @@ test('foot soldiers, drivers and pilots resolve one campaign order per think and
     }
     const first=bot.think(game);
     assert.equal(orderCalls,1,`vehicle ${vehicle}: repeated objective/course requests reuse one strategy resolution`);
-    if(vehicle===VEHICLE.NONE)assert.equal(bot.intent.x,140,'assembly movement follows the staging point');
+    if(vehicle===VEHICLE.NONE)assert.equal(bot.intent.x,campaignSpot(player,{x:140,z:0},objective.radius).x,'assembly movement follows the staging point');
     phase='attack';
     const second=bot.think(game);
     assert.equal(orderCalls,2,'a second invocation at the same tick still sees changed strategic state');
     assert.equal(second.seq,first.seq+1,'normal command generation continues for every invocation');
-    if(vehicle===VEHICLE.NONE)assert.equal(bot.intent.x,0,'the changed order immediately moves the soldier toward its capture objective');
+    if(vehicle===VEHICLE.NONE)assert.equal(bot.intent.x,campaignSpot(player,objective,objective.radius).x,'the changed order immediately moves the soldier toward its capture objective');
   }
 });
 
@@ -215,10 +215,14 @@ test('reserved worker IDs keep flight roles stable and destroyed aircraft redepl
   game.tick=pilot.respawnAtTick-1;game.step();
   assert.equal(pilot.state.alive,true);
   assert.ok(Math.hypot(pilot.state.px-home.x,pilot.state.pz-home.z)<12);
+  advance(60);
   const position={x:pilot.state.px,z:pilot.state.pz};
-  advance(120);
+  advance(60);
   assert.ok(jet.respawnAtTick>game.tick);
   assert.ok(Math.hypot(pilot.state.px-position.x,pilot.state.pz-position.z)<1,'the pilot waits through the replacement cooldown');
+  for(const crew of [pilot,gunner])assert.ok(Math.hypot(crew.state.px-home.x,crew.state.pz-home.z)>vehicleDefinition(VEHICLE.JET)!.radius+1,
+    'the crew waits beside the pad, so the replacement can spawn');
+  assert.ok(Math.hypot(pilot.state.px-gunner.state.px,pilot.state.pz-gunner.state.pz)>.6,'the waiting crew does not stand inside each other');
   game.tick=jet.respawnAtTick-1;game.step();
   advance(180);
   assert.equal(jet.occupant,pilot.id,'the original pilot boards the repaired aircraft');

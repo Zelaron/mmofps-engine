@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BTN, TICK_DT, stepWeaponState, type ColumnData } from '@shared/index';
 import type { CampaignOrder, Territory } from '@shared/frontier';
-import { Bot } from '../src/bots.js';
+import { Bot, campaignSpot } from '../src/bots.js';
 import { Game, ServerPlayer } from '../src/game.js';
 import type { Frontier } from '../src/frontier.js';
 
@@ -21,11 +21,12 @@ function fixture() {
     return { hit: dy < 0 && y / -dy <= max, dist, x: x + dx * dist,
       y: y + dy * dist, z: z + dz * dist, nx: 0, ny: 1, nz: 0 };
   };
-  // Soldier 19's formation offset is +12 z, putting its assigned spot at 0,0.
-  const objective: Territory = { id: 'held', name: 'Held relay', kind: 'relay', x: 0, y: 0, z: -12,
+  // The objective sits so that soldier 19's own spot is 0,0.
+  const offset = campaignSpot({ id: 19 }, { x: 0, z: 0 }, 30);
+  const objective: Territory = { id: 'held', name: 'Held relay', kind: 'relay', x: -offset.x, y: 0, z: -offset.z,
     radius: 30, owner: 1, influence: 1, contested: false };
   const order: CampaignOrder = { baseId: 'base', targetId: objective.id, name: 'Defend relay',
-    x: 0, z: -12, phase: 'defend', squad: 1, staging: { x: 0, y: 0, z: 0 } };
+    x: objective.x, z: objective.z, phase: 'defend', squad: 1, staging: { x: 0, y: 0, z: 0 } };
   Object.defineProperty(game, 'frontier', { configurable: true, value: {
     territories: [objective], order: () => order,
   } as unknown as Frontier });

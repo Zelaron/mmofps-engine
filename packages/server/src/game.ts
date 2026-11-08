@@ -1419,8 +1419,12 @@ export class Game {
     for (let attempt = 0; attempt < 24; attempt++) {
       const angle = this.rng() * Math.PI * 2, radius = 3 + this.rng() * 14;
       const x = anchor.x + Math.cos(angle) * radius, z = anchor.z + Math.sin(angle) * radius;
-      // Preserve the rally's pedestrian floor below towers and bridges.
-      const y = anchor.y;
+      // Stay on the rally's pedestrian floor below towers and bridges, but
+      // follow its slope: at the anchor's exact height almost every point on
+      // natural ground failed, and reinforcements spawned inside each other.
+      const floor = this.world.trace(x, anchor.y + 1.5, z, 0, -1, 0, 3.5, false);
+      if (!floor.hit) continue;
+      const y = floor.y + .08;
       if (!policy.supported({ x, y, z }) ||
         !policy.safe(player, { x, y, z }, actors, this.tick)) continue;
       if (actors.some(q => q.id !== player.id && q.state.alive && Math.abs(q.state.py - y) < 3 && Math.hypot(q.state.px - x, q.state.pz - z) < 2)) continue;
@@ -3505,6 +3509,12 @@ export class Game {
     );
     encodeSnapshot(w, snap);
     return w.finish();
+  }
+
+  /** Candidates near a point from the interest index, refreshed with every
+   * snapshot; callers check the exact distance. */
+  playersNear(x: number, z: number, radius: number): Iterable<ServerPlayer> {
+    return this.playerIndex.query(x, z, radius);
   }
 
   areEnemies(a: ServerPlayer, b: ServerPlayer): boolean {
