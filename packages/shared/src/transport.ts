@@ -138,6 +138,20 @@ export function harborBoatSite(harbor: TransportHarbor): TransportPoint & { head
     heading: harbor.heading + Math.PI / 2 };
 }
 
+/** Harbors whose quay moors a destroyer: opposite ocean coasts. */
+export const DESTROYER_HARBOR_IDS: ReadonlySet<number> = new Set([101, 103]);
+/** The destroyer's mooring off the quay end opposite the boat berth. Its long
+ * axis runs across the quay end, deck level with the quay, so crews walk
+ * aboard; the bow points out to sea. */
+export function harborShipSite(harbor: TransportHarbor): TransportPoint & { heading: number } {
+  const c = Math.cos(harbor.heading), sn = Math.sin(harbor.heading), side = harborDockSide(harbor);
+  const dock = { x: harbor.x + c * 29 * side, z: harbor.z - sn * 29 * side };
+  // The quay runs along (-sn, -c) toward the boat berth; moor 38 m the other way.
+  const x = dock.x + sn * 38, z = dock.z + c * 38;
+  const seaward = (harbor.x - harbor.landX) * c - (harbor.z - harbor.landZ) * sn >= 0 ? 1 : -1;
+  return { x, y: harbor.y, z, heading: Math.atan2(-c * seaward, sn * seaward) };
+}
+
 /** Fixed intervals, shared clock and reversible consists avoid entity packets
  * and prevent a train flipping its cars through passengers at a terminus. */
 export function transportRoutes(plan: TransportPlan): readonly TransportRoute[] { return plan.routes; }

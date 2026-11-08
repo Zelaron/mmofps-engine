@@ -1,3 +1,4 @@
+import { MAX_OWNED_ARTILLERY_SHELLS } from '@shared/vehicles';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
@@ -62,9 +63,9 @@ test('own-shell feedback survives snapshot retirement until impact, expires clea
  const feedback=new ArtilleryFeedback();feedback.fired(10);assert.equal(feedback.reloadSeconds(10),5.5);
  assert.equal(feedback.reloadSeconds(16),0);
  feedback.sync(Array.from({length:10},(_,i)=>({id:i,owner:i===0?99:7,weapon:213,x:i*100,y:50,z:0})),7,10);
- assert.equal(feedback.count,4);assert.equal(feedback.impact(0,{x:0,y:0,z:0},10),false);
- feedback.sync([],7,11);assert.equal(feedback.count,4,'removal snapshot may precede the explosion packet');
- assert.equal(feedback.impact(9,{x:1900,y:80,z:10},11),true);assert.equal(feedback.count,3);
+ assert.equal(feedback.count,MAX_OWNED_ARTILLERY_SHELLS);assert.equal(feedback.impact(0,{x:0,y:0,z:0},10),false);
+ feedback.sync([],7,11);assert.equal(feedback.count,MAX_OWNED_ARTILLERY_SHELLS,'removal snapshot may precede the explosion packet');
+ assert.equal(feedback.impact(9,{x:1900,y:80,z:10},11),true);assert.equal(feedback.count,MAX_OWNED_ARTILLERY_SHELLS-1);
  assert.deepEqual(feedback.marker(12),{point:{x:1900,y:80,z:10},impact:true});
  assert.equal(feedback.impact(9,{x:1900,y:80,z:10},11),false,'duplicate impact packets do not duplicate feedback');
  feedback.sync([],7,29);assert.equal(feedback.count,0);assert.equal(feedback.marker(29),null);

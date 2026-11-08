@@ -54,15 +54,23 @@ const NOCTURNE = (() => {
 const GUNBOAT = [box(0, .79, .5, 1.98, .69, 4.18), box(0, 1.04, -4.17, .81, .43, .87),
   box(0, 1.45, .68, 1.85, .06, 3.65), box(0, 2.01, 1, 1.35, .54, 1.25),
   box(0, 2.63, 1, 1.47, .08, 1.365)];
+// A 34 m capital ship, keel at the origin and the main deck at 3.4 m. Side
+// decks stay open from the bridge aft to the AA mount, so crew can walk it.
+const DESTROYER = [box(0, 1.7, 1, 3.6, 1.7, 11.5), box(0, 1.8, -13.5, 2.4, 1.7, 3),
+  box(0, 2, -16.6, 1.1, 1.5, .8), box(0, 1.8, 14.2, 3, 1.7, 1.8),
+  box(0, 5, -3.5, 2.6, 1.6, 3.2), box(0, 7.4, -4.2, 1.9, .8, 1.9),
+  box(0, 5.8, 2.6, .9, 2.4, 1.2), box(0, 4.1, -10.2, 1.5, .7, 1.6),
+  box(0, 4.3, 6.8, 2, .9, 2.4), box(0, 4, 11.6, 1.3, .6, 1.3)];
 const EMPTY: readonly HullBox[] = [];
-const RADII = new Map<readonly HullBox[], number>([JEEP, TANK, BASTION, JET, NOCTURNE, GUNBOAT].map(boxes =>
+const RADII = new Map<readonly HullBox[], number>([JEEP, TANK, BASTION, JET, NOCTURNE, GUNBOAT, DESTROYER].map(boxes =>
   [boxes, Math.max(...boxes.map(b => Math.hypot(b.x, b.y, b.z) + Math.hypot(b.hx, b.hy, b.hz)))]));
 function geometry(type: number, variant: number): readonly HullBox[] {
   if (variant === VEHICLE_VARIANT.RAIL) return EMPTY;
   if (type === VEHICLE.JEEP) return JEEP;
   if (type === VEHICLE.TANK) return variant === VEHICLE_VARIANT.BASTION ? BASTION : TANK;
   if (type === VEHICLE.JET) return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE : JET;
-  return type === VEHICLE.GUNBOAT ? GUNBOAT : EMPTY;
+  if (type === VEHICLE.GUNBOAT) return variant === VEHICLE_VARIANT.DESTROYER ? DESTROYER : GUNBOAT;
+  return EMPTY;
 }
 
 const CELL = 32;

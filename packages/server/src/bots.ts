@@ -2,6 +2,7 @@ import { readCrewBoard, type CrewAim, type CrewBoard, type CrewScanner, type Cre
   type EnemySensingState } from './bot-crew-spotting.js';
 import {
   VEHICLE, vehicleDefinition, CREATURE_DEFS, LOCK_RANGE, LOCK_LOCKED, BOT_AA_LAUNCH_INTERVAL,
+  isDestroyer, batteryPitch, DESTROYER_BATTERY_PIVOT,
   mulberry32, clamp, TAU, wrapAngle, WORLD,
   quantYaw, unquantYaw, quantPitch, unquantPitch,
   viewDir, WEAPONS, TICK_DT, TICK_RATE,
@@ -1437,6 +1438,13 @@ export class Bot {
         if (dist > 24) buttons |= BTN.FORWARD;
         if (dist < 340 && this.losOk) buttons |= BTN.FIRE;
         if (dist > 90 && dist < 320 && this.rng() < 0.015) buttons |= BTN.ALTFIRE;
+      } else if (isDestroyer(s.vehicle, s.vehicleVariant)) {
+        // The battery lobs its salvo: solve the arc and close to reach. Bots
+        // never fire the nuclear salvo; that is for human crews.
+        const horizontal = Math.hypot(ex, ez), arc = batteryPitch(horizontal, s.py + DESTROYER_BATTERY_PIVOT.y - enemy.state.py - 1);
+        pitch = arc ?? Math.atan2(ey, horizontal);
+        if (horizontal > 260) buttons |= BTN.FORWARD;
+        if (arc !== null && this.losOk) buttons |= BTN.FIRE;
       } else {
         pitch = Math.atan2(ey, Math.hypot(ex, ez));
         if (dist > 20) buttons |= BTN.FORWARD;

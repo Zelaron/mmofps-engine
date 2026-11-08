@@ -14,6 +14,8 @@ import {
   type TeleporterPad, encodeTeleport,
   rayCapsule, capsuleClearance,
   VEHICLE, VEHICLE_DEFS, VEHICLE_VARIANT, bastionGunMuzzle, gunboatGunMuzzle, vehicleDefinition, vehicleArmament, weaponDefById, vehicleEyeHeight, vehicleLocalOffset, jetBombBay, jetGunMuzzle,
+  isDestroyer, crewArmament, salvoCount, isClusterShell, isOwnedArtillery, hullKeel,
+  DESTROYER_AA_ROCKET, DESTROYER_AA_PAIR, DESTROYER_NUKE, DESTROYER_BRIDGE_EYE, DESTROYER_AA_PIVOT,
   JEEP_MG, TANK_CANNON, TANK_CLUSTER, CLUSTER_BOMBLET, CLUSTER_COUNT, RUN_OVER,
   JET_MG, JET_BOMB, NOCTURNE_LANCE, CARPET_BOMB_COUNT,
   LOCK_CONE_COS, LOCK_RANGE, LOCK_TICKS,
@@ -36,8 +38,8 @@ import { cityVehicleSites } from '@shared/cities';
 import { vesperRoutes } from '@shared/vesper-city';
 import { carryTransit, placeTrainArtillery, transitImpactDamage } from '@shared/transit-motion';
 import { carryCityLift } from '@shared/lifts';
-import { GUNBOAT_DRAFT, trainArtilleryMuzzle, vehicleEyeOffset, artilleryPitch, MAX_OWNED_ARTILLERY_SHELLS } from '@shared/vehicles';
-import { harborBoatSite } from '@shared/transport';
+import { GUNBOAT_DRAFT, DESTROYER_DRAFT, trainArtilleryMuzzle, vehicleEyeOffset, artilleryPitch, MAX_OWNED_ARTILLERY_SHELLS } from '@shared/vehicles';
+import { harborBoatSite, harborShipSite, DESTROYER_HARBOR_IDS } from '@shared/transport';
 import { airliftPose, airliftDuration, AIRLIFT_CHARGE_SECONDS } from '@shared/airlift';
 import { setVehicleColliders, updateVehicleCollider, withVehicleColliders, type VehicleColliderPose } from '@shared/vehicle-collision';
 import { Wildlife, type Creature } from './wildlife.js';
@@ -697,6 +699,17 @@ export class Game {
         y: (wet?.surfaceY ?? harbor.y) - GUNBOAT_DRAFT - .05, z: berth.z, heading: berth.heading };
       this.vehicleSites.push(site); this.spawnVehicleAt(site);
     }
+    // Two capital ships moor at opposite ocean quays and return there after
+    // being sunk.
+    for (const harbor of this.world.collectTransportPlan().harbors) {
+      if (!DESTROYER_HARBOR_IDS.has(harbor.id)) continue;
+      const mooring = harborShipSite(harbor), wet = this.world.liquidAt(mooring.x, harbor.y - .1, mooring.z);
+      const site: VehicleSite = { type: VEHICLE.GUNBOAT, variant: VEHICLE_VARIANT.DESTROYER, x: mooring.x,
+        y: (wet?.surfaceY ?? harbor.y) - DESTROYER_DRAFT - .05, z: mooring.z, heading: mooring.heading };
+      this.vehicleSites.push(site);
+      const ship = this.spawnVehicleAt(site);
+      ship.campaignHome = { x: site.x, y: site.y!, z: site.z, heading: site.heading };
+    }
     for (const route of this.world.collectTransportPlan().routes) if (route.kind === 'train') {
       const state = createMoveState(0, 0, 0); placeTrainArtillery(this.world, state, route.id, this.tick / TICK_RATE);
       const v = this.spawnVehicleAt({ type: VEHICLE.TANK, variant: VEHICLE_VARIANT.RAIL, x: state.px,
@@ -1058,7 +1071,7 @@ export class Game {
     let bestD2 = Infinity;
     for (const v of this.vehicles.values()) {
       if ((v.occupant >= 0 && ((v.gunner ?? -1) >= 0 || v.transportRoute)) || v.respawnAtTick >= 0) continue;
-      const pilot = this.players.get(v.occupant);
+      const pilot = this.players.get(v.occupant) ?? this.players.get(v.gunner ?? -1);
       if (this.frontier && pilot && pilot.faction !== p.faction) continue;
       const def = vehicleDefinition(v.type, v.variant)!;
       const dx = v.x - p.state.px;
@@ -1072,13 +1085,21 @@ export class Game {
     p.spawnProtectedUntil = -1;
     const driver = this.players.get(best.occupant);
     if (this.frontier) best.campaignFaction = p.faction;
-    if (driver) best.gunner = p.id;
+    // The destroyer's bridge and AA mount are separate posts: take the one you
+    // stand nearer, or the other if it's taken. Elsewhere the second soldier
+    // aboard crews the gun.
+    const duty = p.isBot ? botCampaignRole(botRoleId(p)) : undefined;
+    const wantsMount = duty === 'navalcrew' || (duty !== 'sailor' && this.nearerDestroyerMount(best, p));
+    const gunnerSeat = isDestroyer(best.type, best.variant)
+      ? best.occupant >= 0 || ((best.gunner ?? -1) < 0 && wantsMount)
+      : !!driver;
+    if (gunnerSeat) best.gunner = p.id;
     else best.occupant = p.id;
     p.vehicleId = best.id;
     const s = p.state;
     s.vehicle = best.type;
     s.vehicleVariant = best.variant ?? 0;
-    s.seat = best.transportRoute ? 2 : driver ? 1 : 0; s.vehicleId = best.id; s.transportRoute = best.transportRoute;
+    s.seat = best.transportRoute ? 2 : gunnerSeat ? 1 : 0; s.vehicleId = best.id; s.transportRoute = best.transportRoute;
     s.heading = best.heading;
     s.vehiclePitch = 0; s.vehicleRoll = 0; s.boosting = false;
     s.vehicleRotation = undefined; // the first flight tick starts from this possession's runway heading
@@ -1088,6 +1109,50 @@ export class Game {
     if (driver) this.copyCrewPose(p, driver);
     p.vehFireCd = 0.5;
     p.vehAltCd = 1;
+  }
+
+  /** The AA gunner of a destroyer: locks onto aircraft and fires flak pairs. */
+  private destroyerGunner(p: ServerPlayer): boolean {
+    return p.state.seat === 1 && isDestroyer(p.state.vehicle, p.state.vehicleVariant);
+  }
+
+  /** Whether a soldier boarding a destroyer stands nearer its AA mount than its bridge. */
+  private nearerDestroyerMount(v: ServerVehicle, p: ServerPlayer): boolean {
+    const c = Math.cos(v.heading), s = Math.sin(v.heading);
+    const at = (o: { x: number; z: number }) => Math.hypot(v.x + o.x * c + o.z * s - p.state.px, v.z - o.x * s + o.z * c - p.state.pz);
+    return at(DESTROYER_AA_PIVOT) < at(DESTROYER_BRIDGE_EYE);
+  }
+
+  /** Leaving a destroyer post puts the soldier on deck beside it. */
+  private placeOnDestroyerDeck(p: ServerPlayer, v: ServerVehicle, seat: number): boolean {
+    const s = p.state, c = Math.cos(v.heading), sn = Math.sin(v.heading), y = v.y + 3.5;
+    const spots = seat === 1 ? [[0, 14.6], [2.6, 11.6], [-2.6, 11.6], [3, 9.4], [-3, 9.4]]
+      : [[3.1, -3.5], [-3.1, -3.5], [3.1, -1], [-3.1, -1], [3.1, -6], [-3.1, -6]];
+    for (const [lx, lz] of spots) {
+      const x = v.x + lx * c + lz * sn, z = v.z - lx * sn + lz * c;
+      const pose = { ...s, px: x, py: y, pz: z, simulationTick: this.tick };
+      if (withVehicleColliders(this.world, pose, 0, () => capsuleClearance(this.world, x, y, z)) > .02) {
+        s.px = x; s.py = y; s.pz = z;
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** A gunner with nobody on the bridge rides the hull's own pose. */
+  private rideHull(p: ServerPlayer, v: ServerVehicle): void {
+    const s = p.state, m = v.motionState;
+    s.px = v.x; s.py = v.y; s.pz = v.z; s.heading = v.heading;
+    s.vx = m?.vx ?? 0; s.vy = m?.vy ?? 0; s.vz = m?.vz ?? 0;
+  }
+
+  /** One shot, or a destroyer salvo or flak pair fanned slightly across the aim. */
+  private fireVolley(p: ServerPlayer, cmd: InputCmd, def: WeaponDef, attachment?: { x: number; y: number; z: number }): void {
+    const pair = def.id === DESTROYER_AA_ROCKET.id, count = pair ? DESTROYER_AA_PAIR : salvoCount(def.id);
+    for (let i = 0; i < count; i++) {
+      const fan = (i - (count - 1) / 2) * (pair ? .03 : .045);
+      this.fireProjectile(p, fan ? { ...cmd, yaw: cmd.yaw + fan } : cmd, def, i === 0, attachment);
+    }
   }
 
   private copyCrewPose(passenger: ServerPlayer, driver: ServerPlayer): void {
@@ -1146,10 +1211,11 @@ export class Game {
     if (v?.occupant === p.id) {
       v.x = s.px; v.y = s.py; v.z = s.pz; v.heading = s.heading;
       v.motionState = undefined;
-      const next = this.players.get(v.gunner ?? -1);
+      // A destroyer's AA gunner keeps their post; elsewhere the gunner takes the wheel.
+      const keepsPost = isDestroyer(v.type, v.variant), next = keepsPost ? undefined : this.players.get(v.gunner ?? -1);
       if (next?.state.alive) { this.copyCrewPose(next, p); next.state.seat = 0; v.occupant = next.id; }
       else v.occupant = -1;
-      v.gunner = -1;
+      if (!keepsPost) v.gunner = -1;
     } else if (v?.gunner === p.id) v.gunner = -1;
     s.vehicle = VEHICLE.NONE; s.vehicleVariant = 0; s.seat = undefined; s.vehicleId = undefined; s.transportRoute = undefined;
     p.vehicleId = -1;
@@ -1160,8 +1226,13 @@ export class Game {
     const v = this.vehicles.get(p.vehicleId);
     const s = p.state;
     const type = s.vehicle as Exclude<VehicleType, 0>;
-    const def = vehicleDefinition(type, s.vehicleVariant);
+    const def = vehicleDefinition(type, s.vehicleVariant), seat = s.seat ?? 0;
     this.releaseVehicleSeat(p);
+    if (v && isDestroyer(v.type, v.variant) && this.placeOnDestroyerDeck(p, v, seat)) {
+      s.vx = 0; s.vy = 0; s.vz = 0; s.grounded = false;
+      this.settleAbandonedHull(v, p);
+      return;
+    }
 
     // Place the pilot beside the hull on the first capsule-clear side,
     // sweeping eight directions at two distances before giving up.
@@ -1766,6 +1837,7 @@ export class Game {
     if (p.state.seat === 1) {
       const hull = this.vehicles.get(p.vehicleId), driver = this.players.get(hull?.occupant ?? -1);
       if (driver) this.copyCrewPose(p, driver);
+      else if (hull) this.rideHull(p, hull);
       const eye = vehicleEyeOffset(p.state);
       const submerged = !!this.world.liquidAt(p.state.px + eye.x, p.state.py + eye.y, p.state.pz + eye.z);
       p.state.submerged = submerged;
@@ -1859,8 +1931,9 @@ export class Game {
 
     if (p.state.alive) {
       if (p.state.vehicle !== VEHICLE.NONE) {
+        if (this.destroyerGunner(p)) this.updateHomingLock(p, cmd);
+        else { p.lockTargetId = -1; p.lockVehicleId = -1; p.lockTicks = 0; p.lockState = LOCK_NONE; }
         this.fireVehicleWeapons(p, cmd);
-        p.lockTargetId = -1; p.lockVehicleId = -1; p.lockTicks = 0; p.lockState = LOCK_NONE;
       } else {
         this.updateHomingLock(p, cmd);
         const weaponStep = weaponDt === null ? null : stepWeaponState(p, cmd.weapon, cmd.buttons, weaponDt);
@@ -1883,13 +1956,18 @@ export class Game {
       return;
     }
     if (p.state.seat === 1) {
-      const def = weaponDefById(type === VEHICLE.JET ? 215 : 214)!;
-      if (!(cmd.buttons & BTN.FIRE) || p.vehFireCd > 0) return;
-      p.vehFireCd = def.interval; this.stats.shotsFired++;
+      const crew = crewArmament(type, p.state.vehicleVariant);
       const attachment = type === VEHICLE.JET ? aircraftCrewMuzzle(p.state)
         : crewGunMuzzle(type, p.state.vehicleVariant, p.state.heading, cmd.yaw, cmd.pitch);
-      if (def.kind === 'hitscan') this.fireHitscan(p, cmd, def, attachment);
-      else this.fireProjectile(p, cmd, def, true, attachment);
+      if ((cmd.buttons & BTN.FIRE) && p.vehFireCd <= 0) {
+        p.vehFireCd = crew.primary.interval; this.stats.shotsFired++;
+        if (crew.primary.kind === 'hitscan') this.fireHitscan(p, cmd, crew.primary, attachment);
+        else this.fireVolley(p, cmd, crew.primary, attachment);
+      }
+      if ((cmd.buttons & BTN.ALTFIRE) && p.vehAltCd <= 0 && crew.alt) {
+        p.vehAltCd = crew.alt.interval; this.stats.shotsFired++;
+        this.fireVolley(p, cmd, crew.alt, attachment);
+      }
       return;
     }
     const armament = vehicleArmament(type, p.state.vehicleVariant);
@@ -1901,13 +1979,14 @@ export class Game {
         this.fireHitscan(p, { ...cmd, yaw: Math.atan2(-nose.x, -nose.z),
           pitch: Math.atan2(nose.y, Math.hypot(nose.x, nose.z)) }, armament.primary);
       } else if (armament.primary.kind === 'hitscan') this.fireHitscan(p, cmd, armament.primary);
-      else this.fireProjectile(p, cmd, armament.primary);
+      else this.fireVolley(p, cmd, armament.primary);
     }
-    if ((cmd.buttons & BTN.ALTFIRE) !== 0 && p.vehAltCd <= 0 && armament.alt) {
+    // The destroyer's nuclear salvo is for human crews only.
+    if ((cmd.buttons & BTN.ALTFIRE) !== 0 && p.vehAltCd <= 0 && armament.alt && !(p.isBot && armament.alt.id === DESTROYER_NUKE.id)) {
       p.vehAltCd = armament.alt.interval;
       this.stats.shotsFired++;
       if (type === VEHICLE.JET) this.dropCarpetBombs(p, armament.alt);
-      else this.fireProjectile(p, cmd, armament.alt);
+      else this.fireVolley(p, cmd, armament.alt);
     }
   }
 
@@ -1947,12 +2026,14 @@ export class Game {
    * near-center aim with line of sight. Breaking any condition resets.
    */
   private updateHomingLock(p: ServerPlayer, cmd: InputCmd): void {
-    if (p.weapon !== 3) {
+    const flak = this.destroyerGunner(p);
+    if (p.weapon !== 3 && !flak) {
       this.homingObstructions.delete(p);
       p.lockTargetId = -1; p.lockVehicleId = -1; p.lockTicks = 0; p.lockState = LOCK_NONE;
       return;
     }
-    const ex = p.state.px, ey = p.state.py + PLAYER.EYE_HEIGHT, ez = p.state.pz;
+    const eye = flak ? vehicleEyeOffset(p.state) : { x: 0, y: PLAYER.EYE_HEIGHT, z: 0 };
+    const ex = p.state.px + eye.x, ey = p.state.py + eye.y, ez = p.state.pz + eye.z;
     const aim = viewDir(cmd.yaw, cmd.pitch);
     let best: ServerPlayer | null = null;
     const candidates: { player: ServerPlayer; cos: number; tx: number; ty: number; tz: number;
@@ -1960,6 +2041,8 @@ export class Game {
     for (const q of this.players.values()) {
       if (!this.areEnemies(p, q) || !q.state.alive || q.state.vehicle === VEHICLE.NONE || q.state.seat === 1) continue;
       if (p.vehicleId >= 0 && q.vehicleId === p.vehicleId) continue;
+      // The AA mount locks only onto aircraft.
+      if (flak && q.state.vehicle !== VEHICLE.JET) continue;
       const hull = this.vehicles.get(q.vehicleId);
       if (!hull || hull.occupant !== q.id || hull.health <= 0 || hull.respawnAtTick >= 0) continue;
       const def = vehicleDefinition(q.state.vehicle, q.state.vehicleVariant);
@@ -2162,8 +2245,10 @@ export class Game {
     for (const v of this.vehicles.values()) {
       if (v.respawnAtTick >= 0 || v.id === p.vehicleId) continue;
       const radius = vehicleDefinition(v.type, v.variant)!.radius, cy = v.y + radius;
-      if (rayCapsule(x, y, z, dir.x, dir.y, dir.z, range,
-        v.x, cy, cy, v.z, radius) >= 0) return true;
+      for (const along of hullKeel(v.type, v.variant)) {
+        const hx = v.x + Math.sin(v.heading) * along, hz = v.z + Math.cos(v.heading) * along;
+        if (rayCapsule(x, y, z, dir.x, dir.y, dir.z, range, hx, cy, cy, hz, radius) >= 0) return true;
+      }
     }
     return this.wildlife.hitRay(x, y, z, dir.x, dir.y, dir.z, range) !== null;
   }
@@ -2240,12 +2325,15 @@ export class Game {
         if (v.respawnAtTick >= 0 || v.id === p.vehicleId) continue;
         const r = vehicleDefinition(v.type, v.variant)!.radius;
         const cy = v.y + r;
-        const t = rayCapsule(
-          ex, ey, ez, dir.x, dir.y, dir.z, Math.min(maxT, bestT),
-          v.x, cy, cy, v.z, r + (def.beamRadius ?? 0),
-        );
-        if (t >= 0 && t < bestT && beamVisible(dir, t, v.x, cy, cy, v.z, r)) {
-          bestT = t; victim = null; vehicleVictim = v;
+        for (const along of hullKeel(v.type, v.variant)) {
+          const hx = v.x + Math.sin(v.heading) * along, hz = v.z + Math.cos(v.heading) * along;
+          const t = rayCapsule(
+            ex, ey, ez, dir.x, dir.y, dir.z, Math.min(maxT, bestT),
+            hx, cy, cy, hz, r + (def.beamRadius ?? 0),
+          );
+          if (t >= 0 && t < bestT && beamVisible(dir, t, hx, cy, cy, hz, r)) {
+            bestT = t; victim = null; vehicleVictim = v;
+          }
         }
       }
 
@@ -2316,7 +2404,7 @@ export class Game {
       : PLAYER.EYE_HEIGHT;
     const muzzle = p.state.vehicle !== VEHICLE.NONE ? 2.6 : 0.5;
     const siegeMuzzle = attachment ?? (p.state.vehicle === VEHICLE.GUNBOAT
-      ? gunboatGunMuzzle(p.state.heading,cmd.yaw,cmd.pitch)
+      ? gunboatGunMuzzle(p.state.heading,cmd.yaw,cmd.pitch,p.state.vehicleVariant)
       : p.state.vehicle === VEHICLE.TANK && p.state.vehicleVariant === VEHICLE_VARIANT.BASTION
         ? bastionGunMuzzle(p.state.heading, cmd.yaw, cmd.pitch) : undefined);
     const ex = p.state.px + (siegeMuzzle?.x ?? 0), ey = p.state.py + (siegeMuzzle?.y ?? eye),
@@ -2325,13 +2413,15 @@ export class Game {
     const id = this.allocateEntity('nextProjectileId', this.projectiles);
     let speed = def.speed ?? 48;
     // A fully locked rocket flies hot and steers; see advanceProjectile.
-    const homing = def.id === ROCKET_LAUNCHER_ID && p.lockState === LOCK_LOCKED && p.lockTargetId >= 0;
-    if (homing) speed *= HOMING_SPEED_FACTOR;
+    const homing = (def.id === ROCKET_LAUNCHER_ID || def.id === DESTROYER_AA_ROCKET.id) &&
+      p.lockState === LOCK_LOCKED && p.lockTargetId >= 0;
+    const launcherBoost = homing && def.id === ROCKET_LAUNCHER_ID;
+    if (launcherBoost) speed *= HOMING_SPEED_FACTOR;
     this.projectiles.set(id, {
       id, owner: p.id, weapon: def.id,
       x: ex + dir.x * launchOffset, y: ey + dir.y * launchOffset, z: ez + dir.z * launchOffset,
       vx: dir.x * speed, vy: dir.y * speed, vz: dir.z * speed,
-      distLeft: def.range * (homing ? HOMING_RANGE_FACTOR : 1),
+      distLeft: def.range * (launcherBoost ? HOMING_RANGE_FACTOR : 1),
       fuseLeft: def.fuse ?? Infinity,
       ageSeconds: 0,
       sleeping: false,
@@ -2436,7 +2526,7 @@ export class Game {
 
       if (r.fuseLeft <= 1e-9 || r.distLeft <= 1e-9) {
         // The cluster shell's fuse is its split timer, not a detonation.
-        if (r.weapon === TANK_CLUSTER.id && r.fuseLeft <= 1e-9) {
+        if (isClusterShell(r.weapon) && r.fuseLeft <= 1e-9) {
           this.splitClusterShell(r);
           this.projectiles.delete(r.id);
           continue;
@@ -2587,13 +2677,16 @@ export class Game {
         if (v.respawnAtTick >= 0 || v.id === ownerVehicleId) continue;
         const radius = vehicleDefinition(v.type, v.variant)!.radius;
         const vr = radius + projR, cy = v.y + radius;
-        if (v.x + vr < minX || v.x - vr > maxX || v.z + vr < minZ || v.z - vr > maxZ ||
-            cy + vr < minY || cy - vr > maxY) continue;
-        const t = rayCapsule(
-          r.x, r.y, r.z, dx, dy, dz, stepLen,
-          v.x, cy, cy, v.z, vr,
-        );
-        if (t >= 0 && t < bestT) { bestT = t; victim = null; vehicleVictim = v; }
+        if (cy + vr < minY || cy - vr > maxY) continue;
+        for (const along of hullKeel(v.type, v.variant)) {
+          const hx = v.x + Math.sin(v.heading) * along, hz = v.z + Math.cos(v.heading) * along;
+          if (hx + vr < minX || hx - vr > maxX || hz + vr < minZ || hz - vr > maxZ) continue;
+          const t = rayCapsule(
+            r.x, r.y, r.z, dx, dy, dz, stepLen,
+            hx, cy, cy, hz, vr,
+          );
+          if (t >= 0 && t < bestT) { bestT = t; victim = null; vehicleVictim = v; }
+        }
       }
 
       // Terrain is traced slightly beyond the center's displacement, then the
@@ -2748,7 +2841,7 @@ export class Game {
     this.events.push({
       bytes: encodeExplosion(x, y, z, def.id, projectileId),
       x, z, radius: NET.FIRE_EVENT_RADIUS,
-      alwaysFor: def.id === 213 ? owner?.id : undefined,
+      alwaysFor: isOwnedArtillery(def.id) ? owner?.id : undefined,
     });
     const radius = def.splashRadius ?? 4.5;
     const maxDmg = def.splashMax ?? 70;
@@ -2772,8 +2865,11 @@ export class Game {
     for (const v of this.vehicles.values()) {
       if (v.respawnAtTick >= 0) continue;
       const vdef = vehicleDefinition(v.type, v.variant)!;
-      const ddx = v.x - x, ddy = v.y + vdef.radius - y, ddz = v.z - z;
-      const dist = Math.max(0, Math.hypot(ddx, ddy, ddz) - vdef.radius);
+      let dist = Infinity;
+      for (const along of hullKeel(v.type, v.variant)) {
+        const ddx = v.x + Math.sin(v.heading) * along - x, ddy = v.y + vdef.radius - y, ddz = v.z + Math.cos(v.heading) * along - z;
+        dist = Math.min(dist, Math.max(0, Math.hypot(ddx, ddy, ddz) - vdef.radius));
+      }
       if (dist > radius) continue;
       const falloff = radius > 0 ? clamp(1 - dist / radius, 0, 1) : 0;
       this.damageVehicle(v, maxDmg * falloff * 1.6, owner, def.id);
@@ -3428,7 +3524,7 @@ export class Game {
     for (const r of this.snapshotProjectiles(p)) {
       const dx = r.x - px, dy = r.y - py, dz = r.z - pz;
       const d2 = dx * dx + dy * dy + dz * dz;
-      const ownedArtillery = r.weapon === 213 && r.owner === p.id;
+      const ownedArtillery = isOwnedArtillery(r.weapon) && r.owner === p.id;
       if (d2 > R2 && !ownedArtillery) continue;
       (ownedArtillery ? strategic : withDist).push({
         d2,
@@ -3542,7 +3638,7 @@ export class Game {
     for (const p of this.players.values()) this.playerIndex.insert(p, p.state.px, p.state.pz);
     for (const r of this.projectiles.values()) {
       this.projectileIndex.insert(r, r.x, r.z);
-      if (r.weapon === 213) {
+      if (isOwnedArtillery(r.weapon)) {
         let shells = this.ownedArtillery.get(r.owner);
         if (!shells) this.ownedArtillery.set(r.owner, shells = []);
         shells.push(r);
@@ -3553,7 +3649,7 @@ export class Game {
 
   private *snapshotProjectiles(p: ServerPlayer): IterableIterator<Projectile> {
     for (const r of this.projectileIndex.query(p.state.px, p.state.pz, NET.INTEREST_RADIUS)) {
-      if (r.weapon !== 213 || r.owner !== p.id) yield r;
+      if (!isOwnedArtillery(r.weapon) || r.owner !== p.id) yield r;
     }
     yield* this.ownedArtillery.get(p.id) ?? [];
   }

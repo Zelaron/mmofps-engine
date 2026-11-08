@@ -25,6 +25,28 @@ export const JET_GUN_MUZZLE = { x: 0, y: 0.99, z: -3.29 } as const;
 export const BASTION_GUN_PIVOT = { x: 0, y: 2.99, z: .26 } as const;
 export const BASTION_BARREL_LENGTH = 6.149;
 export const GUNBOAT_DRAFT = .65;
+export const DESTROYER_DRAFT = 1.5;
+/** How deep a boat's keel sits below the water surface. */
+export function boatDraft(variant = 0): number {
+  return validVehicleVariant(VEHICLE.GUNBOAT, variant) === VEHICLE_VARIANT.DESTROYER ? DESTROYER_DRAFT : GUNBOAT_DRAFT;
+}
+/** The bridge looks out above the wheelhouse and fires the forward battery;
+ * the AA seat sits on the stern mount. */
+export const DESTROYER_BRIDGE_EYE = { x: 0, y: 8.9, z: -4.2 } as const;
+export const DESTROYER_BATTERY_PIVOT = { x: 0, y: 4.9, z: -10.2 } as const;
+export const DESTROYER_BATTERY_LENGTH = 3.4;
+export const DESTROYER_AA_PIVOT = { x: 0, y: 4.9, z: 11.6 } as const;
+/** Local z of the overlapping spheres that stand in for the long hull, bow
+ * to stern, in hit tests and in the ship's own contact with land. */
+export const DESTROYER_KEEL_SPHERES = [-14, -9.4, -4.7, 0, 4.7, 9.4, 14] as const;
+const ORIGIN_KEEL = [0] as const;
+/** Local z offsets of a hull's hit spheres; one at the origin for most hulls. */
+export function hullKeel(type: number, variant = 0): readonly number[] {
+  return isDestroyer(type, variant) ? DESTROYER_KEEL_SPHERES : ORIGIN_KEEL;
+}
+export function isDestroyer(type: number, variant = 0): boolean {
+  return validVehicleVariant(type, variant) === VEHICLE_VARIANT.DESTROYER;
+}
 export const GUNBOAT_GUN_PIVOT = { x: 0, y: 2.05, z: -2.35 } as const;
 export const GUNBOAT_BARREL_LENGTH = 2.4;
 export const TRAIN_ARTILLERY_PIVOT = { x: 0, y: 4.5, z: 0 } as const;
@@ -38,6 +60,7 @@ export function vehicleEyeOffset(state: VehicleOrientation & {vehicle:number;veh
   if(state.vehicle===VEHICLE.NONE) {out.x=0;out.y=PLAYER.EYE_HEIGHT;out.z=0;return out;}
   let x=0,y=vehicleEyeHeight(state.vehicle as VehicleType,state.vehicleVariant),z=0;
   if(state.seat===2) {x=TRAIN_ARTILLERY_EYE.x;y=TRAIN_ARTILLERY_EYE.y;z=TRAIN_ARTILLERY_EYE.z;}
+  else if(!state.seat&&isDestroyer(state.vehicle,state.vehicleVariant)) {x=DESTROYER_BRIDGE_EYE.x;y=DESTROYER_BRIDGE_EYE.y;z=DESTROYER_BRIDGE_EYE.z;}
   else if(state.seat===1) {
     if(state.vehicle===VEHICLE.JET) {const scale=state.vehicleVariant===VEHICLE_VARIANT.NOCTURNE?NOCTURNE_SCALE:1;y=.10*scale;z=.6*scale;}
     else {const pivot=crewGunPivot(state.vehicle,state.vehicleVariant);x=pivot.x;y=pivot.y+.48;z=pivot.z+.85;}
@@ -136,9 +159,15 @@ const NOCTURNE_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.JET], name: 'Nocturne
 const BASTION_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.TANK], name: 'Bastion Siege Tank',
   radius: 2.95, maxHealth: 11000, accel: 32, maxSpeed: 24, reverseSpeed: 10,
   rollDrag: .55, turnRate: 1.35, enterRange: 6, respawnSeconds: 110 };
+/** A slow capital ship: about 25 direct rockets sink it (gunboat armor). Its
+ * radius is the beam; hits use spheres along the keel (destroyerHitSpheres). */
+const DESTROYER_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.GUNBOAT], name: 'Warden Destroyer',
+  radius: 3.6, maxHealth: 15500, accel: 3.2, maxSpeed: 13, reverseSpeed: 4, turnRate: .32,
+  brakeDrag: 1, enterRange: 19, respawnSeconds: 180 };
 export function vehicleDefinition(type: number, variant = 0): VehicleDef | undefined {
   const special = validVehicleVariant(type, variant);
   if (special === VEHICLE_VARIANT.RAIL) return RAIL_DEF;
+  if (special === VEHICLE_VARIANT.DESTROYER) return DESTROYER_DEF;
   return special === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE_DEF
     : special === VEHICLE_VARIANT.BASTION ? BASTION_DEF : VEHICLE_DEFS[type as Exclude<VehicleType, 0>];
 }
@@ -454,8 +483,10 @@ export function bastionGunMuzzle(heading: number, yaw: number, pitch: number): {
 }
 const RAIL_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.TANK], name: 'Leviathan Rail Artillery', radius: 3.2,
   maxHealth: 8000, maxSpeed: 0, accel: 0, enterRange: 8, respawnSeconds: 75 };
-export function gunboatGunMuzzle(heading:number,yaw:number,pitch:number):{x:number;y:number;z:number} {
-  return mountedGunMuzzle(GUNBOAT_GUN_PIVOT,GUNBOAT_BARREL_LENGTH,heading,yaw,pitch);
+export function gunboatGunMuzzle(heading:number,yaw:number,pitch:number,variant=0):{x:number;y:number;z:number} {
+  return isDestroyer(VEHICLE.GUNBOAT,variant)
+    ? mountedGunMuzzle(DESTROYER_BATTERY_PIVOT,DESTROYER_BATTERY_LENGTH,heading,yaw,pitch)
+    : mountedGunMuzzle(GUNBOAT_GUN_PIVOT,GUNBOAT_BARREL_LENGTH,heading,yaw,pitch);
 }
 export function trainArtilleryMuzzle(heading:number,yaw:number,pitch:number):{x:number;y:number;z:number} {
   return mountedGunMuzzle(TRAIN_ARTILLERY_PIVOT,TRAIN_ARTILLERY_BARREL_LENGTH,heading,yaw,artilleryPitch(pitch));
@@ -469,7 +500,7 @@ function mountedGunMuzzle(pivot:Readonly<{x:number;y:number;z:number}>,length:nu
 export function crewGunPivot(type:number,variant=0):Readonly<{x:number;y:number;z:number}> {
   return type===VEHICLE.TANK ? variant===VEHICLE_VARIANT.BASTION
     ? {x:.72,y:3.64,z:.33} : {x:.55,y:2.8,z:.25}
-    : type===VEHICLE.GUNBOAT ? {x:0,y:1.8,z:2.4} : {x:.55,y:1.82,z:.32};
+    : type===VEHICLE.GUNBOAT ? isDestroyer(type,variant) ? DESTROYER_AA_PIVOT : {x:0,y:1.8,z:2.4} : {x:.55,y:1.82,z:.32};
 }
 export const CREW_GUN_LENGTH = 1.3;
 export function crewGunMuzzle(type:number,variant:number,heading:number,yaw:number,pitch:number) {
@@ -483,7 +514,7 @@ export function aircraftCrewMuzzle(state:VehicleOrientation & {vehicleVariant?:n
 /** Camera/eye height for an occupant of the given vehicle type. */
 export function vehicleEyeHeight(type: VehicleType, variant = 0): number {
   if (variant === VEHICLE_VARIANT.RAIL) return TRAIN_ARTILLERY_EYE.y;
-  if (type === VEHICLE.GUNBOAT) return 3.6;
+  if (type === VEHICLE.GUNBOAT) return isDestroyer(type, variant) ? DESTROYER_BRIDGE_EYE.y : 3.6;
   if (validVehicleVariant(type, variant) === VEHICLE_VARIANT.NOCTURNE) {
     return (VEHICLE_DEFS[VEHICLE.JET].radius + .9) * NOCTURNE_SCALE;
   }
@@ -604,8 +635,39 @@ export const TRAIN_NUCLEAR_CANNON: WeaponDef = {
   ...BASTION_SHOCK_SHELL,id:213,name:'Leviathan Nuclear Artillery',interval:5.5,
   damage:450,speed:190,gravity:4,range:2400,fuse:16,splashRadius:130,splashMax:420,splashImpulse:80,
 };
+/** The destroyer's main battery: five cluster shells a salvo, a little
+ * faster than the tank's, for about 1.2x its reach. */
+export const DESTROYER_CLUSTER: WeaponDef = { ...TANK_CLUSTER, id: 216, name: 'Battery Salvo', speed: 74 };
+/** Five nuclear shells a salvo on a long cooldown. Bots never fire it. */
+export const DESTROYER_NUKE: WeaponDef = { ...TRAIN_NUCLEAR_CANNON, id: 217, name: 'Warden Nuclear Salvo', interval: 60 };
+export const DESTROYER_SALVO_COUNT = 5;
+/** Pitch that lands the battery salvo `horizontal` metres away and `drop`
+ * metres below the muzzle (negative drop = above), following the shell to its
+ * split and the bomblets' steeper fall after it. Null when out of reach. */
+export function batteryPitch(horizontal: number, drop: number): number | null {
+  const v = DESTROYER_CLUSTER.speed ?? 0, g1 = DESTROYER_CLUSTER.gravity ?? 0, split = DESTROYER_CLUSTER.fuse ?? 0;
+  const g2 = CLUSTER_BOMBLET.gravity ?? 0, dt = 1 / 30;
+  let best: number | null = null, bestError = Infinity;
+  for (let degrees = -5; degrees <= 45; degrees++) {
+    const angle = degrees * Math.PI / 180;
+    let x = 0, y = 0, vx = v * Math.cos(angle), vy = v * Math.sin(angle);
+    for (let t = 0; t < split; t += dt) { x += vx * dt; y += vy * dt; vy -= g1 * dt; }
+    vx *= .9; vy *= .9;
+    for (let k = 0; k < 900 && (vy > 0 || y > -drop); k++) { x += vx * dt; y += vy * dt; vy -= g2 * dt; }
+    const error = Math.abs(x - horizontal);
+    if (error < bestError) { bestError = error; best = angle; }
+  }
+  return bestError <= Math.max(8, horizontal * .05) ? best : null;
+}
+/** Shells a salvo sends per shot; ordinary weapons fire one. */
+export function salvoCount(id: number): number {
+  return id === DESTROYER_CLUSTER.id || id === DESTROYER_NUKE.id ? DESTROYER_SALVO_COUNT : 1;
+}
+export function isClusterShell(id: number): boolean { return id === TANK_CLUSTER.id || id === DESTROYER_CLUSTER.id; }
+/** Long-range shells their owner always sees, within the existing entity cap. */
+export function isOwnedArtillery(id: number): boolean { return id === TRAIN_NUCLEAR_CANNON.id || id === DESTROYER_NUKE.id; }
 /** A private long-range view for the gunner, within the existing entity cap. */
-export const MAX_OWNED_ARTILLERY_SHELLS = 4;
+export const MAX_OWNED_ARTILLERY_SHELLS = 6;
 export function artilleryPitch(pitch:number):number { return clamp(pitch,-.08,1.1); }
 export const CREW_MG: WeaponDef = {
   ...common,id:214,name:'Crew Machine Gun',kind:'hitscan',interval:.085,
@@ -614,16 +676,34 @@ export const CREW_MG: WeaponDef = {
 export const AIRCREW_ROCKET: WeaponDef = {
   ...GUNBOAT_ROCKET,id:215,name:'Ventral Rocket',interval:1.2,range:1200,speed:100,
 };
+/** The destroyer's stern mount: rocket pairs that home on a locked aircraft. */
+export const DESTROYER_AA_ROCKET: WeaponDef = {
+  ...GUNBOAT_ROCKET,id:218,name:'Flak Rockets',interval:1.6,range:1500,speed:110,damage:95,splashRadius:8,splashMax:70,
+};
+export const DESTROYER_AA_PAIR = 2;
 export function vehicleArmament(type: number, variant = 0): { primary: WeaponDef; alt?: WeaponDef } {
   const special = validVehicleVariant(type, variant);
   if (special === VEHICLE_VARIANT.RAIL) return { primary: TRAIN_NUCLEAR_CANNON };
   if (special === VEHICLE_VARIANT.NOCTURNE) return { primary: NOCTURNE_LANCE, alt: NOCTURNE_VOID_BOMB };
   if (special === VEHICLE_VARIANT.BASTION) return { primary: BASTION_CANNON, alt: BASTION_SHOCK_SHELL };
+  if (special === VEHICLE_VARIANT.DESTROYER) return { primary: DESTROYER_CLUSTER, alt: DESTROYER_NUKE };
   if (type === VEHICLE.GUNBOAT) return {primary:GUNBOAT_CANNON,alt:GUNBOAT_ROCKET};
   return type === VEHICLE.JET ? { primary: JET_MG, alt: JET_BOMB }
     : type === VEHICLE.TANK ? { primary: TANK_CANNON, alt: TANK_CLUSTER } : { primary: JEEP_MG };
 }
+/** The gunner seat's weapons: aircraft fire ventral rockets, the destroyer's
+ * AA mount fires lock-on rockets (alt: the battery salvo), others a crew MG. */
+export function crewArmament(type: number, variant = 0): { primary: WeaponDef; alt?: WeaponDef } {
+  if (isDestroyer(type, variant)) return { primary: DESTROYER_AA_ROCKET, alt: DESTROYER_CLUSTER };
+  return { primary: type === VEHICLE.JET ? AIRCREW_ROCKET : CREW_MG };
+}
 export function isJetBombWeapon(id: number): boolean { return id === JET_BOMB.id || id === NOCTURNE_VOID_BOMB.id; }
+/** The destroyer's weapons look and sound like the shells and rockets they
+ * are built from; kill feeds keep their own names. */
+export function presentationWeaponId(id: number): number {
+  return id === DESTROYER_CLUSTER.id ? TANK_CLUSTER.id : id === DESTROYER_NUKE.id ? TRAIN_NUCLEAR_CANNON.id
+    : id === DESTROYER_AA_ROCKET.id ? AIRCREW_ROCKET.id : id;
+}
 export function vehicleWeaponColor(id: number): number {
   return id === NOCTURNE_LANCE.id || id === NOCTURNE_VOID_BOMB.id ? 0xc577ff
     : id === BASTION_SHOCK_SHELL.id ? 0x8ee8ed : 0xffd48a;
@@ -636,6 +716,7 @@ const VEHICLE_WEAPONS: readonly WeaponDef[] = [
   JEEP_MG, TANK_CANNON, TANK_CLUSTER, CLUSTER_BOMBLET, JET_MG, JET_BOMB,
   RUN_OVER, NOCTURNE_LANCE, NOCTURNE_VOID_BOMB, BASTION_CANNON, BASTION_SHOCK_SHELL,
   GUNBOAT_CANNON,GUNBOAT_ROCKET,TRAIN_NUCLEAR_CANNON,CREW_MG,AIRCREW_ROCKET,
+  DESTROYER_CLUSTER,DESTROYER_NUKE,DESTROYER_AA_ROCKET,
 ];
 
 /** Resolve any weapon id - handheld, auxiliary (100+), or vehicle (200+). */

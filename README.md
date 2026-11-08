@@ -53,7 +53,7 @@ The full rules are in the [gameplay reference](docs/GAMEPLAY.md).
 ## The world
 
 - Meridian: a 22.5 km island with four cities, wilderness, caves, rail lines, ferries, runways and harbors. Cinder and Nacre are two more worlds, with their own terrain, cities and creatures.
-- Ten infantry weapons, plus jeeps, tanks, fighter jets, bombers and gunboats.
+- Ten infantry weapons, plus jeeps, tanks, fighter jets, bombers, gunboats and destroyers.
 - Wildlife and undead, plus bosses that drop a shared Nuke Launcher when killed.
 - Field camps: shelters, medical stations and ammo fabricators, paid for with salvage.
 - Every model and texture is generated in code. The build downloads only two fonts.

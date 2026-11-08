@@ -17,6 +17,7 @@ import { FrontierMarkers } from './render/frontier.js';
 import {
   World, WEAPONS, PLAYER, NET, TICK_RATE, pelletDir, viewDir, clamp,
   VEHICLE, vehicleDefinition, vehicleArmament, vehicleWeaponColor, isJetBombWeapon, vehicleEyeHeight, weaponDefById, VEHICLE_WEAPON_ID_BASE,
+  isDestroyer, crewArmament, presentationWeaponId,
   NUKE_BOMB,
   LOCK_ACQUIRING, LOCK_LOCKED, HOMING_SPEED_FACTOR,
   type VehicleType,
@@ -643,6 +644,7 @@ const net = new NetClient({
   },
 
   onFire(ev: FireEvent): void {
+    if (presentationWeaponId(ev.weapon) !== ev.weapon) ev = { ...ev, weapon: presentationWeaponId(ev.weapon) };
     if (ev.shooter === myId) {
       if (ev.weapon >= VEHICLE_WEAPON_ID_BASE) {
         // Vehicle armament is fired server-side. Its effects originate at
@@ -664,6 +666,7 @@ const net = new NetClient({
   },
 
   onExplosion(ev): void {
+    if (presentationWeaponId(ev.weapon) !== ev.weapon) ev = { ...ev, weapon: presentationWeaponId(ev.weapon) };
     const cam = sceneMgr.camera;
     const ownArtilleryImpact=ev.weapon===213&&artilleryFeedback.impact(ev.projectileId,ev,performance.now()*.001);
     // The event beats projectile retirement in the next snapshot. Remove both
@@ -1096,7 +1099,13 @@ function frame(): void {
         sceneMgr.scene.add(localHull);
         // A jet at rest is on a runway: lead with how to take off.
         const runway = pred.state.vehicle === VEHICLE.JET && Math.hypot(pred.state.vx, pred.state.vy, pred.state.vz) < 5;
-        const hint = artillery?'Leviathan siege cannon: aim and FIRE a nuclear shell | E dismount':gunner ? (pred.state.vehicle===VEHICLE.JET?'Ventral gunner: look within the downward cone | FIRE rockets | E exit':'Gunner: mouse aims the crew MG | FIRE to shoot | E exit') : touch ? (pred.state.vehicle === VEHICLE.JET
+        const destroyer = isDestroyer(pred.state.vehicle, pred.state.vehicleVariant);
+        const hint = destroyer ? gunner
+          ? touch ? 'AA mount: hold aim on an aircraft to lock · FIRE flak rockets · ALT battery salvo'
+            : 'AA mount: hold aim on an aircraft to lock | LMB flak rockets | RMB battery salvo | E leave the mount'
+          : touch ? 'Bridge: stick to steer · drag to aim the battery · FIRE salvo · ALT nuclear salvo'
+            : 'Bridge: W/S throttle | A/D steer | mouse aims the battery | LMB salvo | RMB nuclear salvo (60 s)'
+          : artillery?'Leviathan siege cannon: aim and FIRE a nuclear shell | E dismount':gunner ? (pred.state.vehicle===VEHICLE.JET?'Ventral gunner: look within the downward cone | FIRE rockets | E exit':'Gunner: mouse aims the crew MG | FIRE to shoot | E exit') : touch ? (pred.state.vehicle === VEHICLE.JET
           ? runway ? 'Hold THRUST to roll down the runway, then pull the stick back to lift off'
             : 'Stick: pitch / roll · THRUST and BRAKE control speed · drag to look'
           : 'Stick to drive · drag to aim · hold FIRE to shoot') : runway ? 'Hold SPACE for throttle, then S to lift off | A/D roll | C brake'
@@ -1231,7 +1240,7 @@ function frame(): void {
     hud.setWeaponAvailability(availability);
     if (pred.state.vehicle !== VEHICLE.NONE) {
       const mounted = artillery ? weaponDefById(213) : gunner
-        ? weaponDefById(pred.state.vehicle === VEHICLE.JET ? 215 : 214)
+        ? crewArmament(pred.state.vehicle, pred.state.vehicleVariant).primary
         : vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant).primary;
       hud.setMountedWeapon(mounted?.name ?? 'Mounted weapon', pred.alive);
     }
@@ -1247,7 +1256,7 @@ function frame(): void {
     if (pred.state.vehicle !== VEHICLE.NONE) {
       const vdef = vehicleDefinition(pred.state.vehicle, pred.state.vehicleVariant)!;
       hud.setVehicle(
-        artillery?'LEVIATHAN RAIL ARTILLERY: Nuclear Cannon':gunner?`${vdef.name} GUNNER: ${pred.state.vehicle===VEHICLE.JET?'Ventral Rockets':'Crew Machine Gun'}`:
+        artillery?'LEVIATHAN RAIL ARTILLERY: Nuclear Cannon':gunner?(isDestroyer(pred.state.vehicle,pred.state.vehicleVariant)?`${vdef.name} AA MOUNT: Flak Rockets / Battery Salvo`:`${vdef.name} GUNNER: ${pred.state.vehicle===VEHICLE.JET?'Ventral Rockets':'Crew Machine Gun'}`):
         pred.state.vehicleVariant ? `${vdef.name}: ${vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant).primary.name} / ${vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant).alt?.name}` : vdef.name,
         vdef ? vehicleHealth / vdef.maxHealth : 0,
         pred.state.vehicle === VEHICLE.JEEP ? pred.state.boostFuel : null,

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { createIndustrialMaterial } from './industrial-material.js';
 import {
   VEHICLE, vehicleDefinition, VEHICLE_VARIANT, validVehicleVariant, JET_GUN_MUZZLE, NOCTURNE_SCALE,
-  GUNBOAT_GUN_PIVOT, GUNBOAT_BARREL_LENGTH, TRAIN_ARTILLERY_PIVOT, TRAIN_ARTILLERY_BARREL_LENGTH,
+  GUNBOAT_GUN_PIVOT, DESTROYER_BATTERY_PIVOT, DESTROYER_BATTERY_LENGTH, GUNBOAT_BARREL_LENGTH, TRAIN_ARTILLERY_PIVOT, TRAIN_ARTILLERY_BARREL_LENGTH,
   crewGunPivot, CREW_GUN_LENGTH, artilleryPitch,
   viewDir, type SnapshotVehicle, type VehicleType,
 } from '@shared/index';
@@ -467,6 +467,48 @@ function gunboatTemplate():THREE.Group {
   return root;
 }
 
+/** Keel-origin capital ship, 34 m long. The bridge aims the forward battery;
+ * the stern mount's AA launcher is drawn as the crew weapon. */
+function destroyerTemplate():THREE.Group {
+  const root=new THREE.Group(),hull=new VehicleGeometry(),glass=new VehicleGeometry();
+  const grey=0x56646e,deck=0x7d847f,trim=0xc9c3a3,band=0x2c3438;
+  hull.loft([{z:-17.4,y:2.7,w:.05,h:.5},{z:-15,y:2.05,w:1.9,h:1.55},{z:-10,y:1.75,w:3.3,h:1.72},
+    {z:4,y:1.7,w:3.6,h:1.7},{z:13,y:1.75,w:3.25,h:1.72},{z:16,y:1.9,w:2.7,h:1.5}],grey);
+  hull.box(6.9,.14,30,0,3.4,-.6,deck);
+  hull.box(7.3,.18,30,0,1.45,-.6,band);
+  hull.box(5.2,3.2,6.4,0,5,-3.5,grey);
+  hull.box(3.8,1.6,3.8,0,7.4,-4.2,grey);
+  hull.box(4.1,.16,4.1,0,8.25,-4.2,trim);
+  glass.box(3.5,.62,.05,0,7.55,-6.12,0x416c79);
+  for(const side of [-1,1]) glass.box(.05,.6,3.2,side*1.92,7.55,-4.2,0x416c79);
+  hull.box(1.8,4.8,2.4,0,5.8,2.6,grey);
+  hull.box(1.9,.4,2.5,0,8.3,2.6,DARK);
+  hull.tube(.12,[0,8.3,-2.2],[0,13.2,-2.2],METAL,8);
+  hull.box(3.2,.12,.18,0,12.2,-2.2,trim);
+  hull.box(1.4,.5,.3,0,13.3,-2.2,deck);
+  hull.box(4,1.8,4.8,0,4.3,6.8,grey);
+  hull.box(2.6,1.2,2.6,0,4,11.6,deck);
+  for(const side of [-1,1]) {
+    hull.tube(.04,[side*3.4,4,-14],[side*3.4,4,14],trim,6);
+    for(let i=0;i<15;i++){const z=-14+i*2;hull.tube(.035,[side*3.4,3.47,z],[side*3.4,4,z],trim,6);}
+  }
+  root.add(hull.mesh(ARMOR,'body'),glass.mesh(WINDOWS,'glass'));
+  const turret=new THREE.Group();turret.name='turret';turret.position.copy(DESTROYER_BATTERY_PIVOT);
+  const armor=new VehicleGeometry();
+  armor.loft([{z:-1.3,y:-.1,w:1,h:.5},{z:0,y:0,w:1.45,h:.7},{z:1.4,y:-.05,w:1.2,h:.6}],grey);
+  armor.box(2.4,.1,2.6,0,.72,.1,deck);
+  turret.add(armor.mesh(ARMOR,'battery-turret'));
+  const elevation=new THREE.Group();elevation.name='weapon-elevation';
+  const barrels=new VehicleGeometry();
+  for(const x of [-.55,0,.55]) {
+    barrels.tube(.2,[x,0,-.9],[x,0,-1.6],deck,12);
+    barrels.tube(.13,[x,0,-1.5],[x,0,-DESTROYER_BATTERY_LENGTH],METAL,12,.11);
+  }
+  const muzzle=new THREE.Object3D();muzzle.name='weapon-muzzle';muzzle.position.z=-DESTROYER_BATTERY_LENGTH;
+  elevation.add(barrels.mesh(ARMOR,'battery-guns'),muzzle);turret.add(elevation);root.add(turret);
+  return root;
+}
+
 /** Hull forward is -Z. Resources are shared; transforms are unique per hull. */
 export function buildVehicleHull(type: VehicleType, variant = 0): THREE.Group {
   if (type === VEHICLE.NONE) return new THREE.Group();
@@ -474,7 +516,7 @@ export function buildVehicleHull(type: VehicleType, variant = 0): THREE.Group {
   const key = type + variant * 10;
   let template = TEMPLATES.get(key);
   if (!template) {
-    template = variant === VEHICLE_VARIANT.NOCTURNE ? nocturneTemplate() : variant === VEHICLE_VARIANT.BASTION ? bastionTemplate() : type === VEHICLE.GUNBOAT ? gunboatTemplate() : type === VEHICLE.JEEP ? jeepTemplate() : type === VEHICLE.TANK ? tankTemplate() : jetTemplate();
+    template = variant === VEHICLE_VARIANT.DESTROYER ? destroyerTemplate() : variant === VEHICLE_VARIANT.NOCTURNE ? nocturneTemplate() : variant === VEHICLE_VARIANT.BASTION ? bastionTemplate() : type === VEHICLE.GUNBOAT ? gunboatTemplate() : type === VEHICLE.JEEP ? jeepTemplate() : type === VEHICLE.TANK ? tankTemplate() : jetTemplate();
     template.rotation.order = 'YXZ';
     TEMPLATES.set(key, template);
   }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { Game, type ServerVehicle } from '../src/game.js';
 import {
   BTN, VEHICLE, VEHICLE_DEFS, vehicleDefinition, TANK_CLUSTER, CLUSTER_BOMBLET, CLUSTER_COUNT,
-  LOCK_LOCKED, LOCK_NONE, LOCK_TICKS, TICK_RATE, GUNBOAT_DRAFT,
+  LOCK_LOCKED, LOCK_NONE, LOCK_TICKS, TICK_RATE, GUNBOAT_DRAFT, boatDraft,
   ByteReader, decodeSnapshot, sphereFieldContact,
   CARPET_BOMB_COUNT, JET_BOMB, type InputCmd, type WeaponDef,
 } from '@shared/index';
@@ -64,8 +64,9 @@ test('vehicle roster spawns all three types on world sites', () => {
     assert.equal(v.health, def.maxHealth);
     assert.equal(v.occupant, -1);
     if(v.type===VEHICLE.GUNBOAT) {
-      const fluid=game.world.liquidAt(v.x,v.y+GUNBOAT_DRAFT-.08,v.z);
-      assert.equal(fluid?.kind,'water');assert.ok(Math.abs(v.y+GUNBOAT_DRAFT-fluid.surfaceY)<.04);
+      const draft=boatDraft(v.variant);
+      const fluid=game.world.liquidAt(v.x,v.y+draft-.08,v.z);
+      assert.equal(fluid?.kind,'water');assert.ok(Math.abs(v.y+draft-fluid.surfaceY)<.04);
     } else {
       // Capital pads may sit below bridges. Validate local support, including
       // the rail cannon's real moving flatcar, rather than the highest roof.

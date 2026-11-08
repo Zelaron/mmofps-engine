@@ -69,7 +69,7 @@ test('boarding an above-water gunner seat clears stale drowning and preserves ea
 
 test('all real harbor boats board from the dock, dismount to dry support and respawn at the local water surface',()=>{
  const game=new Game(1337,{vehicles:true}),p=game.addPlayer('sailor',null),harbors=game.world.collectTransportPlan().harbors;
- const boats=[...game.vehicles.values()].filter(v=>v.type===VEHICLE.GUNBOAT);assert.equal(boats.length,5);
+ const boats=[...game.vehicles.values()].filter(v=>v.type===VEHICLE.GUNBOAT&&!v.variant);assert.equal(boats.length,5);
  for(const harbor of harbors) {
   const berth=harborBoatSite(harbor),v=boats.find(v=>Math.hypot(v.x-berth.x,v.z-berth.z)<.1)!;assert.ok(v,harbor.name);
   const liquid=game.world.liquidAt(v.x,game.world.column(v.x,v.z).h+.5,v.z)!;

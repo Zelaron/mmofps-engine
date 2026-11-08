@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { NuclearBurstBudget, NUCLEAR_PARTICLE_CAP } from './nuclear-burst.js';
-import { weaponDefById, TICK_DT, WEAPONS, NUKE_MARKER, NUKE_BOMB, vehicleWeaponColor } from '@shared/index';
+import { presentationWeaponId, weaponDefById, TICK_DT, WEAPONS, NUKE_MARKER, NUKE_BOMB, vehicleWeaponColor } from '@shared/index';
 import { VehicleGeometry } from './vehicle-geometry.js';
 import { StrategicBurst } from './strategic-burst.js';
 
@@ -414,7 +414,8 @@ export class Effects {
   /** Sync server-authoritative projectile positions. */
   updateProjectiles(views: ProjectileVisual[]): void {
     const present = new Set<number>();
-    for (const v of views) {
+    for (const view of views) {
+      const look = presentationWeaponId(view.weapon), v = look === view.weapon ? view : { ...view, weapon: look };
       present.add(v.id);
       let slot = this.projectileMeshes.get(v.id);
       if (!slot || slot.weapon !== v.weapon) {

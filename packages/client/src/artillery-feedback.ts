@@ -1,4 +1,4 @@
-import { MAX_OWNED_ARTILLERY_SHELLS, TRAIN_NUCLEAR_CANNON } from '@shared/vehicles';
+import { isOwnedArtillery, MAX_OWNED_ARTILLERY_SHELLS, TRAIN_NUCLEAR_CANNON } from '@shared/vehicles';
 
 interface Point {x:number;y:number;z:number}
 interface Shot extends Point {id:number;owner:number;weapon:number}
@@ -13,7 +13,7 @@ export class ArtilleryFeedback {
   reloadSeconds(now:number):number {return Math.max(0,this.reloadUntil-now);}
   sync(shots:readonly Shot[],owner:number,now:number):void {
     for(const shot of shots) {
-      if(shot.weapon!==213||shot.owner!==owner)continue;
+      if(!isOwnedArtillery(shot.weapon)||shot.owner!==owner)continue;
       if(!this.owned.has(shot.id)&&this.owned.size>=MAX_OWNED_ARTILLERY_SHELLS)this.owned.delete(this.owned.keys().next().value!);
       this.owned.set(shot.id,{point:{x:shot.x,y:shot.y,z:shot.z},seen:now});
     }
