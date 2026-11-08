@@ -673,7 +673,7 @@ export class FrontierUI {
     };
     for (const [index, option] of this.displayedSpawns.entries()) {
       const near = (option.baseId ?? option.id) === local?.id, available = option.available !== false;
-      const detail = `${near ? 'LOCAL · ' : ''}${available ? option.kind === 'mobile' ? 'Mobile rally' : option.kind === 'air' ? 'Airborne fighter jet' : option.id.startsWith('assault-') ? 'Forward assault staging' : 'Safe reinforcement rally' : 'UNAVAILABLE'} · ${(Math.hypot(option.x - this.x, option.z - this.z) / 1000).toFixed(1)} km${option.reason ? ` · ${option.reason}` : ''}`;
+      const detail = `${near ? 'LOCAL · ' : ''}${available ? option.kind === 'mobile' ? 'Mobile rally' : option.kind === 'air' ? 'Fighter jet on a runway' : option.id.startsWith('assault-') ? 'Forward assault staging' : 'Safe reinforcement rally' : 'UNAVAILABLE'} · ${(Math.hypot(option.x - this.x, option.z - this.z) / 1000).toFixed(1)} km${option.reason ? ` · ${option.reason}` : ''}`;
       add(option.id, option.name, detail, index, available, near, option.kind === 'air');
     }
     add('', 'Automatic deployment', 'Use an available safe faction rally', undefined, !!state);
@@ -695,7 +695,7 @@ export class FrontierUI {
         const fly = document.createElement('button'); fly.className = 'deploy-now deploy-jet'; fly.disabled = !ready;
         const flyLabel = document.createElement('b'); flyLabel.textContent = 'FIGHTER JET ✈';
         const flyHint = document.createElement('span');
-        flyHint.textContent = ready ? `${jet.reason ?? 'Launch airborne.'} Out of combat only.` : jet.reason ?? 'Not available right now.';
+        flyHint.textContent = ready ? `${jet.reason ?? 'Take off from a runway.'} Out of combat only.` : jet.reason ?? 'Not available right now.';
         fly.append(flyLabel, flyHint);
         fly.onclick = () => { if (ready) { this.deployNow(jet.id); this.toggle(false); } };
         actions.append(fly);

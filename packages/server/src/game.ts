@@ -46,7 +46,7 @@ import { awardXp, progressStatus, recordHit, rewardBase, rewardCapture, rewardKi
 import { XP_REASON, XP_VALUES } from '@shared/progression';
 import { OutpostSystem } from './outposts.js';
 import { SpatialIndex } from './spatial-index.js';
-import { FACTIONS, WAR_REDEPLOY_WEAPON, WILDLIFE_WEAPON, type Faction, type SpawnOption } from '@shared/frontier';
+import { FACTIONS, WAR_REDEPLOY_WEAPON, WILDLIFE_WEAPON, type CampaignBase, type Faction, type SpawnOption } from '@shared/frontier';
 import { botCampaignRole, botRoleId } from './bots.js';
 import { aircraftThreatFor } from './aircraft-threat.js';
 import { BotSimulation } from './bot-simulation.js';
@@ -263,13 +263,14 @@ const VEHICLE_INTEREST_RADIUS = 1800;
 /** Instant redeploy: allowed this long after the last hit taken, then cools down. */
 const DEPLOY_COMBAT_GRACE_SECONDS = 6;
 const DEPLOY_COOLDOWN_SECONDS = 15;
-/** Airborne deployment: cooldown per soldier, cap per faction, launch speed. */
+/** Fighter deployment: cooldown per soldier, cap per faction. */
 const JET_DEPLOY_COOLDOWN_TICKS = 45 * TICK_RATE;
 const JET_DEPLOY_FACTION_CAP = 4;
-const JET_DEPLOY_SPEED = 85;
-const JET_DEPLOY_ALTITUDE = 260;
-/** Launch this far behind the friendly base, so a pilot can orient before enemy air defenses. */
-const JET_DEPLOY_BEHIND = 1300;
+/** A deployed fighter starts this far ahead of the strip's parked jet, nose
+ * down the runway. Takeoff speed comes after about 6 m of roll. */
+const JET_RUNWAY_START_AHEAD = 10;
+/** A runway start needs no enemy within this distance. */
+const JET_RUNWAY_SAFE_RADIUS = 600;
 const JET_ABANDON_TICKS = 40 * TICK_RATE;
 /** Off-screen travel: a bot this far from its objective, unseen by any human
  * and out of combat, redeploys at its forward staging instead of marching. */
@@ -796,38 +797,43 @@ export class Game {
     return result.slice(0, 12);
   }
 
-  /** Fighter deployment: airborne over the faction's held ground nearest its
-   * current operation, flying toward the fight. Humans only; never automatic. */
+  /** Fighter deployment: a fresh jet at rest on a runway, nose down the
+   * strip. Strips on the faction's own ground come first, then the one
+   * nearest its current operation. Humans only; never automatic. */
   private airSpawnOptions(player: ServerPlayer): SpawnOption[] {
     if (!this.frontier || !player.faction || player.isBot) return [];
     const order = this.frontier.order(player);
-    const owned = this.frontier.bases.filter(b => b.owner === player.faction);
-    if (!owned.length) return [];
+    const bases = this.frontier.bases, owned = bases.filter(b => b.owner === player.faction);
+    if (!owned.length || !bases.length) return [];
     const goal = order ?? owned[0];
-    const anchor = owned.reduce((a, b) => Math.hypot(a.x - goal.x, a.z - goal.z) <= Math.hypot(b.x - goal.x, b.z - goal.z) ? a : b);
-    let dx = goal.x - anchor.x, dz = goal.z - anchor.z, length = Math.hypot(dx, dz);
-    if (length < 1) { dx = -anchor.x; dz = -anchor.z; length = Math.hypot(dx, dz) || 1; }
-    const ux = dx / length, uz = dz / length;
-    const limit = WORLD.BORDER - 900;
-    const x = clamp(anchor.x - ux * JET_DEPLOY_BEHIND, -limit, limit), z = clamp(anchor.z - uz * JET_DEPLOY_BEHIND, -limit, limit), heading = Math.atan2(-ux, -uz);
-    let ground = -Infinity;
-    for (let d = 0; d <= 2400; d += 300) for (const side of [-120, 0, 120])
-      ground = Math.max(ground, this.world.groundY(x + ux * d - uz * side, z + uz * d + ux * side));
-    const y = Math.max(ground, 0) + JET_DEPLOY_ALTITUDE;
+    let best: { x: number; y: number; z: number; heading: number; base: CampaignBase; safe: boolean; score: number } | undefined;
+    for (const site of this.vehicleSites) {
+      if (site.type !== VEHICLE.JET || (site.variant ?? 0) !== 0) continue;
+      const x = site.x - Math.sin(site.heading) * JET_RUNWAY_START_AHEAD, z = site.z - Math.cos(site.heading) * JET_RUNWAY_START_AHEAD;
+      let safe = true;
+      for (const q of this.players.values()) {
+        if (q.state.alive && this.areEnemies(player, q) && Math.hypot(q.state.px - x, q.state.pz - z) < JET_RUNWAY_SAFE_RADIUS) { safe = false; break; }
+      }
+      const base = bases.reduce((a, b) => Math.hypot(a.x - x, a.z - z) <= Math.hypot(b.x - x, b.z - z) ? a : b);
+      const score = Math.hypot(x - goal.x, z - goal.z) + (base.owner === player.faction ? 0 : 1e6) + (safe ? 0 : 1e7);
+      if (!best || score < best.score) best = { x, y: this.world.groundY(x, z) + .1, z, heading: site.heading, base, safe, score };
+    }
+    if (!best) return [];
     let active = 0;
     for (const v of this.vehicles.values()) {
       const pilot = this.players.get(v.occupant);
       if (v.deployed && v.respawnAtTick < 0 && pilot && !pilot.isBot && pilot.faction === player.faction) active++;
     }
     const cooling = this.tick < player.jetReadyAt, full = active >= JET_DEPLOY_FACTION_CAP;
-    return [{ id: 'air-jet', name: 'Fighter jet · airborne', kind: 'air', x, y, z, heading, baseId: anchor.id,
-      available: !cooling && !full,
+    return [{ id: 'air-jet', name: 'Fighter jet · runway', kind: 'air', x: best.x, y: best.y, z: best.z, heading: best.heading,
+      baseId: best.base.id, available: !cooling && !full && best.safe,
       reason: cooling ? `Fighter ready in ${Math.ceil((player.jetReadyAt - this.tick) / TICK_RATE)} s.`
         : full ? 'All faction fighter slots are flying. Try again shortly.'
-        : `Launch airborne over ${anchor.name}, heading for ${order ? order.name.replace(/^(Capture|Defend) /, '') : 'the front'}.` }];
+        : !best.safe ? 'Enemies are near every runway. Try again shortly.'
+        : `Take off from the runway near ${best.base.name}, then fly to ${order ? order.name.replace(/^(Capture|Defend) /, '') : 'the front'}.` }];
   }
 
-  /** Seat a deploying soldier in a fresh fighter already in level flight. */
+  /** Seat a deploying soldier in a fresh fighter, at rest on its runway. */
   private launchJet(p: ServerPlayer, heading: number): void {
     const s = p.state;
     const v = this.spawnVehicleAt({ type: VEHICLE.JET, x: s.px, y: s.py - .05, z: s.pz, heading });
@@ -835,8 +841,7 @@ export class Game {
     p.vehicleId = v.id; p.spawnProtectedUntil = -1;
     s.vehicle = VEHICLE.JET; s.vehicleVariant = 0; s.seat = 0; s.vehicleId = v.id; s.transportRoute = undefined;
     s.heading = heading; s.vehiclePitch = 0; s.vehicleRoll = 0; s.boosting = false; s.vehicleRotation = undefined;
-    s.vx = -Math.sin(heading) * JET_DEPLOY_SPEED; s.vy = 0; s.vz = -Math.cos(heading) * JET_DEPLOY_SPEED;
-    s.grounded = false; s.boostFuel = 1;
+    s.vx = 0; s.vy = 0; s.vz = 0; s.grounded = true; s.boostFuel = 1;
     p.vehFireCd = 0.5; p.vehAltCd = 1;
     p.jetReadyAt = this.tick + JET_DEPLOY_COOLDOWN_TICKS;
   }

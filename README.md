@@ -44,7 +44,7 @@ Phones get on-screen controls automatically.
 
 **The war.** Each faction starts with a home city, a harbor and a forward base; the rest of the map is up for grabs. Every base has three capture points, and holding two of them makes it yours. Stand in a capture ring to take it, and outnumber the enemy to keep the capture going. A faction wins by holding 8 of the 12 bases, or the most bases when 2 hours run out. If no base changes hands for 15 minutes, a 3-minute final push decides it sooner. Then a new war starts with the home regions rotated.
 
-**Getting to the fight.** You spawn at your faction's busiest operation, and the order panel shows where to go. Out of combat, hold **Q** (or use **G → DEPLOY NOW**) to go straight to the front, and **G → FIGHTER JET** launches you in a jet that's already flying.
+**Getting to the fight.** You spawn at your faction's busiest operation, and the order panel shows where to go. Out of combat, hold **Q** (or use **G → DEPLOY NOW**) to go straight to the front, and **G → FIGHTER JET** puts you in a jet on a runway, ready to take off.
 
 **Progression.** XP for kills, captures, vehicles and wars, 60 ranks, three daily orders and a debrief after each war, all saved with your character.
 

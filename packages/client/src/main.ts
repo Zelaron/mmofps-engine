@@ -1094,9 +1094,13 @@ function frame(): void {
         localHullType = pred.state.vehicle; localHullVariant = pred.state.vehicleVariant;
         localHullSeat=pred.state.seat??0;
         sceneMgr.scene.add(localHull);
+        // A jet at rest is on a runway: lead with how to take off.
+        const runway = pred.state.vehicle === VEHICLE.JET && Math.hypot(pred.state.vx, pred.state.vy, pred.state.vz) < 5;
         const hint = artillery?'Leviathan siege cannon: aim and FIRE a nuclear shell | E dismount':gunner ? (pred.state.vehicle===VEHICLE.JET?'Ventral gunner: look within the downward cone | FIRE rockets | E exit':'Gunner: mouse aims the crew MG | FIRE to shoot | E exit') : touch ? (pred.state.vehicle === VEHICLE.JET
-          ? 'Stick: pitch / roll · THRUST and BRAKE control speed · drag to look'
-          : 'Stick to drive · drag to aim · hold FIRE to shoot') : CONTROL_HINTS[pred.state.vehicle];
+          ? runway ? 'Hold THRUST to roll down the runway, then pull the stick back to lift off'
+            : 'Stick: pitch / roll · THRUST and BRAKE control speed · drag to look'
+          : 'Stick to drive · drag to aim · hold FIRE to shoot') : runway ? 'Hold SPACE for throttle, then S to lift off | A/D roll | C brake'
+          : CONTROL_HINTS[pred.state.vehicle];
         if (hint) hud.showAnnounce(hint);
       }
       if (localHull) {

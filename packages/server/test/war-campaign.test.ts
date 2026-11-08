@@ -7,6 +7,7 @@ import { BOT_CAPTURE_WEIGHT, CAPTURE_SECONDS, FINAL_PUSH_SECONDS, STALEMATE_SECO
 import { STALEMATE_GRACE_SECONDS, SUPPLY_CUT_SECONDS } from '../src/frontier.js';
 import { TICK_RATE } from '@shared/constants';
 import { VEHICLE } from '@shared/vehicles';
+import { BTN } from '@shared/movement';
 import { Msg } from '@shared/protocol';
 import { rankForXp, xpForRank, XP_VALUES } from '@shared/progression';
 
@@ -133,20 +134,33 @@ test('kills, assists and captures award persistent experience to humans only', (
   assert.equal(rankForXp(xpForRank(5)), 5); assert.equal(rankForXp(xpForRank(5) - 1), 4);
 });
 
-test('a human can deploy straight into a flying fighter jet, with a cooldown, and deployed jets never respawn', () => {
+test('a human can deploy into a fighter jet at rest on a runway and take off, with a cooldown, and deployed jets never respawn', () => {
   const g = new Game(1337, { frontier: true, vehicles: true }), f = g.frontier!;
   const pilot = g.addPlayer('Ace', null); pilot.faction = 1;
   f.step(g.players.values(), g.tick, .2);
   const option = f.reinforcementOptions(pilot).find(o => o.kind === 'air')!;
-  assert.ok(option && option.available !== false, 'airborne deployment is offered to humans');
+  assert.ok(option && option.available !== false, 'runway deployment is offered to humans');
   assert.equal(f.reinforcementOptions(g.addPlayer('Bot', null, true)).some(o => o.kind === 'air'), false, 'never to bots');
   assert.equal(g.requestRespawn(pilot, option.id), true);
   kill(g, pilot, pilot); respawn(g, pilot);
   assert.equal(pilot.state.alive, true); assert.equal(pilot.state.vehicle, VEHICLE.JET);
   const jet = g.vehicles.get(pilot.vehicleId)!;
   assert.ok(jet.deployed); assert.equal(jet.occupant, pilot.id);
-  assert.ok(Math.hypot(pilot.state.vx, pilot.state.vz) > 50, 'launched at cruise speed');
-  assert.ok(pilot.state.py > g.world.groundY(pilot.state.px, pilot.state.pz) + 150, 'launched at altitude');
+  assert.equal(Math.hypot(pilot.state.vx, pilot.state.vy, pilot.state.vz), 0, 'starts at rest');
+  const sites = (g as unknown as { vehicleSites: { type: number; x: number; z: number; heading: number }[] }).vehicleSites;
+  const strip = sites.find(s => s.type === VEHICLE.JET && Math.hypot(s.x - pilot.state.px, s.z - pilot.state.pz) < 12);
+  assert.ok(strip, 'starts on a runway, just ahead of its parked jet');
+  assert.equal(pilot.state.heading, strip.heading, 'facing down the strip');
+  const ground = g.world.groundY(pilot.state.px, pilot.state.pz);
+  assert.ok(Math.abs(pilot.state.py - ground) < .5, 'on the ground');
+  for (let i = 0; i < 240; i++) {
+    // Roll to takeoff speed, pull up briefly, then hold the climb.
+    g.queueInput(pilot, { seq: pilot.lastQueuedSeq + 1, buttons: BTN.THROTTLE | (i > 30 && i < 60 ? BTN.BACK : 0), weapon: 0,
+      yaw: pilot.state.heading, pitch: 0, renderTick: g.tick, renderFrac: 0 });
+    g.step();
+  }
+  assert.ok(pilot.state.alive && pilot.state.vehicle === VEHICLE.JET && pilot.state.py > ground + 20,
+    `held throttle and a pull-up take off from the strip (height ${(pilot.state.py - ground).toFixed(1)} m)`);
   assert.equal(f.reinforcementOptions(pilot).find(o => o.kind === 'air')!.available, false, 'cooldown before the next fighter');
   jet.health = 0; jet.respawnAtTick = g.tick; jet.occupant = -1;
   (g as unknown as { updateVehicles(): void }).updateVehicles();
