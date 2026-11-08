@@ -207,7 +207,8 @@ export class VehicleCollisionField {
     }
     this.hulls.set(h.id, h);
   }
-  select(state: KinState, dt: number, tick: number): VehicleCollisionSelection | undefined {
+  /** Hulls near one actor for this step; `exclude` is a driver's own hull. */
+  select(state: KinState, dt: number, tick: number, exclude = -1): VehicleCollisionSelection | undefined {
     if (!this.hulls.size || !Number.isFinite(state.px + state.py + state.pz + state.vx + state.vy + state.vz + tick + dt) ||
         Math.max(Math.abs(state.px), Math.abs(state.py), Math.abs(state.pz)) > MAX_COORDINATE) return undefined;
     // Cover any legal acceleration/jump/hyperspeed direction in this step,
@@ -220,6 +221,7 @@ export class VehicleCollisionField {
     // Pose arrival/driver processing order can differ during replay. If two
     // overlapping roofs can both carry the player, use the same hull on each.
     for (const id of [...ids].sort((a, b) => a - b)) {
+      if (id === exclude) continue;
       const h = this.hulls.get(id)!;
       const now = clamp(tick - h.tick, -6, 6) / TICK_RATE;
       const before = clamp(tick - dt * TICK_RATE - h.tick, -6, 6) / TICK_RATE;

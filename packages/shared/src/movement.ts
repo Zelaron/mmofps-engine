@@ -179,7 +179,13 @@ export function stepMove(world: World, s: MoveState, cmd: InputCmd, dt: number, 
     const approach = { x: s.px, z: s.pz, grounded: s.grounded, velocityY: s.vy };
     carryTransit(world, s, before, now);
     const lift = carryCityLift(world, s, before, now);
-    out.impact = s.vehicle === VEHICLE.GUNBOAT ? stepBoat(world, s, cmd, dt) : stepVehicle(world, s, cmd, dt, allowGroundCrestLaunch).impact;
+    // Other hulls are solid to ground vehicles and boats; a driver's own hull
+    // is excluded, and aircraft keep their own flight collision.
+    const previousCollisions = world.pedestrianCollisions;
+    if (s.vehicle !== VEHICLE.JET) world.pedestrianCollisions = world.vehicleCollisions?.select(s, dt, s.simulationTick, s.vehicleId);
+    try {
+      out.impact = s.vehicle === VEHICLE.GUNBOAT ? stepBoat(world, s, cmd, dt) : stepVehicle(world, s, cmd, dt, allowGroundCrestLaunch).impact;
+    } finally { world.pedestrianCollisions = previousCollisions; }
     out.impact = Math.max(out.impact, landOnCityLift(world, s, previousFeet, before, now, lift, false, approach));
     s.jumpHeld = (cmd.buttons & BTN.JUMP) !== 0;
     s.dodgeCd = Math.max(0, s.dodgeCd - dt);

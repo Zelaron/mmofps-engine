@@ -124,10 +124,28 @@ test('vehicle union is isolated from ordinary traces, drivers, and nested placem
     assert.equal(world.pedestrianCollisions, selection);
   });
   assert.equal(world.sdf(0, 1, 0), 1);
-  const driver = state(0, 0, 0); driver.vehicle = VEHICLE.JEEP;
+  const driver = state(0, 0, 0); driver.vehicle = VEHICLE.JEEP; driver.vehicleId = 1;
   run(world, driver, 60);
   assert.ok(driver.pz < -2, `own hull blocked driver: ${driver.pz}`);
   assert.equal(world.pedestrianCollisions, undefined);
+});
+
+test('ground vehicles stop at other hulls, never at their own, and report the crash', () => {
+  for (const [type, radius] of [[VEHICLE.JEEP, 1.35], [VEHICLE.TANK, 1.9]] as const) {
+    const world = vehicleCollisionWorld(), driver = state(0, 0, 0);
+    driver.vehicle = type; driver.vehicleId = 1;
+    // The parked tank's front track ends 2.33 m ahead of its origin.
+    const front = -30 + 2.33;
+    setVehicleColliders(world, 0, [hull(type, { id: 1 }), hull(VEHICLE.TANK, { id: 2, z: -30 })]);
+    let impact = 0;
+    for (let tick = 1; tick <= 300; tick++)
+      impact = Math.max(impact, stepMove(world, driver, { ...cmd, buttons: BTN.FORWARD }, 1 / 60, tick).impact);
+    // A sphere stops a jeep at the tank's flank; a taller tank may nose up
+    // onto the low rear deck, but neither passes through.
+    assert.ok(driver.pz > front && driver.pz < front + radius + .6, `${type}: stopped at ${driver.pz}, front ${front}`);
+    if (type === VEHICLE.JEEP) assert.ok(impact > 10, `ramming at speed is a wall-like crash (${impact})`);
+    assert.equal(world.pedestrianCollisions, undefined, 'the hull selection is scoped to the step');
+  }
 });
 
 test('destruction, respawn, replacement and railway hulls leave no stale solid', () => {

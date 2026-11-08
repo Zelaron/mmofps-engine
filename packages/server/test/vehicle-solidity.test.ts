@@ -77,6 +77,26 @@ test('boarding bypasses the pedestrian hull, and exits avoid other parked vehicl
   assert.ok(f.clearance() > -.025, 'exit chooses a capsule-clear side of both hulls');
 });
 
+test('a driven jeep stops at a parked tank in authority and prediction alike', () => {
+  const f = fixture(); for (let i = 0; i < 65; i++) f.step();
+  f.step(BTN.USE); assert.equal(f.player.state.vehicle, VEHICLE.JEEP);
+  const tank: ServerVehicle = { id: 10006, type: VEHICLE.TANK, x: 0, y: 0, z: -30, heading: 0,
+    occupant: -1, health: vehicleDefinition(VEHICLE.TANK)!.maxHealth, respawnAtTick: -1 };
+  f.game.vehicles.set(tank.id, tank);
+  f.step(0);
+  const prediction = new Prediction(vehicleCollisionWorld()); prediction.onSnapshot(f.snapshot());
+  for (let i = 0; i < 300; i++) {
+    const cmd = command(f.player.lastQueuedSeq + 1);
+    prediction.applyLocal(cmd); f.game.queueInput(f.player, cmd); f.game.step();
+    if (i % 3 === 2) prediction.onSnapshot(f.snapshot());
+  }
+  const rear = tank.z + 2.33;
+  assert.ok(f.player.state.pz > rear && f.player.state.pz < rear + 2, `authority stops at the tank: ${f.player.state.pz}`);
+  assert.ok(Math.abs(prediction.state.pz - f.player.state.pz) < .5, `prediction agrees: ${prediction.state.pz} vs ${f.player.state.pz}`);
+  assert.ok(f.hull.health < vehicleDefinition(VEHICLE.JEEP)!.maxHealth, 'ramming at speed is a crash for the rammer');
+  assert.equal(tank.x, 0, 'the parked hull is an obstacle, not pushed');
+});
+
 test('destroyed and removed hulls disappear from authority and client collision immediately', () => {
   const f = fixture(); for (let i = 0; i < 65; i++) f.step();
   const prediction = new Prediction(vehicleCollisionWorld()); prediction.onSnapshot(f.snapshot());
