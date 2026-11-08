@@ -17,6 +17,10 @@ import { walkingHullClearance } from './bot-walk-clearance.js';
 import { GroundDetour, supportedTerrainRise } from './bot-ground-navigation.js';
 import { DeckNavigation } from './bot-deck-navigation.js';
 import { botCampaignRole, botRoleId, campaignTravelOrders as travelOrders } from './bot-campaign-state.js';
+import { harborStairs, type QuayStair } from '@shared/transport';
+import type { World } from '@shared/worldgen';
+/** Each world's quay stairs, gathered once. */
+const quayStairs = new WeakMap<World, QuayStair[]>();
 export { botCampaignRole, botRoleId } from './bot-campaign-state.js';
 
 // Server-side bots. They produce InputCmds and go through the exact same
@@ -470,6 +474,8 @@ export class Bot {
   private campaignState: { order?: CampaignOrder; objective: Territory | null } | undefined;
   private readonly companionOrders = new Map<number, CampaignOrder | undefined>();
   private lastThought: InputCmd | undefined;
+  /** This think steers a swimmer to a quay stair. */
+  private stairApproach = false;
   /** A replacement pad this thought's soldier waits beside and must not step onto. */
   private padKeepOut: {x:number;z:number;radius:number} | undefined;
   private thoughtTick = -1;
@@ -870,6 +876,7 @@ export class Bot {
           this.campaignCourse(game,objective);
           this.repathAtTick = tick + 120;
         }
+        this.stairApproach = !!s.swimming && !routePickup && this.vehicleGoal < 0 && this.climbOutByStairs(game);
         // Wander between (seeked or random) ground points.
         const dx = this.targetX - s.px;
         const dz = this.targetZ - s.pz;
@@ -1250,8 +1257,28 @@ export class Bot {
     return game.world.trace(x,s.py+.6,z,0,-1,0,2.2,false).hit&&!game.world.liquidAt(x,s.py+.3,z);
   }
 
+  /** A swimmer heading for a quay makes for the nearest stair foot, then its
+   * top, instead of paddling along the quay wall. */
+  private climbOutByStairs(game:Game):boolean {
+    const s=this.player.state;
+    let stairs=quayStairs.get(game.world);
+    if(!stairs)quayStairs.set(game.world,stairs=game.world.collectTransportPlan().harbors.flatMap(harborStairs));
+    let best:QuayStair|undefined,bestDistance=Infinity;
+    for(const stair of stairs){
+      if(Math.hypot(stair.topX-this.targetX,stair.topZ-this.targetZ)>140)continue;
+      const d=Math.hypot(stair.footX-s.px,stair.footZ-s.pz);
+      if(d<bestDistance&&d<400){bestDistance=d;best=stair;}
+    }
+    if(!best)return false;
+    const atFoot=bestDistance<3||Math.hypot(best.topX-s.px,best.topZ-s.pz)<Math.hypot(best.topX-best.footX,best.topZ-best.footZ);
+    this.targetX=atFoot?best.topX:best.footX;this.targetZ=atFoot?best.topZ:best.footZ;
+    return true;
+  }
+
   private walkCourse(game:Game,yaw:number):number {
     const s=this.player.state;
+    // The way to a stair is open water, and its steps are meant to be climbed.
+    if(this.stairApproach)return yaw;
     const ordinaryCourse=this.walkDeckLegacy;
     if(this.groundDetour.active||this.walkEscape||s.swimming||!s.grounded||s.jumpAscent||s.boosting||s.submerged){
       this.walkSafety.reset();return ordinaryCourse?this.walkCourseLegacy(game,yaw):yaw;

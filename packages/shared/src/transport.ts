@@ -138,6 +138,34 @@ export function harborBoatSite(harbor: TransportHarbor): TransportPoint & { head
     heading: harbor.heading + Math.PI / 2 };
 }
 
+/** A flight of steps from under the water up to a quay's land-side edge. */
+export interface QuayStair {
+  harborId: number;
+  /** Open water just beyond the lowest step, where a swimmer starts climbing. */
+  footX: number; footZ: number;
+  /** On the quay, a step in from its edge. */
+  topX: number; topZ: number;
+}
+export const QUAY_STAIR_STEPS = 11;
+export const QUAY_STAIR_RISE = .25;
+export const QUAY_STAIR_TREAD = .66;
+const QUAY_STAIR_OFFSETS = [-21, 21] as const;
+/** The quay's long axis, the unit pointing from the dock toward its ferry side,
+ * and the dock center. Harbor headings are multiples of a quarter turn. */
+function quayFrame(harbor: TransportHarbor) {
+  const c = Math.cos(harbor.heading), sn = Math.sin(harbor.heading), side = harborDockSide(harbor);
+  return { dockX: harbor.x + c * 29 * side, dockZ: harbor.z - sn * 29 * side,
+    lx: -sn, lz: -c, ux: -c * side, uz: sn * side };
+}
+/** Two flights per quay on its land-side edge, either side of the causeway,
+ * clear of the ferry berth, the boat berth and the destroyer mooring. */
+export function harborStairs(harbor: TransportHarbor): QuayStair[] {
+  const f = quayFrame(harbor), out = 15 + QUAY_STAIR_STEPS * QUAY_STAIR_TREAD + 1.5;
+  return QUAY_STAIR_OFFSETS.map(w => ({ harborId: harbor.id,
+    footX: f.dockX + f.lx * w - f.ux * out, footZ: f.dockZ + f.lz * w - f.uz * out,
+    topX: f.dockX + f.lx * w - f.ux * 14, topZ: f.dockZ + f.lz * w - f.uz * 14 }));
+}
+
 /** Harbors whose quay moors a destroyer: opposite ocean coasts. */
 export const DESTROYER_HARBOR_IDS: ReadonlySet<number> = new Set([101, 103]);
 /** The destroyer's mooring off the quay end opposite the boat berth. Its long
@@ -575,6 +603,14 @@ function populateStructures(plan: TransportPlan, input: TransportInputs): void {
     // Side-loading quays match the ferry's open cargo portals, with no gate
     // placed across the driving lane when the vessel is at its berth.
     box(dock.x, dock.y - 1, dock.z, Math.abs(c) * 15 + Math.abs(sn) * 34, 1, Math.abs(sn) * 15 + Math.abs(c) * 34, 123);
+    // Stairs climb out of the water onto the quay's land-side edge.
+    const frame = quayFrame(h);
+    for (const w of QUAY_STAIR_OFFSETS) for (let i = 0; i < QUAY_STAIR_STEPS; i++) {
+      const top = dock.y - (i + 1) * QUAY_STAIR_RISE, bottom = h.y - 3, along = 15 + (i + .5) * QUAY_STAIR_TREAD;
+      box(dock.x + frame.lx * w - frame.ux * along, (top + bottom) / 2, dock.z + frame.lz * w - frame.uz * along,
+        Math.abs(frame.lx) * 1.5 + Math.abs(frame.ux) * (QUAY_STAIR_TREAD / 2 + .02), (top - bottom) / 2,
+        Math.abs(frame.lz) * 1.5 + Math.abs(frame.uz) * (QUAY_STAIR_TREAD / 2 + .02), 123);
+    }
     const start = { x: h.landX, y: input.sampleHeight(h.landX, h.landZ) + .1, z: h.landZ }, length = distance(start, dock);
     const count = Math.ceil(length / 2);
     for (let i = 0; i < count; i++) {
