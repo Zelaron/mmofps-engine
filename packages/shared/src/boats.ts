@@ -1,6 +1,6 @@
 import { BTN, type InputCmd, type MoveState } from './movement.js';
 import { clamp } from './math.js';
-import { vehicleDefinition, boatDraft, hullKeel } from './vehicles.js';
+import { vehicleDefinition, boatDraft, boatContactKeel } from './vehicles.js';
 import { sphereFieldContact } from './physics.js';
 import type { World } from './worldgen.js';
 
@@ -29,7 +29,7 @@ export function stepBoat(world: World, s: MoveState, cmd: InputCmd, dt: number):
   let impact = 0;
   // A long hull meets land and quays with spheres at its bow, midships and
   // stern (local -z is the bow); a gunboat is one sphere at its origin.
-  const keel = hullKeel(s.vehicle, s.vehicleVariant);
+  const keel = boatContactKeel(s.vehicle, s.vehicleVariant);
   const steps = Math.max(1, Math.ceil(Math.hypot(s.vx, s.vy, s.vz) * dt / .65));
   for (let i = 0; i < steps; i++) {
     s.px += s.vx * dt / steps; s.py += s.vy * dt / steps; s.pz += s.vz * dt / steps;

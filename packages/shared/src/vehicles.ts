@@ -44,6 +44,11 @@ const ORIGIN_KEEL = [0] as const;
 export function hullKeel(type: number, variant = 0): readonly number[] {
   return isDestroyer(type, variant) ? DESTROYER_KEEL_SPHERES : ORIGIN_KEEL;
 }
+/** Fewer, still overlapping, spheres keep the long hull out of land. */
+const DESTROYER_CONTACT_SPHERES = [-13, -6.5, 0, 6.5, 13] as const;
+export function boatContactKeel(type: number, variant = 0): readonly number[] {
+  return isDestroyer(type, variant) ? DESTROYER_CONTACT_SPHERES : ORIGIN_KEEL;
+}
 export function isDestroyer(type: number, variant = 0): boolean {
   return validVehicleVariant(type, variant) === VEHICLE_VARIANT.DESTROYER;
 }
@@ -650,8 +655,9 @@ export const TRAIN_NUCLEAR_CANNON: WeaponDef = {
 /** The destroyer's main battery: five cluster shells a salvo, a little
  * faster than the tank's, for about 1.2x its reach. */
 export const DESTROYER_CLUSTER: WeaponDef = { ...TANK_CLUSTER, id: 216, name: 'Battery Salvo', speed: 74 };
-/** Five nuclear shells a salvo on a long cooldown. Bots never fire it. */
-export const DESTROYER_NUKE: WeaponDef = { ...TRAIN_NUCLEAR_CANNON, id: 217, name: 'Warden Nuclear Salvo', interval: 60 };
+/** Five nuclear shells a salvo on a long cooldown. Bots never fire it. Its
+ * 1.5 km reach threatens harbors and the coast, not the inland cities. */
+export const DESTROYER_NUKE: WeaponDef = { ...TRAIN_NUCLEAR_CANNON, id: 217, name: 'Warden Nuclear Salvo', interval: 60, range: 1500 };
 export const DESTROYER_SALVO_COUNT = 5;
 /** Pitch that lands the battery salvo `horizontal` metres away and `drop`
  * metres below the muzzle (negative drop = above), following the shell to its

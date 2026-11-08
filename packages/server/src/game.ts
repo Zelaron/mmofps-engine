@@ -1411,7 +1411,10 @@ export class Game {
         // Other hulls are solid to this one, but never its own collider.
         state.vehicleId = v.id;
         const before = (this.tick - 1) / TICK_RATE, now = this.tick / TICK_RATE;
-        if (!state.grounded || v.type === VEHICLE.GUNBOAT) stepMove(this.world, state,
+        // A settled parked boat needs no physics until something moves it;
+        // it is re-checked every half second.
+        const settled = v.type === VEHICLE.GUNBOAT && Math.hypot(state.vx, state.vy, state.vz) < .02 && (this.tick + v.id) % 30 !== 0;
+        if ((!state.grounded || v.type === VEHICLE.GUNBOAT) && !settled) stepMove(this.world, state,
           { seq: 0, buttons: 0, weapon: 0, yaw: v.heading, pitch: 0, renderTick: 0, renderFrac: 0 }, TICK_DT, this.tick);
         else { carryTransit(this.world, state, before, now); carryCityLift(this.world, state, before, now); }
         v.x = state.px; v.y = state.py; v.z = state.pz; v.heading = state.heading;
