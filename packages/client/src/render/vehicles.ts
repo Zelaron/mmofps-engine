@@ -467,6 +467,35 @@ function gunboatTemplate():THREE.Group {
   return root;
 }
 
+/** A four-engine heavy bomber, 19 m long with a 16 m straight wing, so it
+ * parks inside a runway's edge lights. Ground contact is the origin. */
+function condorTemplate():THREE.Group {
+  const root=new THREE.Group(),body=new VehicleGeometry(),glass=new VehicleGeometry();
+  const skin=0x6f7a6b,belly=0x4f5850,trim=0xc8c09a;
+  body.loft([{z:-9.6,y:2.1,w:.25,h:.35},{z:-8.4,y:2.25,w:1,h:1},{z:-5,y:2.35,w:1.3,h:1.3},
+    {z:4,y:2.4,w:1.25,h:1.25},{z:8,y:2.7,w:.7,h:.7},{z:9.6,y:3,w:.25,h:.25}],skin);
+  body.box(16,.36,4.4,0,2.6,.5,skin);
+  body.box(.3,3.2,2.4,0,4.2,8.6,skin);
+  body.box(5.6,.24,1.8,0,3,8.8,skin);
+  for(const side of [-1,1]) {
+    for(const x of [2.6,5.4]) {
+      body.tube(.5,[side*x,2.15,-3.4],[side*x,2.15,1],belly,12,.42);
+      body.tube(.14,[side*x,2.15,-3.45],[side*x,2.15,-3.85],DARK,8);
+      body.add(new THREE.CylinderGeometry(.95,.95,.04,18),0x1b1f22,[side*x,2.15,-3.55],[Math.PI/2,0,0]);
+    }
+    body.box(.22,.12,.5,side*7.9,2.62,.2,side<0?0xdf6952:0x87c58f);
+    body.tube(.12,[side*2.6,1.6,0],[side*2.6,.3,0],METAL,6);
+    body.add(new THREE.CylinderGeometry(.4,.4,.35,12),DARK,[side*2.6,.4,0],[0,0,Math.PI/2]);
+  }
+  body.tube(.1,[0,1.3,-7.4],[0,.3,-7.4],METAL,6);
+  body.add(new THREE.CylinderGeometry(.3,.3,.28,12),DARK,[0,.3,-7.4],[0,0,Math.PI/2]);
+  body.box(1.6,.1,4,0,1.06,.4,DARK);
+  glass.box(1.6,.7,1.4,0,2.95,-8.2,0x416c79);
+  root.add(body.mesh(ARMOR,'body'),glass.mesh(WINDOWS,'glass'));
+  const muzzle=new THREE.Object3D();muzzle.name='weapon-muzzle';muzzle.position.set(0,2.05,-10.1);root.add(muzzle);
+  return root;
+}
+
 /** Keel-origin capital ship, 34 m long. The bridge aims the forward battery;
  * the stern mount's AA launcher is drawn as the crew weapon. */
 function destroyerTemplate():THREE.Group {
@@ -474,8 +503,10 @@ function destroyerTemplate():THREE.Group {
   const grey=0x56646e,deck=0x7d847f,trim=0xc9c3a3,band=0x2c3438;
   hull.loft([{z:-17.4,y:2.7,w:.05,h:.5},{z:-15,y:2.05,w:1.9,h:1.55},{z:-10,y:1.75,w:3.3,h:1.72},
     {z:4,y:1.7,w:3.6,h:1.7},{z:13,y:1.75,w:3.25,h:1.72},{z:16,y:1.9,w:2.7,h:1.5}],grey);
-  hull.box(6.9,.14,30,0,3.4,-.6,deck);
-  hull.box(7.3,.18,30,0,1.45,-.6,band);
+  // Deck and waterline band follow the hull's taper toward bow and stern.
+  hull.box(6.9,.14,23,0,3.4,1.5,deck);hull.box(5.4,.14,2.5,0,3.4,-11.25,deck);
+  hull.box(3.4,.14,2.5,0,3.4,-13.75,deck);hull.box(5.8,.14,3,0,3.4,14.5,deck);
+  hull.box(7.3,.18,23,0,1.45,1.5,band);hull.box(4.6,.18,5,0,1.45,-12.5,band);hull.box(6,.18,3,0,1.45,14.5,band);
   hull.box(5.2,3.2,6.4,0,5,-3.5,grey);
   hull.box(3.8,1.6,3.8,0,7.4,-4.2,grey);
   hull.box(4.1,.16,4.1,0,8.25,-4.2,trim);
@@ -489,8 +520,8 @@ function destroyerTemplate():THREE.Group {
   hull.box(4,1.8,4.8,0,4.3,6.8,grey);
   hull.box(2.6,1.2,2.6,0,4,11.6,deck);
   for(const side of [-1,1]) {
-    hull.tube(.04,[side*3.4,4,-14],[side*3.4,4,14],trim,6);
-    for(let i=0;i<15;i++){const z=-14+i*2;hull.tube(.035,[side*3.4,3.47,z],[side*3.4,4,z],trim,6);}
+    hull.tube(.04,[side*3.3,4,-9.5],[side*3.3,4,12.5],trim,6);
+    for(let i=0;i<12;i++){const z=-9.5+i*2;hull.tube(.035,[side*3.3,3.47,z],[side*3.3,4,z],trim,6);}
   }
   root.add(hull.mesh(ARMOR,'body'),glass.mesh(WINDOWS,'glass'));
   const turret=new THREE.Group();turret.name='turret';turret.position.copy(DESTROYER_BATTERY_PIVOT);
@@ -516,7 +547,7 @@ export function buildVehicleHull(type: VehicleType, variant = 0): THREE.Group {
   const key = type + variant * 10;
   let template = TEMPLATES.get(key);
   if (!template) {
-    template = variant === VEHICLE_VARIANT.DESTROYER ? destroyerTemplate() : variant === VEHICLE_VARIANT.NOCTURNE ? nocturneTemplate() : variant === VEHICLE_VARIANT.BASTION ? bastionTemplate() : type === VEHICLE.GUNBOAT ? gunboatTemplate() : type === VEHICLE.JEEP ? jeepTemplate() : type === VEHICLE.TANK ? tankTemplate() : jetTemplate();
+    template = variant === VEHICLE_VARIANT.CONDOR ? condorTemplate() : variant === VEHICLE_VARIANT.DESTROYER ? destroyerTemplate() : variant === VEHICLE_VARIANT.NOCTURNE ? nocturneTemplate() : variant === VEHICLE_VARIANT.BASTION ? bastionTemplate() : type === VEHICLE.GUNBOAT ? gunboatTemplate() : type === VEHICLE.JEEP ? jeepTemplate() : type === VEHICLE.TANK ? tankTemplate() : jetTemplate();
     template.rotation.order = 'YXZ';
     TEMPLATES.set(key, template);
   }

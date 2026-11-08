@@ -79,9 +79,10 @@ test('surface vehicle districts are quarter density with intact local motor pool
   const game = new Game(1337, { vehicles: true });
   const ordinary = [...game.vehicles.values()].filter(v => !v.variant && v.type !== VEHICLE.GUNBOAT);
   assert.ok(ordinary.length <= 17, 'legacy roster is also reduced to a quarter');
-  assert.equal([...game.vehicles.values()].filter(v => v.variant && v.variant !== VEHICLE_VARIANT.RAIL && v.variant !== VEHICLE_VARIANT.DESTROYER).length, 2,
+  assert.equal([...game.vehicles.values()].filter(v => v.variant && v.variant !== VEHICLE_VARIANT.RAIL && v.variant !== VEHICLE_VARIANT.DESTROYER && v.variant !== VEHICLE_VARIANT.CONDOR).length, 2,
     'the separate capital reward roster stays bounded');
   assert.equal([...game.vehicles.values()].filter(v => v.type === VEHICLE.GUNBOAT && !v.variant).length, 5);
   assert.equal([...game.vehicles.values()].filter(v => v.variant === VEHICLE_VARIANT.DESTROYER).length, 2, 'two moored destroyers');
+  assert.equal([...game.vehicles.values()].filter(v => v.variant === VEHICLE_VARIANT.CONDOR).length, 2, 'two parked heavy bombers');
   assert.equal([...game.vehicles.values()].filter(v => v.variant === VEHICLE_VARIANT.RAIL).length, 7);
 });

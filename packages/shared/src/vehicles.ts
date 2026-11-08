@@ -6,8 +6,8 @@ import type { World } from './worldgen.js';
 import { PLAYER } from './constants.js';
 import { multiplyRotations, normalizeRotation, rotateVector, rotationFromEuler, rotationToEuler,
   vehicleQuaternion, type VehicleOrientation } from './rotation.js';
-import { VEHICLE, VEHICLE_VARIANT, validVehicleVariant, NOCTURNE_SCALE } from './vehicle-identity.js';
-export { VEHICLE, VEHICLE_VARIANT, validVehicleVariant, NOCTURNE_SCALE } from './vehicle-identity.js';
+import { VEHICLE, VEHICLE_VARIANT, validVehicleVariant, NOCTURNE_SCALE, CONDOR_SCALE, jetScale } from './vehicle-identity.js';
+export { VEHICLE, VEHICLE_VARIANT, validVehicleVariant, NOCTURNE_SCALE, CONDOR_SCALE, jetScale } from './vehicle-identity.js';
 
 // Vehicles use a "possession" model: while a player drives, their MoveState
 // IS the vehicle (stepMove dispatches here), so the existing client
@@ -62,7 +62,7 @@ export function vehicleEyeOffset(state: VehicleOrientation & {vehicle:number;veh
   if(state.seat===2) {x=TRAIN_ARTILLERY_EYE.x;y=TRAIN_ARTILLERY_EYE.y;z=TRAIN_ARTILLERY_EYE.z;}
   else if(!state.seat&&isDestroyer(state.vehicle,state.vehicleVariant)) {x=DESTROYER_BRIDGE_EYE.x;y=DESTROYER_BRIDGE_EYE.y;z=DESTROYER_BRIDGE_EYE.z;}
   else if(state.seat===1) {
-    if(state.vehicle===VEHICLE.JET) {const scale=state.vehicleVariant===VEHICLE_VARIANT.NOCTURNE?NOCTURNE_SCALE:1;y=.10*scale;z=.6*scale;}
+    if(state.vehicle===VEHICLE.JET) {const scale=jetScale(state.vehicleVariant);y=.10*scale;z=.6*scale;}
     else {const pivot=crewGunPivot(state.vehicle,state.vehicleVariant);x=pivot.x;y=pivot.y+.48;z=pivot.z+.85;}
   }
   if(state.vehicle===VEHICLE.JET)return rotateVector(vehicleQuaternion(state),x,y,z,out);
@@ -71,11 +71,14 @@ export function vehicleEyeOffset(state: VehicleOrientation & {vehicle:number;veh
 export const JET_BOMB_BAY = { x: 0, y: 0.62, z: 0.20 } as const;
 const NOCTURNE_GUN_MUZZLE = { x: 0, y: JET_GUN_MUZZLE.y * NOCTURNE_SCALE, z: JET_GUN_MUZZLE.z * NOCTURNE_SCALE };
 const NOCTURNE_BOMB_BAY = { x: 0, y: JET_BOMB_BAY.y * NOCTURNE_SCALE, z: JET_BOMB_BAY.z * NOCTURNE_SCALE };
+/** The Condor's nose gun and the bay under its wing root. */
+const CONDOR_GUN_MUZZLE = { x: 0, y: 2.05, z: -10.1 };
+const CONDOR_BOMB_BAY = { x: 0, y: 1, z: .4 };
 export function jetGunMuzzle(variant = 0): Readonly<{ x: number; y: number; z: number }> {
-  return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE_GUN_MUZZLE : JET_GUN_MUZZLE;
+  return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE_GUN_MUZZLE : variant === VEHICLE_VARIANT.CONDOR ? CONDOR_GUN_MUZZLE : JET_GUN_MUZZLE;
 }
 export function jetBombBay(variant = 0): Readonly<{ x: number; y: number; z: number }> {
-  return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE_BOMB_BAY : JET_BOMB_BAY;
+  return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE_BOMB_BAY : variant === VEHICLE_VARIANT.CONDOR ? CONDOR_BOMB_BAY : JET_BOMB_BAY;
 }
 
 /** Rotate an attachment exactly like the renderer's YXZ airframe rotation. */
@@ -159,6 +162,10 @@ const NOCTURNE_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.JET], name: 'Nocturne
 const BASTION_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.TANK], name: 'Bastion Siege Tank',
   radius: 2.95, maxHealth: 11000, accel: 32, maxSpeed: 24, reverseSpeed: 10,
   rollDrag: .55, turnRate: 1.35, enterRange: 6, respawnSeconds: 110 };
+/** A slow heavy bomber: about 8 direct rockets bring it down (aircraft armor).
+ * Lock-on reaches 900 m, so altitude is its defense. */
+const CONDOR_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.JET], name: 'Condor Heavy Bomber',
+  radius: 3.6, maxHealth: 2400, accel: 18, maxSpeed: 72, turnRate: .7, enterRange: 11, respawnSeconds: 150 };
 /** A slow capital ship: about 25 direct rockets sink it (gunboat armor). Its
  * radius is the beam; hits use spheres along the keel (destroyerHitSpheres). */
 const DESTROYER_DEF: VehicleDef = { ...VEHICLE_DEFS[VEHICLE.GUNBOAT], name: 'Warden Destroyer',
@@ -168,6 +175,7 @@ export function vehicleDefinition(type: number, variant = 0): VehicleDef | undef
   const special = validVehicleVariant(type, variant);
   if (special === VEHICLE_VARIANT.RAIL) return RAIL_DEF;
   if (special === VEHICLE_VARIANT.DESTROYER) return DESTROYER_DEF;
+  if (special === VEHICLE_VARIANT.CONDOR) return CONDOR_DEF;
   return special === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE_DEF
     : special === VEHICLE_VARIANT.BASTION ? BASTION_DEF : VEHICLE_DEFS[type as Exclude<VehicleType, 0>];
 }
@@ -402,7 +410,9 @@ function stepJet(
   // turns its nose. Mouse aim never changes the flight state.
   if (airborne) {
     const orientation = s.vehicleRotation ??= vehicleQuaternion(s);
-    const local = rotationFromEuler(0, pitchInput * def.turnRate * authority * dt, rollInput * 1.9 * dt);
+    // A heavy bomber banks at about half a fighter's rate.
+    const rollRate = s.vehicleVariant === VEHICLE_VARIANT.CONDOR ? .9 : 1.9;
+    const local = rotationFromEuler(0, pitchInput * def.turnRate * authority * dt, rollInput * rollRate * dt);
     multiplyRotations(orientation, local, orientation);
     // Lift in a bank still makes a gentle coordinated turn. The world-space
     // right wing's height replaces Euler roll, including while inverted.
@@ -507,7 +517,7 @@ export function crewGunMuzzle(type:number,variant:number,heading:number,yaw:numb
   return mountedGunMuzzle(crewGunPivot(type,variant),CREW_GUN_LENGTH,heading,yaw,pitch);
 }
 export function aircraftCrewMuzzle(state:VehicleOrientation & {vehicleVariant?:number}) {
-  const scale=state.vehicleVariant===VEHICLE_VARIANT.NOCTURNE?NOCTURNE_SCALE:1;
+  const scale=jetScale(state.vehicleVariant);
   return vehicleLocalOffset(state,0,.28*scale,.6*scale);
 }
 
@@ -518,6 +528,8 @@ export function vehicleEyeHeight(type: VehicleType, variant = 0): number {
   if (validVehicleVariant(type, variant) === VEHICLE_VARIANT.NOCTURNE) {
     return (VEHICLE_DEFS[VEHICLE.JET].radius + .9) * NOCTURNE_SCALE;
   }
+  // The Condor's cockpit sits high in its nose.
+  if (validVehicleVariant(type, variant) === VEHICLE_VARIANT.CONDOR) return 3.7;
   const def = vehicleDefinition(type, variant);
   return def ? def.radius + 0.9 : 1.62;
 }
@@ -687,6 +699,7 @@ export function vehicleArmament(type: number, variant = 0): { primary: WeaponDef
   if (special === VEHICLE_VARIANT.NOCTURNE) return { primary: NOCTURNE_LANCE, alt: NOCTURNE_VOID_BOMB };
   if (special === VEHICLE_VARIANT.BASTION) return { primary: BASTION_CANNON, alt: BASTION_SHOCK_SHELL };
   if (special === VEHICLE_VARIANT.DESTROYER) return { primary: DESTROYER_CLUSTER, alt: DESTROYER_NUKE };
+  if (special === VEHICLE_VARIANT.CONDOR) return { primary: JET_MG, alt: CONDOR_BOMB };
   if (type === VEHICLE.GUNBOAT) return {primary:GUNBOAT_CANNON,alt:GUNBOAT_ROCKET};
   return type === VEHICLE.JET ? { primary: JET_MG, alt: JET_BOMB }
     : type === VEHICLE.TANK ? { primary: TANK_CANNON, alt: TANK_CLUSTER } : { primary: JEEP_MG };
@@ -697,12 +710,19 @@ export function crewArmament(type: number, variant = 0): { primary: WeaponDef; a
   if (isDestroyer(type, variant)) return { primary: DESTROYER_AA_ROCKET, alt: DESTROYER_CLUSTER };
   return { primary: type === VEHICLE.JET ? AIRCREW_ROCKET : CREW_MG };
 }
-export function isJetBombWeapon(id: number): boolean { return id === JET_BOMB.id || id === NOCTURNE_VOID_BOMB.id; }
+/** The Condor's bay drops a long carpet of ordinary bombs. */
+export const CONDOR_BOMB: WeaponDef = { ...JET_BOMB, id: 219, name: 'Heavy Bomb Carpet', interval: 9 };
+export const CONDOR_CARPET_COUNT = 18;
+/** Bombs one release drops, spaced 4 m apart along the airframe. */
+export function carpetCount(id: number): number {
+  return id === CONDOR_BOMB.id ? CONDOR_CARPET_COUNT : id === JET_BOMB.id ? CARPET_BOMB_COUNT : 1;
+}
+export function isJetBombWeapon(id: number): boolean { return id === JET_BOMB.id || id === NOCTURNE_VOID_BOMB.id || id === CONDOR_BOMB.id; }
 /** The destroyer's weapons look and sound like the shells and rockets they
  * are built from; kill feeds keep their own names. */
 export function presentationWeaponId(id: number): number {
   return id === DESTROYER_CLUSTER.id ? TANK_CLUSTER.id : id === DESTROYER_NUKE.id ? TRAIN_NUCLEAR_CANNON.id
-    : id === DESTROYER_AA_ROCKET.id ? AIRCREW_ROCKET.id : id;
+    : id === DESTROYER_AA_ROCKET.id ? AIRCREW_ROCKET.id : id === CONDOR_BOMB.id ? JET_BOMB.id : id;
 }
 export function vehicleWeaponColor(id: number): number {
   return id === NOCTURNE_LANCE.id || id === NOCTURNE_VOID_BOMB.id ? 0xc577ff
@@ -716,7 +736,7 @@ const VEHICLE_WEAPONS: readonly WeaponDef[] = [
   JEEP_MG, TANK_CANNON, TANK_CLUSTER, CLUSTER_BOMBLET, JET_MG, JET_BOMB,
   RUN_OVER, NOCTURNE_LANCE, NOCTURNE_VOID_BOMB, BASTION_CANNON, BASTION_SHOCK_SHELL,
   GUNBOAT_CANNON,GUNBOAT_ROCKET,TRAIN_NUCLEAR_CANNON,CREW_MG,AIRCREW_ROCKET,
-  DESTROYER_CLUSTER,DESTROYER_NUKE,DESTROYER_AA_ROCKET,
+  DESTROYER_CLUSTER,DESTROYER_NUKE,DESTROYER_AA_ROCKET,CONDOR_BOMB,
 ];
 
 /** Resolve any weapon id - handheld, auxiliary (100+), or vehicle (200+). */

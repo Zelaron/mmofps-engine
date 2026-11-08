@@ -61,14 +61,18 @@ const DESTROYER = [box(0, 1.7, 1, 3.6, 1.7, 11.5), box(0, 1.8, -13.5, 2.4, 1.7, 
   box(0, 5, -3.5, 2.6, 1.6, 3.2), box(0, 7.4, -4.2, 1.9, .8, 1.9),
   box(0, 5.8, 2.6, .9, 2.4, 1.2), box(0, 4.1, -10.2, 1.5, .7, 1.6),
   box(0, 4.3, 6.8, 2, .9, 2.4), box(0, 4, 11.6, 1.3, .6, 1.3)];
+// A 19 m heavy bomber with a 16 m wing, inside a runway's edge lights.
+const CONDOR = [box(0, 2.3, 0, 1.3, 1.3, 9.5), box(0, 2.6, .5, 8, .2, 2.2),
+  box(0, 4.2, 8.6, .15, 1.6, 1.2), box(0, 3, 8.8, 2.8, .12, .9),
+  ...[-1, 1].flatMap(side => [box(side * 2.6, 2.1, -.6, .5, .5, 1.4), box(side * 5.4, 2.2, -.2, .45, .45, 1.2)])];
 const EMPTY: readonly HullBox[] = [];
-const RADII = new Map<readonly HullBox[], number>([JEEP, TANK, BASTION, JET, NOCTURNE, GUNBOAT, DESTROYER].map(boxes =>
+const RADII = new Map<readonly HullBox[], number>([JEEP, TANK, BASTION, JET, NOCTURNE, GUNBOAT, DESTROYER, CONDOR].map(boxes =>
   [boxes, Math.max(...boxes.map(b => Math.hypot(b.x, b.y, b.z) + Math.hypot(b.hx, b.hy, b.hz)))]));
 function geometry(type: number, variant: number): readonly HullBox[] {
   if (variant === VEHICLE_VARIANT.RAIL) return EMPTY;
   if (type === VEHICLE.JEEP) return JEEP;
   if (type === VEHICLE.TANK) return variant === VEHICLE_VARIANT.BASTION ? BASTION : TANK;
-  if (type === VEHICLE.JET) return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE : JET;
+  if (type === VEHICLE.JET) return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE : variant === VEHICLE_VARIANT.CONDOR ? CONDOR : JET;
   if (type === VEHICLE.GUNBOAT) return variant === VEHICLE_VARIANT.DESTROYER ? DESTROYER : GUNBOAT;
   return EMPTY;
 }

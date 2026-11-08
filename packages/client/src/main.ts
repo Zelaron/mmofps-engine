@@ -17,7 +17,7 @@ import { FrontierMarkers } from './render/frontier.js';
 import {
   World, WEAPONS, PLAYER, NET, TICK_RATE, pelletDir, viewDir, clamp,
   VEHICLE, vehicleDefinition, vehicleArmament, vehicleWeaponColor, isJetBombWeapon, vehicleEyeHeight, weaponDefById, VEHICLE_WEAPON_ID_BASE,
-  isDestroyer, crewArmament, presentationWeaponId,
+  isDestroyer, crewArmament, presentationWeaponId, VEHICLE_VARIANT,
   NUKE_BOMB,
   LOCK_ACQUIRING, LOCK_LOCKED, HOMING_SPEED_FACTOR,
   type VehicleType,
@@ -1100,7 +1100,10 @@ function frame(): void {
         // A jet at rest is on a runway: lead with how to take off.
         const runway = pred.state.vehicle === VEHICLE.JET && Math.hypot(pred.state.vx, pred.state.vy, pred.state.vz) < 5;
         const destroyer = isDestroyer(pred.state.vehicle, pred.state.vehicleVariant);
-        const hint = destroyer ? gunner
+        const condor = !gunner && pred.state.vehicle === VEHICLE.JET && pred.state.vehicleVariant === VEHICLE_VARIANT.CONDOR;
+        const hint = condor ? touch ? 'Condor: hold THRUST to roll, pull the stick back to lift off · ALT bomb carpet · slow, so stay high'
+            : 'Condor: hold SPACE for throttle, then S to lift off | RMB bomb carpet | slow, so stay high'
+          : destroyer ? gunner
           ? touch ? 'AA mount: hold aim on an aircraft to lock · FIRE flak rockets · ALT battery salvo'
             : 'AA mount: hold aim on an aircraft to lock | LMB flak rockets | RMB battery salvo | E leave the mount'
           : touch ? 'Bridge: stick to steer · drag to aim the battery · FIRE salvo · ALT nuclear salvo'

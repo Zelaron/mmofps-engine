@@ -122,7 +122,7 @@ export class DrawWarmup {
     const kinds: [VehicleType, number][] = [
       [VEHICLE.JEEP, VEHICLE_VARIANT.COMMON], [VEHICLE.TANK, VEHICLE_VARIANT.COMMON], [VEHICLE.TANK, VEHICLE_VARIANT.BASTION],
       [VEHICLE.JET, VEHICLE_VARIANT.COMMON], [VEHICLE.JET, VEHICLE_VARIANT.NOCTURNE], [VEHICLE.GUNBOAT, VEHICLE_VARIANT.COMMON],
-      [VEHICLE.GUNBOAT, VEHICLE_VARIANT.DESTROYER],
+      [VEHICLE.GUNBOAT, VEHICLE_VARIANT.DESTROYER], [VEHICLE.JET, VEHICLE_VARIANT.CONDOR],
     ];
     for (const [type, variant] of kinds) this.hulls.push(buildVehicleHull(type, variant));
     this.hulls.push(trainArtilleryModel());

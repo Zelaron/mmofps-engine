@@ -14,7 +14,7 @@ import {
   type TeleporterPad, encodeTeleport,
   rayCapsule, capsuleClearance,
   VEHICLE, VEHICLE_DEFS, VEHICLE_VARIANT, bastionGunMuzzle, gunboatGunMuzzle, vehicleDefinition, vehicleArmament, weaponDefById, vehicleEyeHeight, vehicleLocalOffset, jetBombBay, jetGunMuzzle,
-  isDestroyer, crewArmament, salvoCount, isClusterShell, isOwnedArtillery, hullKeel,
+  isDestroyer, crewArmament, salvoCount, isClusterShell, isOwnedArtillery, hullKeel, carpetCount,
   DESTROYER_AA_ROCKET, DESTROYER_AA_PAIR, DESTROYER_NUKE, DESTROYER_BRIDGE_EYE, DESTROYER_AA_PIVOT,
   JEEP_MG, TANK_CANNON, TANK_CLUSTER, CLUSTER_BOMBLET, CLUSTER_COUNT, RUN_OVER,
   JET_MG, JET_BOMB, NOCTURNE_LANCE, CARPET_BOMB_COUNT,
@@ -274,6 +274,8 @@ const JET_RUNWAY_START_AHEAD = 10;
 /** A runway start needs no enemy within this distance. */
 const JET_RUNWAY_SAFE_RADIUS = 600;
 const JET_ABANDON_TICKS = 40 * TICK_RATE;
+/** A Condor parks this far behind its runway's center, at the threshold end. */
+const CONDOR_RUNWAY_BACK = 32;
 /** A destroyed hull waits this long for a parked hull to clear its pad. */
 const VEHICLE_PAD_WAIT_TICKS = 30 * TICK_RATE;
 /** Off-screen travel: a bot this far from its objective, unseen by any human
@@ -709,6 +711,21 @@ export class Game {
       this.vehicleSites.push(site);
       const ship = this.spawnVehicleAt(site);
       ship.campaignHome = { x: site.x, y: site.y!, z: site.z, heading: site.heading };
+    }
+    // At most two Condor heavy bombers: at the threshold end of the two
+    // runways farthest apart, nose down the strip, clear of its parked jet.
+    const strips = this.vehicleSites.filter(site => site.type === VEHICLE.JET && !site.variant);
+    let pair: VehicleSite[] = strips.slice(0, 2), spread = -1;
+    for (let i = 0; i < strips.length; i++) for (let j = i + 1; j < strips.length; j++) {
+      const d = Math.hypot(strips[i].x - strips[j].x, strips[i].z - strips[j].z);
+      if (d > spread) { spread = d; pair = [strips[i], strips[j]]; }
+    }
+    for (const strip of pair) {
+      const x = strip.x + Math.sin(strip.heading) * CONDOR_RUNWAY_BACK, z = strip.z + Math.cos(strip.heading) * CONDOR_RUNWAY_BACK;
+      const site: VehicleSite = { type: VEHICLE.JET, variant: VEHICLE_VARIANT.CONDOR, x, y: this.world.groundY(x, z), z, heading: strip.heading };
+      this.vehicleSites.push(site);
+      const bomber = this.spawnVehicleAt(site);
+      bomber.campaignHome = { x: site.x, y: site.y!, z: site.z, heading: site.heading };
     }
     for (const route of this.world.collectTransportPlan().routes) if (route.kind === 'train') {
       const state = createMoveState(0, 0, 0); placeTrainArtillery(this.world, state, route.id, this.tick / TICK_RATE);
@@ -1529,7 +1546,7 @@ export class Game {
       if (site.type !== VEHICLE.JET) continue;
       let ready = false;
       for (const v of this.vehicles.values()) {
-        if (v.type === VEHICLE.JET && !v.deployed && v.respawnAtTick < 0 && v.occupant < 0 &&
+        if (v.type === VEHICLE.JET && !v.variant && !v.deployed && v.respawnAtTick < 0 && v.occupant < 0 &&
           Math.hypot(v.x - site.x, v.z - site.z) < 80) { ready = true; break; }
       }
       out.push({ x: Math.round(site.x), z: Math.round(site.z), ready });
@@ -1997,7 +2014,7 @@ export class Game {
     const release = vehicleLocalOffset(s, bay.x, bay.y, bay.z);
     const trail = vehicleLocalOffset(s, 0, 0, 4);
     const eject = vehicleLocalOffset(s, 0, -4, 0);
-    for (let i = 0; i < (def.id === JET_BOMB.id ? CARPET_BOMB_COUNT : 1); i++) {
+    for (let i = 0; i < carpetCount(def.id); i++) {
       const id = this.allocateEntity('nextProjectileId', this.projectiles);
       this.projectiles.set(id, {
         id, owner: p.id, weapon: def.id,
