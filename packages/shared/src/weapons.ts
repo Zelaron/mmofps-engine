@@ -170,6 +170,7 @@ export const WEAPONS: readonly WeaponDef[] = [
   },
 ];
 
+export const ROCKET_LAUNCHER_ID = 3;
 export const RAILGUN_ID = 5;
 export const NUKE_LAUNCHER_ID = 6;
 export const BURST_CARBINE_ID = 7;

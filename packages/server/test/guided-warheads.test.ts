@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {Game,type ServerPlayer,type ServerVehicle} from '../src/game.js';
-import {WEAPONS,LOCK_TICKS,LOCK_LOCKED,LOCK_NONE,PLAYER,type InputCmd,type WeaponDef} from '@shared/index';
+import {WEAPONS,LOCK_TICKS,LOCK_LOCKED,LOCK_NONE,PLAYER,VEHICLE,rocketHullDamageFactor,vehicleDefinition,type InputCmd,type WeaponDef} from '@shared/index';
 
 function crewTarget() {
   const game = new Game(1337), shooter = game.addPlayer('Launcher', null), driver = game.addPlayer('Driver', null), gunner = game.addPlayer('Gunner', null);
@@ -24,7 +24,7 @@ function crewTarget() {
   return { game, shooter, driver, gunner, hull, cmd, intern, aim };
 }
 
-test('two-second locks launch fast anti-armor warheads whose hull bonus survives lost guidance',()=>{
+test('two-second locks launch fast warheads; guided or not, a rocket is anti-armor on the hull it hits',()=>{
   const game=new Game(1337),p=game.addPlayer('Missile gunner',null),driver=game.addPlayer('Tank driver',null);
   game.world.trace=(x,y,z,dx,dy,dz,max)=>({hit:false,dist:max,x:x+dx*max,y:y+dy*max,z:z+dz*max,nx:0,ny:0,nz:0});
   Object.assign(p.state,{px:0,py:1000,pz:0});p.weapon=3;
@@ -40,11 +40,35 @@ test('two-second locks launch fast anti-armor warheads whose hull bonus survives
   driver.state.vehicle=0;driver.state.px=100;hull.occupant=-1;
   for(let i=0;i<15&&game.projectiles.has(missile.id);i++)intern.updateProjectiles();
   assert.equal(missile.homingTarget,-1);assert.ok(!game.projectiles.has(missile.id));
-  assert.ok(4500-hull.health>=1104&&4500-hull.health<1300,'armor bonus persists while nearby infantry splash stays ordinary');
+  const guided=4500-hull.health, direct=WEAPONS[3].damage*rocketHullDamageFactor(VEHICLE.TANK);
+  assert.ok(guided>=direct&&guided<direct+116,'a direct hit deals anti-armor damage plus the ordinary blast');
   p.lockState=LOCK_NONE;intern.fireProjectile(p,cmd,WEAPONS[3]);
   const ordinary=[...game.projectiles.values()][0];
   assert.ok(Math.abs(Math.hypot(ordinary.vx,ordinary.vy,ordinary.vz)-48)<1e-8);assert.equal(ordinary.distLeft,600);
-  assert.equal(ordinary.hullDamageScale,1);
+  const before=hull.health;
+  for(let i=0;i<120&&game.projectiles.has(ordinary.id);i++)intern.updateProjectiles();
+  assert.ok(!game.projectiles.has(ordinary.id));
+  assert.ok(Math.abs(before-hull.health-guided)<1,'an unguided direct hit is as strong as a guided one');
+});
+
+test('unguided rockets destroy a jeep in two direct hits, a gunboat in three, a tank in six and a jet in three',()=>{
+  for(const [type,expected] of [[VEHICLE.JEEP,2],[VEHICLE.GUNBOAT,3],[VEHICLE.TANK,6],[VEHICLE.JET,3]] as const){
+    const game=new Game(1337),p=game.addPlayer('Rocketeer',null),def=vehicleDefinition(type)!;
+    game.world.trace=(x,y,z,dx,dy,dz,max)=>({hit:false,dist:max,x:x+dx*max,y:y+dy*max,z:z+dz*max,nx:0,ny:0,nz:0});
+    Object.assign(p.state,{px:0,py:1000,pz:0});p.weapon=3;
+    const hull:ServerVehicle={id:900,type,x:0,y:1000,z:-40,heading:0,health:def.maxHealth,occupant:-1,gunner:-1,respawnAtTick:-1};
+    game.vehicles.set(hull.id,hull);
+    const cmd:InputCmd={seq:1,buttons:0,weapon:3,yaw:0,pitch:Math.atan2(def.radius-PLAYER.EYE_HEIGHT,40),renderTick:0,renderFrac:0};
+    const intern=game as unknown as {fireProjectile(p:ServerPlayer,c:InputCmd,d:WeaponDef):void;updateProjectiles():void};
+    let hits=0;
+    while(hull.health>0&&hull.respawnAtTick<0&&hits<20){
+      intern.fireProjectile(p,cmd,WEAPONS[3]);
+      const rocket=[...game.projectiles.values()].at(-1)!,before=hull.health;
+      for(let i=0;i<120&&game.projectiles.has(rocket.id);i++)intern.updateProjectiles();
+      assert.ok(hull.health<before,`every rocket strikes the ${def.name}`);hits++;
+    }
+    assert.equal(hits,expected,`${def.name} needs ${expected} direct rocket hits`);
+  }
 });
 
 test('charged locks and in-flight missiles retain the occupied hull when its driver disconnects', () => {
@@ -71,7 +95,7 @@ test('charged locks and in-flight missiles retain the occupied hull when its dri
   intern.steerHomingProjectile(missile, 1/60);
   assert.equal(missile.homingTarget, -1);
   assert.equal(missile.homingVehicleId, -1);
-  assert.ok((missile.hullDamageScale ?? 0) > 1, 'lost guidance preserves the launched warhead payload');
+  assert.ok(rocketHullDamageFactor(hull.type) > 1, 'with or without guidance, the rocket stays anti-armor');
 });
 
 test('lock continuity still requires a visible hull and does not follow a driver into a different vehicle', () => {

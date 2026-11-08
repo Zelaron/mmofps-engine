@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BTN, CREATURE, CREATURE_DEFS, LOCK_LOCKED, PICKUP_WEAPON, VEHICLE, vehicleDefinition, lockedHullDamageFactor,
+import { BTN, CREATURE, CREATURE_DEFS, LOCK_LOCKED, PICKUP_WEAPON, VEHICLE, vehicleDefinition, rocketHullDamageFactor,
   BOT_AA_LAUNCH_INTERVAL, type ColumnData } from '@shared/index';
 import type { RoadSegment } from '@shared/landscape';
 import { Bot, botCampaignRole, botRoleId } from '../src/bots.js';
@@ -290,7 +290,7 @@ test('a real homing missile punishes straight flight but a bot can defeat it wit
     Object.assign(player.state,{vehicle:VEHICLE.JET,vehicleId:jet.id,grounded:false,vx:0,vy:0,vz:-132});player.vehicleId=jet.id;
     const shooter=new ServerPlayer(90,'Missile launch',null,false,{x:0,y:0,z:0});game.players.set(shooter.id,shooter);
     const rocket={id:997,owner:shooter.id,weapon:3,x:0,y:121.55,z:0,vx:0,vy:0,vz:-300,distLeft:1500,
-      fuseLeft:Infinity,ageSeconds:0,sleeping:false,homingTarget:player.id,homingVehicleId:jet.id,hullDamageScale:lockedHullDamageFactor(VEHICLE.JET)};
+      fuseLeft:Infinity,ageSeconds:0,sleeping:false,homingTarget:player.id,homingVehicleId:jet.id};
     game.projectiles.set(rocket.id,rocket);
     let banked=false,broke=false;
     for(let i=0;i<300 && player.state.alive;i++) {
@@ -328,6 +328,5 @@ test('a healthy fighter survives two isolated locked hits while a third destroys
   assert.ok(hits[1]>0,'a second isolated hit cannot erase an otherwise healthy fighter');
   assert.equal(pilot.state.alive,false,'ignoring repeated warnings remains fatal');
   assert.ok(launches.every((tick,i)=>i===0||tick-launches[i-1]>=BOT_AA_LAUNCH_INTERVAL));
-  assert.equal(lockedHullDamageFactor(VEHICLE.TANK),12);
-  assert.equal(lockedHullDamageFactor(VEHICLE.JEEP),12);
+  assert.ok(rocketHullDamageFactor(VEHICLE.TANK)>rocketHullDamageFactor(VEHICLE.JET),'ground armor keeps a larger multiplier');
 });

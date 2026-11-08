@@ -652,13 +652,15 @@ export const LOCK_CONE_COS = 0.99619; // ~5 degrees
 export const LOCK_RANGE = 900;
 /** Ticks of continuous aim required for a full lock (2s at 60Hz). */
 export const LOCK_TICKS = 120;
-export const LOCKED_HULL_DAMAGE_FACTOR = 12;
-/** Ground anti-armor amplification would kill a fighter several times over.
- * Aircraft instead survive a first hit and usually require three missiles,
- * counting the ordinary blast damage that accompanies a direct impact. */
-export const LOCKED_AIR_DAMAGE_FACTOR = 2;
-export function lockedHullDamageFactor(targetVehicle: number): number {
-  return targetVehicle === VEHICLE.JET ? LOCKED_AIR_DAMAGE_FACTOR : LOCKED_HULL_DAMAGE_FACTOR;
+/** Every Rocket Launcher direct hit on a hull is anti-armor, locked or not;
+ * a lock only steers the rocket. With the blast of a direct impact (about
+ * 115 on the hull) these take a jeep or gunboat in 2-3 hits, a tank in 6 and
+ * an aircraft in 3, so a fighter survives a first hit. */
+const ROCKET_HULL_DAMAGE: Readonly<Record<number, number>> = {
+  [VEHICLE.JEEP]: 5.5, [VEHICLE.GUNBOAT]: 5.5, [VEHICLE.TANK]: 7.2, [VEHICLE.JET]: 2,
+};
+export function rocketHullDamageFactor(vehicleType: number): number {
+  return ROCKET_HULL_DAMAGE[vehicleType] ?? 1;
 }
 /** Shared per-target bot launch spacing, including rival AA squads. */
 export const BOT_AA_LAUNCH_INTERVAL = 7 * 60;

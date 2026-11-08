@@ -1,7 +1,7 @@
 import { allocateEntityId, isEntityId, namespaceRange, LOCAL_ENTITY_RANGE, type EntityIdRange, type EntityAllocator } from '@shared/entity-id';
 import {
   World, mulberry32, hash2i, clamp, viewDir, aircraftCrewAim, aircraftCrewMuzzle, crewGunMuzzle,
-  unquantYaw, lockedHullDamageFactor,
+  unquantYaw, rocketHullDamageFactor, ROCKET_LAUNCHER_ID,
   TICK_RATE, TICK_DT, SNAPSHOT_EVERY, PLAYER, WORLD, NET, SWIMMING,
   createMoveState, stepMove, fallDamage,
   type MoveState, type InputCmd, BTN, HYPERSPEED_ENABLED,
@@ -189,8 +189,6 @@ export interface Projectile {
   homingTarget?: number;
   /** Guidance follows this hull through driver/passenger promotion. */
   homingVehicleId?: number;
-  /** A locked anti-armor warhead retains its payload even if guidance breaks. */
-  hullDamageScale?: number;
 }
 
 /**
@@ -2307,9 +2305,8 @@ export class Game {
     const id = this.allocateEntity('nextProjectileId', this.projectiles);
     let speed = def.speed ?? 48;
     // A fully locked rocket flies hot and steers; see advanceProjectile.
-    const homing = def.id === 3 && p.lockState === LOCK_LOCKED && p.lockTargetId >= 0;
+    const homing = def.id === ROCKET_LAUNCHER_ID && p.lockState === LOCK_LOCKED && p.lockTargetId >= 0;
     if (homing) speed *= HOMING_SPEED_FACTOR;
-    const lockedType = this.vehicles.get(p.lockVehicleId)?.type ?? this.players.get(p.lockTargetId)?.state.vehicle ?? VEHICLE.NONE;
     this.projectiles.set(id, {
       id, owner: p.id, weapon: def.id,
       x: ex + dir.x * launchOffset, y: ey + dir.y * launchOffset, z: ez + dir.z * launchOffset,
@@ -2320,7 +2317,6 @@ export class Game {
       sleeping: false,
       homingTarget: homing ? p.lockTargetId : -1,
       homingVehicleId: homing ? p.lockVehicleId : -1,
-      hullDamageScale: homing ? lockedHullDamageFactor(lockedType) : 1,
     });
     if (report) this.events.push({
       bytes: encodeFire({ shooter: p.id, weapon: def.id, seq: cmd.seq, ox: ex, oy: ey, oz: ez, ends: [] }),
@@ -2599,8 +2595,10 @@ export class Game {
         const hx = r.x + dx * bestT, hy = r.y + dy * bestT, hz = r.z + dz * bestT;
         const owner = this.players.get(r.owner) ?? null;
         // Direct hull hit: full direct damage on the hull, then the normal
-        // splash (which also feeds hulls, so no double-dipping here).
-        this.damageVehicle(vehicleVictim, def.damage * (r.hullDamageScale ?? 1), owner, def.id);
+        // splash (which also feeds hulls, so no double-dipping here). Rockets
+        // are anti-armor on any hull they strike, guided or not.
+        const armor = def.id === ROCKET_LAUNCHER_ID ? rocketHullDamageFactor(vehicleVictim.type) : 1;
+        this.damageVehicle(vehicleVictim, def.damage * armor, owner, def.id);
         this.explode(hx, hy, hz, owner, def, -1, r.id);
         this.projectiles.delete(r.id);
         return true;

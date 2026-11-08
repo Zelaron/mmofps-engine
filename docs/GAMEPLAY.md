@@ -81,7 +81,8 @@ Allies cannot damage each other; the other two factions are enemies. Wildlife, f
 - Jeeps, tanks, fighter jets, Nocturne bombers and gunboats. Driver and gunner are separate seats on compatible vehicles; bots wait briefly for nearby friendly passengers, including humans.
 - Live vehicles block walking and swimming, and you can stand on their hoods, roofs and decks. Destroyed vehicles stop blocking movement.
 - Boats follow ferry water lanes. Aircraft crews fly real runway hulls and return for replacements after destruction. Ground transports unload near city fighting.
-- Fighters have 600 health and Nocturne bombers 1,000. Anti-air specialists need a real rocket lock and space their launches at least seven seconds apart; a healthy fighter survives two direct locked hits. Both seats get escalating acquisition, lock and incoming-missile warnings with bearing and time to impact. Missiles turn wider against aircraft than ground targets: flying straight is dangerous, while a timed bank can break the seeker.
+- **Rockets against vehicles.** Every direct Rocket Launcher hit on a vehicle is anti-armor, with or without a lock; a lock makes the rocket home, fly faster and reach farther, but doesn't add damage. A jeep takes 2-3 direct hits, a gunboat 3, a tank 6 and a fighter 3.
+- Fighters have 600 health and Nocturne bombers 1,000. Anti-air specialists need a real rocket lock and space their launches at least seven seconds apart; a healthy fighter survives two direct hits. Both seats get escalating acquisition, lock and incoming-missile warnings with bearing and time to impact. Missiles turn wider against aircraft than ground targets: flying straight is dangerous, while a timed bank can break the seeker.
 - City arcades give 4.6 m of clearance for ordinary tanks.
 - Hostile creatures attack reachable vehicles, including tanks and landed aircraft, but ordinary undead can't reach aircraft overhead.
 
