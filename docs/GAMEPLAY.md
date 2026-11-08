@@ -105,7 +105,7 @@ Allies cannot damage each other; the other two factions are enemies. Wildlife, f
 
 - **Meridian** has shamblers, fast revenants and heavy plague brutes, plus the rare **Ossuary Titan**. **Cinder** has ash crawlers and the **Cinder Colossus**; **Nacre** has reef prowlers and the **Tide Behemoth**. Native fauna remain everywhere.
 - Bosses have 12,000-15,000 health, name and health plates, and recovery windows. Damaging a boss provokes faster pursuit up to 1,200 m for 45 seconds, refreshed by further hits.
-- Bosses fire ranged blasts up to 950-1,100 m, with a fixed target marker, visible charging and an incoming-impact warning. Move out of the marked area or take solid cover; owned-base safe zones stay protected.
+- Bosses fire fast ranged blasts up to 950-1,100 m, with a fixed target marker, visible charging and an incoming-impact warning. A blast kills a soldier on foot anywhere inside its 13.5-16.5 m radius, and so does a melee slam (11-12 m reach). Move out of the marked area or take solid cover; owned-base safe zones stay protected.
 - Boss kills pay **salvage to every qualifying hunter**: 500 for an Ossuary Titan, 650 for a Cinder Colossus, 600 for a Tide Behemoth. You qualify with at least 1% of the boss's health in damage and a hit within the last two minutes; dying before the kill doesn't forfeit it.
 - Each kill leaves a shared, loaded **Nuke Launcher**, two ammunition crates and health at the corpse. Participants have 90 seconds to claim the cache before it becomes public; the drops last five minutes.
 - Creature rosters and rewards are defined per planet in `packages/shared/src/wildlife.ts`.
