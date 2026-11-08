@@ -85,6 +85,6 @@ The updater runs from its installed copy, so a push to the repository cannot cha
 
 ## Compatibility and saved worlds
 
-The current browser protocol is **31**. Since protocol 23, workers reserve durable entity ID blocks before simulation startup. A registered process ID cannot bootstrap again: generate a new UUID at each worker launch. The local cluster launcher already does this. Keep the coordinator database when upgrading; its allocation history prevents a restarted worker from colliding with entities still alive elsewhere. Update clients, the coordinator and all workers together.
+The current browser protocol is **32**. Since protocol 23, workers reserve durable entity ID blocks before simulation startup. A registered process ID cannot bootstrap again: generate a new UUID at each worker launch. The local cluster launcher already does this. Keep the coordinator database when upgrading; its allocation history prevents a restarted worker from colliding with entities still alive elsewhere. Update clients, the coordinator and all workers together.
 
 Startup migrates saved databases transactionally, including regional camp revisions and renewable resource receipts; retain a consistent pre-upgrade backup. Protocol 24 added authoritative base teleporter layouts, and protocol 25 added resource gathering. Regional camp loading does not enable a partitioned deployment: the current launcher and remaining simulation controllers still use one full authority per planet.
