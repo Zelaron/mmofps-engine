@@ -1320,6 +1320,8 @@ export class Game {
       if (v.respawnAtTick < 0 && v.occupant < 0) {
         const state = v.motionState ??= Object.assign(createMoveState(v.x, v.y, v.z), { vehicle: v.type,
           vehicleVariant: v.variant ?? 0, heading: v.heading, grounded: true, simulationTick: this.tick - 1 });
+        // Other hulls are solid to this one, but never its own collider.
+        state.vehicleId = v.id;
         const before = (this.tick - 1) / TICK_RATE, now = this.tick / TICK_RATE;
         if (!state.grounded || v.type === VEHICLE.GUNBOAT) stepMove(this.world, state,
           { seq: 0, buttons: 0, weapon: 0, yaw: v.heading, pitch: 0, renderTick: 0, renderFrac: 0 }, TICK_DT, this.tick);
