@@ -42,8 +42,9 @@ test('teleporter network is deterministic and structurally sound', () => {
 test('surface pads and their weapon drops are never placed under water', () => {
   const world = new World(1337);
   const dry = (p: { x: number; y: number; z: number }) => !world.liquidAt(p.x, p.y + .05, p.z);
-  // These coastal districts used to put pads and drops on the seabed.
-  for (const [cx, cz] of [[-8, -9], [1, -9], [-9, -7]]) {
+  // Coastal districts, the rounded north-west corner included, keep dry
+  // surface pads and drops (some once put them on the seabed).
+  for (const [cx, cz] of [[-8, -8], [1, -9], [-9, -6]]) {
     const it = generateEncounterRegion(world, cx, cz);
     let step = it.next(); while (!step.done) step = it.next();
     const surface = [...step.value.pads, ...step.value.loot].filter(p => !p.cave);

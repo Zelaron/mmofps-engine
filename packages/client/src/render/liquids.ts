@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { liquidFootprint, surfaceLiquidVolumes, type LiquidSample } from '@shared/liquids';
+import { COAST_REACH, liquidFootprint, surfaceLiquidVolumes, type LiquidSample } from '@shared/liquids';
 import { buildJungleTemplePlan, type TempleCistern } from '@shared/jungle-temples';
 import type { World } from '@shared/worldgen';
 import { createSurfaceNoise } from './surface-material.js';
@@ -161,7 +161,10 @@ export class LiquidRenderer {
   }
 
   private *build(tile: Tile): Generator<void> {
-    const candidates = surfaceLiquidVolumes().filter(v=>v.shape==='ocean' ||
+    // The ocean can only reach tiles that touch the coast's outer band.
+    const coastal = Math.max(Math.abs(tile.x), Math.abs(tile.x + LIQUID_TILE_SIZE),
+      Math.abs(tile.z), Math.abs(tile.z + LIQUID_TILE_SIZE)) >= COAST_REACH;
+    const candidates = surfaceLiquidVolumes().filter(v=>v.shape==='ocean' ? coastal :
       (tile.x <= v.x+v.rx+160 && tile.x+LIQUID_TILE_SIZE >= v.x-v.rx-160 &&
        tile.z <= v.z+v.rz+160 && tile.z+LIQUID_TILE_SIZE >= v.z-v.rz-160));
     type Sample = { water: Point; lava: Point; waterId: number };
@@ -179,6 +182,7 @@ export class LiquidRenderer {
           if (!water || (point.margin>0 && (water.margin<=0 || point.y>water.y)) ||
             (water.margin<=0 && point.margin>water.margin)) { water=point; waterId=volume.id; }
         }
+        water ??= { x, z, y: column.h - 1, depth: 0, margin: -1, fx: 0, fz: 0 };
         const basin=column.lavaBasin, level=column.lavaY>-999?column.lavaY:basin?.level??column.h-1;
         const lava: Point={x,z,y:level,depth:Math.max(0,level-column.h),
           margin:Math.min(level-column.h-.035,column.lavaY>-999?basin?(basin.channel-.28)*80:1:-1),fx:0,fz:0};

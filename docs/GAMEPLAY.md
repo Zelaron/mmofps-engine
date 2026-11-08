@@ -137,4 +137,4 @@ Terrain, trees and grass share one climate model. Warm hills and rainforests sta
 
 - Meridian runs alone by default. **Cinder** and **Nacre** are fully implemented, with their own terrain, cities and creatures: start them with `PLANETS=all npm start` (or a list such as `PLANETS=meridian,cinder`). Characters saved on a world that isn't running return to Meridian with their inventory and progress.
 - To travel, open the star chart (O), choose a planet and mark the nearest transit pod. Reach the pod on foot to launch. The 5-second charge cancels if you move, take damage or board a vehicle. You arrive at the destination's spaceport with your supplies and discoveries.
-- Each world is a 22.5 km square (including ocean) with four cities, cave networks, moving trains and ferries, launch pods, vehicles and ten infantry weapons.
+- Each world is a 22.5 km square of sea around a main island of bays and headlands, with three small offshore islands to explore, four cities, cave networks, moving trains and ferries, launch pods, vehicles and ten infantry weapons.

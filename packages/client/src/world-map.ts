@@ -1,4 +1,4 @@
-import { islandCoastDistance, surfaceLiquidVolumes } from '@shared/liquids';
+import { mainCoastDistance, OFFSHORE_ISLANDS, surfaceLiquidVolumes } from '@shared/liquids';
 import type { World, RoadSegment } from '@shared/worldgen';
 import type { TransportPlan } from '@shared/transport';
 import type { WorldMapStream } from './world-map-stream.js';
@@ -89,11 +89,13 @@ function* buildWorldMapSvgSteps(world:World,plan:TransportPlan,detail:boolean,co
   const coast=[];
   for(let i=0;i<160;i++) {
     const angle=i*Math.PI*2/160;let low=7500,high=11000;
-    for(let j=0;j<16;j++){const r=(low+high)/2;if(islandCoastDistance(world.seed,Math.cos(angle)*r,Math.sin(angle)*r)>8500)high=r;else low=r;}
+    for(let j=0;j<16;j++){const r=(low+high)/2;if(mainCoastDistance(world.seed,Math.cos(angle)*r,Math.sin(angle)*r)>8500)high=r;else low=r;}
     coast.push({x:Math.cos(angle)*(low+high)/2,z:Math.sin(angle)*(low+high)/2});
     if(cooperative&&i%16===15)yield;
   }
   const outline=path(coast)+' Z';
+  const islands=OFFSHORE_ISLANDS.map(island=>{const p=mapPoint(island);
+    return `<circle cx="${p.x}" cy="${p.y}" r="${island.radius/MAP_SPAN*MAP_SIZE}" fill="#243a40" stroke="#607b80" stroke-opacity=".6" stroke-width=".8"/>`;}).join('');
   const lakes=surfaceLiquidVolumes().filter(v=>v.shape!=='ocean').map(v=>{
     if(v.points)return `<path d="${path(v.points)}" fill="none" stroke="#243f4b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`;
     const p=mapPoint(v);return `<ellipse cx="${p.x}" cy="${p.y}" rx="${v.rx/MAP_SPAN*MAP_SIZE}" ry="${v.rz/MAP_SPAN*MAP_SIZE}" fill="#152d39" stroke="#39505a" stroke-width=".5"/>`;
@@ -114,7 +116,7 @@ function* buildWorldMapSvgSteps(world:World,plan:TransportPlan,detail:boolean,co
   const coordinates=Array.from({length:10},(_,i)=>`<text x="${50+i*50}" y="13" text-anchor="middle">${String.fromCharCode(65+i)}</text><text x="589" y="${55+i*50}" text-anchor="middle">${i+1}</text>`).join('');
   const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="600" viewBox="0 0 600 600" role="img" data-map-style="tactical" aria-label="Tactical map: coast, cities and transport routes">
     <defs><pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse"><path d="M50 0H0V50" fill="none" stroke="#b3d6d9" stroke-opacity=".045"/></pattern><clipPath id="island"><path d="${outline}"/></clipPath></defs>
-    <rect width="600" height="600" fill="#102531"/><path d="${outline}" fill="#243a40" stroke="#607b80" stroke-opacity=".6" stroke-width=".8"/>
+    <rect width="600" height="600" fill="#102531"/><path d="${outline}" fill="#243a40" stroke="#607b80" stroke-opacity=".6" stroke-width=".8"/>${islands}
     <g clip-path="url(#island)"><g class="map-roads" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="${roads.roads}" stroke="#97a59c" stroke-opacity=".24" stroke-width=".55"/></g>${cities}</g>${lakes}${routes}<rect width="600" height="600" fill="url(#grid)"/>
     <g fill="#80a6af" font-family="sans-serif" font-size="7" opacity=".65">${coordinates}</g>
     <g fill="#95bdc8" font-family="sans-serif" font-size="9" letter-spacing="3"><text x="235" y="38">NORTHERN OCEAN</text><text x="235" y="568">SOUTHERN OCEAN</text></g>

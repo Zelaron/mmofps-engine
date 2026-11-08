@@ -2,7 +2,7 @@ import { clamp, lerp, smoothstep, hypot2 } from './math.js';
 import { hash2i, unit } from './rng.js';
 import { generateCities, type CityDistrict } from './cities.js';
 import { capitalBoundary } from './capital-geometry.js';
-import { gradeLiquidTerrain, liquidFootprint, surfaceLiquidVolumes } from './liquids.js';
+import { gradeLiquidTerrain, liquidFootprint, surfaceLiquidVolumes, canReachCoast, mainCoastDistance, originalCoastDistance, ISLAND_SHORE_START } from './liquids.js';
 import { detourRoad } from './road-routing.js';
 
 export const LANDSCAPE_CELL = 1024;
@@ -104,6 +104,8 @@ function cacheSet<T>(cache: Map<string, T>, key: string, value: T): T {
 export class Landscape {
   private mountains = new Map<string, MountainSite>();
   private nodes = new Map<string, RoadPoint>();
+  /** Junction keys in the reshaped coast's new water. */
+  private seaNodes = new Set<string>();
   private edges = new Map<string, RoadSegment[]>();
   private trails = new Map<string, RoadSegment[]>();
   private tiles = new Map<string, RoadTile>();
@@ -119,6 +121,9 @@ export class Landscape {
    * would expose lava. Heights refer to the planned road, not just the hill. */
   private roadClear(x: number, z: number, y: number, margin = 18, avoidBasins = true, summitTrail = false): boolean {
     for (const [dx, dz] of [[0, 0], [-margin, 0], [margin, 0], [0, -margin], [0, margin]]) {
+      // Roads stay out of the bays and rounded corners the coast now gives
+      // to the sea; elsewhere the network is as it always was.
+      if (this.newlyFlooded(x + dx, z + dz)) return false;
       // Inland lake/river excavation also runs after roads. Keep ordinary
       // roads outside its graded bank; ferries have their own dock approaches.
       for (const volume of surfaceLiquidVolumes()) {
@@ -135,6 +140,13 @@ export class Landscape {
         Math.abs(this.naturalHeight(x + dx, z + dz) - y) > 40) return false;
     }
     return true;
+  }
+
+  /** In a bay or rounded corner the reshaped coast gave to the sea. */
+  private newlyFlooded(x: number, z: number): boolean {
+    if (!canReachCoast(x, z)) return false;
+    const shore = mainCoastDistance(this.seed, x, z);
+    return shore > ISLAND_SHORE_START && shore - originalCoastDistance(this.seed, x, z) > 30;
   }
 
   private dryRoute(points: RoadPoint[], avoidBasins = true, summitTrail = false): boolean {
@@ -229,6 +241,9 @@ export class Landscape {
     const s = this.seed ^ 0x4481acc;
     let x = ix * LANDSCAPE_CELL + (unit(hash2i(s, ix, iz)) - 0.5) * 54;
     let z = iz * LANDSCAPE_CELL + (unit(hash2i(s + 7, ix, iz)) - 0.5) * 54;
+    // A junction the reshaped coast put in the sea gets no roads at all; a
+    // relocation search there would only probe more open water.
+    if (this.newlyFlooded(x, z)) { this.seaNodes.add(key); return cacheSet(this.nodes, key, { x, z, y: 0 }); }
     let y = this.naturalHeight(x, z);
     if (!this.roadClear(x, z, y, 40)) {
       // Relocate the shared junction once, so every connecting road agrees.
@@ -291,6 +306,8 @@ export class Landscape {
     const adopted = this.adopted(`e:${key}`, key, 5.8, false);
     if (adopted) return cacheSet(this.edges, key, adopted);
     const a = this.node(ix, iz), b = this.node(ix + (axis === 0 ? 1 : 0), iz + (axis === 1 ? 1 : 0));
+    if (this.seaNodes.has(`${ix},${iz}`) || this.seaNodes.has(`${ix + (axis === 0 ? 1 : 0)},${iz + (axis === 1 ? 1 : 0)}`))
+      return cacheSet(this.edges, key, []);
     const bend = (unit(hash2i(this.seed ^ (axis ? 0x821af : 0x90aba), ix, iz)) - 0.5) * 130;
     const variation = unit(hash2i(this.seed ^ 0x639ba, ix + axis * 73, iz));
     const curve = (variation < .5 ? -1 : 1) * (55 + Math.abs(variation - .5) * 80);

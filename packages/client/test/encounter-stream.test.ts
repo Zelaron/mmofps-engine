@@ -170,7 +170,7 @@ test('bundled encounter worker coalesces travel, yields between slices and match
     clearTimeout: (id: number) => pending.delete(id) });
   self.onmessage!({ data: { type: 'init', seed: 1337, base } });
   self.onmessage!({ data: { type: 'select', request: 1, points: [{ x: 512, z: 512 }] } });
-  self.onmessage!({ data: { type: 'select', request: 2, points: [{ x: 8192, z: 8192 }] } });
+  self.onmessage!({ data: { type: 'select', request: 2, points: [{ x: 6656, z: 6656 }] } });
   assert.equal(pending.size, 1, 'rapid travel coalesces into one scheduled background slice');
   let turns = 0;
   while (pending.size) {
@@ -185,7 +185,7 @@ test('bundled encounter worker coalesces travel, yields between slices and match
   assert.ok(final.pads!.length > base.length, 'the real worker must generate usable regional transport');
   const canonical = new EncounterField(new World(1337), base);
   for (let i = 0; i < 3000; i++) {
-    canonical.update([{ x: 8192, z: 8192 }], Infinity, 12);
+    canonical.update([{ x: 6656, z: 6656 }], Infinity, 12);
     if (canonical.stats.pending === null && canonical.regions.length === canonical.stats.wanted) break;
   }
   assert.deepEqual(final.pads, canonical.pads, 'client background generation matches authoritative pad destinations');
