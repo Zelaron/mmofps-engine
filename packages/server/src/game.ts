@@ -886,9 +886,13 @@ export class Game {
    * through the ordinary respawn flow (staggered, safety-checked), and depot
    * vehicles return home under their base's new owner. */
   private redeployForWar(): void {
+    const released: { hull: ServerVehicle; by: ServerPlayer }[] = [];
     for (const p of this.players.values()) {
       p.warKills = p.warDeaths = p.warCaptures = p.warXp = 0;
-      if (p.state.vehicle !== VEHICLE.NONE) this.releaseVehicleSeat(p);
+      if (p.state.vehicle !== VEHICLE.NONE) {
+        const hull = this.releaseVehicleSeat(p);
+        if (hull) released.push({ hull, by: p });
+      }
       p.airlift = undefined; p.state.airlift = undefined;
       p.state.vx = p.state.vy = p.state.vz = 0;
       p.preferredSpawnId = ''; p.lastDeath = undefined;
@@ -911,6 +915,10 @@ export class Game {
       v.health = vehicleDefinition(v.type, v.variant)!.maxHealth; v.occupant = -1; v.gunner = -1;
       v.respawnAtTick = -1; v.motionState = undefined;
       v.campaignFaction = this.frontier?.bases.find(b => b.id === v.campaignBaseId)?.owner ?? 0;
+    }
+    // Hulls that do not return home stay where their crews left them.
+    for (const { hull, by } of released) {
+      if (this.vehicles.get(hull.id) === hull && !(hull.campaignHome && hull.campaignBaseId)) this.settleAbandonedHull(hull, by);
     }
     this.projectiles.clear(); this.ownedArtillery.clear();
   }
@@ -1182,15 +1190,19 @@ export class Game {
     s.vx = 0; s.vy = 0; s.vz = 0;
     s.grounded = false;
 
-    if (!v || v.occupant >= 0 || v.transportRoute) return;
-    // Settle the abandoned hull onto the real ground below. Only a jet
-    // abandoned mid-flight crashes (nobody wants one floating mid-sky);
-    // jeeps and tanks simply drop - exiting above an entrance shaft used
-    // to blow the hull up because the shaft floor read as "hopelessly
-    // airborne".
+    this.settleAbandonedHull(v, p);
+  }
+
+  /** A hull left without a driver (exit, redeploy or death) settles onto the
+   * real ground below. Only a jet abandoned mid-flight crashes (nobody wants
+   * one floating mid-sky); jeeps and tanks simply drop - exiting above an
+   * entrance shaft used to blow the hull up because the shaft floor read as
+   * "hopelessly airborne". */
+  private settleAbandonedHull(v: ServerVehicle | undefined, by: ServerPlayer): void {
+    if (!v || v.occupant >= 0 || v.transportRoute || v.respawnAtTick >= 0 || v.health <= 0) return;
     const support = this.world.trace(v.x, v.y + .2, v.z, 0, -1, 0, VEHICLE_ABANDON_CRASH_HEIGHT);
     if (v.type === VEHICLE.JET && !support.hit) {
-      this.destroyVehicle(v, p, 255);
+      this.destroyVehicle(v, by, 255);
     } else {
       v.motionState = createMoveState(v.x, v.y, v.z);
       Object.assign(v.motionState, { vehicle: v.type, vehicleVariant: v.variant ?? 0, heading: v.heading,
@@ -1455,11 +1467,13 @@ export class Game {
     const actors = [...this.players.values()];
     const point = option.kind === 'air' ? { x: option.x, y: option.y, z: option.z } : this.placeAt(player, option, actors);
     if (!point) return 'That rally is crowded right now. Try again in a moment.';
-    if (s.vehicle !== VEHICLE.NONE) this.releaseVehicleSeat(player);
+    const abandoned = s.vehicle !== VEHICLE.NONE ? this.releaseVehicleSeat(player) : undefined;
     const from = { x: s.px, y: s.py, z: s.pz };
     s.px = point.x; s.py = point.y; s.pz = point.z; s.vx = s.vy = s.vz = 0; s.grounded = false;
     player.deployReadyAt = this.tick + DEPLOY_COOLDOWN_SECONDS * TICK_RATE;
     player.spawnProtectedUntil = this.tick + 3 * TICK_RATE; player.recallSince = -1;
+    // After the soldier has left: an abandoned jet in flight crashes behind them.
+    this.settleAbandonedHull(abandoned, player);
     if (option.kind === 'air') this.launchJet(player, option.heading ?? 0);
     this.events.push({ bytes: encodeTeleport({ id: player.id, fromX: from.x, fromY: from.y, fromZ: from.z, toX: s.px, toY: s.py, toZ: s.pz }) });
     return null;
@@ -2874,13 +2888,13 @@ export class Game {
     // Dying at the wheel frees the hull in place (vehicle destruction paths
     // clear possession before calling kill, so this only covers oddballs
     // like the kill floor or admin kills).
-    if (victim.state.vehicle !== VEHICLE.NONE) {
-      this.releaseVehicleSeat(victim);
-    }
+    const abandoned = victim.state.vehicle !== VEHICLE.NONE ? this.releaseVehicleSeat(victim) : undefined;
     victim.health = 0;
     victim.airlift=undefined;victim.state.airlift=undefined;
     victim.state.alive = false;
     victim.state.vx = 0; victim.state.vy = 0; victim.state.vz = 0;
+    // Only once the pilot is dead: a crashing jet's blast must not kill them twice.
+    this.settleAbandonedHull(abandoned, attacker);
     victim.deaths++; victim.warDeaths++;
     victim.respawnAtTick = this.tick + PLAYER.RESPAWN_SECONDS * 60;
     victim.spawnProtectedUntil = -1;
