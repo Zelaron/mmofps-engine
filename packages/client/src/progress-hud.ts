@@ -177,7 +177,7 @@ export class ProgressHud {
     const factions = ([1, 2, 3] as const).map(f => {
       const mine = f === this.faction ? ' mine' : '';
       const lead = war.bases[f] >= war.victoryBases - 1 ? ' near-win' : '';
-      return `<span class="war-faction${mine}${lead}" style="--faction:${FACTIONS[f].color}"><i></i>${SHORT_NAMES[f]}<b>${war.bases[f]}</b></span>`;
+      return `<span class="war-faction${mine}${lead}" style="--faction:${FACTIONS[f].color}"><i></i><span class="war-name">${SHORT_NAMES[f]}</span><b>${war.bases[f]}</b></span>`;
     }).join('');
     const status = war.victor
       ? `<span class="war-clock">NEXT WAR ${clock((war.nextIn ?? 0) - elapsed)}</span>`

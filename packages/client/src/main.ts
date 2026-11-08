@@ -111,6 +111,15 @@ const sceneMgr = new SceneMgr(canvas);
 const drawWarmup = new DrawWarmup(sceneMgr.scene);
 sceneMgr.presentationGate = () => drawWarmup.done;
 const navigationMap = new NavigationMap();
+// The desktop minimap stacks above the rank panel, whose height follows its
+// content (daily orders, session XP). Touch layouts place both elsewhere.
+const rankPanel = document.getElementById('rank-panel');
+const stackMinimap = (): void => {
+  const top = rankPanel && !document.documentElement.classList.contains('touch-device') ? rankPanel.getBoundingClientRect().top : 0;
+  document.documentElement.style.setProperty('--minimap-bottom', top > 0 ? `${Math.round(innerHeight - top + 12)}px` : '');
+};
+if (rankPanel) new ResizeObserver(stackMinimap).observe(rankPanel);
+addEventListener('resize', stackMinimap);
 const frontierMarkers = new FrontierMarkers();
 sceneMgr.scene.add(frontierMarkers.group);
 const campModels = new OutpostRenderer(); sceneMgr.scene.add(campModels.group);

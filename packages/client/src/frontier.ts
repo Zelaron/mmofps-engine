@@ -88,7 +88,7 @@ export class FrontierUI {
       <div class="atlas-map-tools" aria-label="Map controls"><button data-map="out" aria-label="Zoom out">−</button><output class="atlas-zoom" aria-label="Map zoom">1×</output><button data-map="in" aria-label="Zoom in">+</button><button data-map="you">YOU</button><button data-map="death" hidden>LAST FALL</button><button data-map="world">PLANET</button></div>
       <div class="atlas-map-key" aria-label="Tactical map legend"><span><i class="key-you"></i>You</span><span><i class="key-friendly"></i>Friendly</span><span><i class="key-hostile"></i>Enemy</span><span><i class="key-vehicle"></i>Vehicle</span><span><i class="key-threat"></i>Major threat</span><span><i class="key-loot"></i>Weapon drop</span><span><i class="key-death"></i>Last fall</span><span><i class="key-capture"></i>Capturing</span><span><i class="key-contested"></i>Contested / attacked</span><span><i class="key-battle"></i>Recent combat</span><span><i class="key-base"></i>Base</span><span><i class="key-order"></i>Squad order</span><span><i class="key-pod"></i>Airlift</span></div>
       <div class="atlas-map-label"><small>01 / MERIDIAN</small><b>The inhabited frontier</b><span>Cities · wilderness · subterranean routes · open ocean</span><small>CONTROL POINTS</small><div class="atlas-ownership"></div></div></div>
-      <aside class="atlas-sidebar"><section class="respawn-panel" hidden><small>FACTION REINFORCEMENTS</small><h2 class="reinforcement-heading">Choose next respawn.</h2><h2 class="redeploy-countdown" hidden>Back in <span id="respawn-countdown">10</span>s</h2><p id="respawn-detail"></p><div class="reinforcement-local" hidden></div><div class="respawn-choices" aria-label="Next respawn point"></div><p class="respawn-help"></p></section>
+      <aside class="atlas-sidebar"><section class="redeploy-panel" hidden><small>REDEPLOY</small><h2>Go straight to the fight.</h2><div class="redeploy-actions"></div><p class="redeploy-help">Out of combat only. You keep your weapons. In the world, hold <kbd>Q</kbd> to deploy without opening this map.</p></section><section class="respawn-panel" hidden><small>FACTION REINFORCEMENTS</small><h2 class="reinforcement-heading">Choose next respawn.</h2><h2 class="redeploy-countdown" hidden>Back in <span id="respawn-countdown">10</span>s</h2><p id="respawn-detail"></p><div class="reinforcement-local" hidden></div><div class="respawn-choices" aria-label="Next respawn point"></div><p class="respawn-help"></p></section>
       <section class="atlas-intelligence"><small>FRONTLINE REPORT</small><h2>Active objectives.</h2><div class="atlas-controls"></div><p class="atlas-death-readout" hidden></p><div class="atlas-objective"></div><div class="atlas-battles"></div><p class="atlas-battle-help">Select a report to locate it. Combat rings show the last 30 seconds. Unit markers show nearby contacts; major threats are broadcast planet-wide.</p><div class="atlas-threats"></div></section>
       <section class="atlas-allegiance"><small>YOUR ALLEGIANCE</small><h2>Choose your own war.</h2><p>You join a faction automatically, ready to fight. You can switch sides here after leaving combat.</p>
       <div class="faction-choices">${FACTIONS.filter(f => f.id > 0).map(f => `<button data-faction="${f.id}" style="--faction:${f.color}"><i></i><span><b>${f.name}</b><small>${f.description}</small></span><em>→</em></button>`).join('')}</div>
@@ -228,6 +228,7 @@ export class FrontierUI {
     if (this.dead) { this.cancelQuickDeploy(); this.farSince = null; this.farReminded = false; }
     const sidebar=this.element.querySelector('.atlas-sidebar')!;
     sidebar.prepend(this.element.querySelector(this.dead?'.respawn-panel':'.atlas-intelligence')!);
+    if (!this.dead) sidebar.prepend(this.element.querySelector('.redeploy-panel')!);
     if (this.dead) { this.deathAt = performance.now(); this.mapOpenAt = this.deathAt + Math.max(0, mapDelayMs); }
     else this.mapOpenAt = 0;
     if (this.dead && mapDelayMs > 0 && this.open) { this.open = false; this.element.hidden = true; this.onOpen(false, false); }
@@ -629,10 +630,13 @@ export class FrontierUI {
     this.element.classList.toggle('reinforcement-ready', !!state);
     this.element.querySelector<HTMLElement>('.respawn-panel')!.hidden = !state && !this.dead;
     this.element.querySelector<HTMLElement>('.reinforcement-heading')!.hidden = this.dead;
+    this.element.querySelector('.reinforcement-heading')!.textContent = 'Next respawn point.';
+    const actions = this.element.querySelector('.redeploy-actions')!; actions.replaceChildren();
+    this.element.querySelector<HTMLElement>('.redeploy-panel')!.hidden = this.dead || !state;
     this.element.querySelector<HTMLElement>('.redeploy-countdown')!.hidden = !this.dead;
     this.element.querySelector('.respawn-help')!.textContent = this.dead
       ? 'Your choice is used when the timer ends. If the rally becomes unsafe, you return at another safe position; your preference is remembered.'
-      : 'Choose your next respawn, or DEPLOY NOW to go there immediately when you are out of combat. Your preference is remembered between deaths.';
+      : 'Where you return after a death. Your choice is remembered, and DEPLOY NOW above goes there too.';
     this.displayedSpawns = orderedReinforcements(state?.options ?? [], this.state?.bases ?? [], this.x, this.z, this.state?.territories);
     const local = localCampaignBase(this.state?.bases ?? [], this.x, this.z, this.state?.territories);
     const localPanel = this.element.querySelector<HTMLElement>('.reinforcement-local')!; localPanel.replaceChildren(); localPanel.hidden = !local || !this.state;
@@ -681,10 +685,10 @@ export class FrontierUI {
       const label = document.createElement('b'); label.textContent = 'DEPLOY NOW ↗';
       const hint = document.createElement('span');
       hint.textContent = target ? `Move to ${state.options.find(o => o.id === target)?.name ?? 'the selected point'} immediately (out of combat only).`
-        : order ? `No deployment point is closer to your order (${order.name}) right now. Try again shortly, or pick a point above.` : 'No deployment point is available right now.';
+        : order ? `No deployment point is closer to your order (${order.name}) right now. Try again shortly, or pick a respawn point below.` : 'No deployment point is available right now.';
       deploy.append(label, hint);
       deploy.onclick = () => { if (target) { this.deployNow(target); this.toggle(false); } };
-      list.append(deploy);
+      actions.append(deploy);
       const jet = this.displayedSpawns.find(option => option.kind === 'air');
       if (jet) {
         const ready = jet.available !== false;
@@ -694,7 +698,7 @@ export class FrontierUI {
         flyHint.textContent = ready ? `${jet.reason ?? 'Launch airborne.'} Out of combat only.` : jet.reason ?? 'Not available right now.';
         fly.append(flyLabel, flyHint);
         fly.onclick = () => { if (ready) { this.deployNow(jet.id); this.toggle(false); } };
-        list.append(fly);
+        actions.append(fly);
       }
     }
     if (this.dead) this.updateRespawnCountdown();
