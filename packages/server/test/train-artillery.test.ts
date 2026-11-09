@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { Game, type ServerPlayer } from '../src/game.js';
 import { BTN, NET, TICK_DT, TICK_RATE, VEHICLE, VEHICLE_VARIANT, ENT_PROJECTILE, ByteReader, Msg,
   decodeFire, decodeSnapshot, type InputCmd, type WeaponDef, viewDir } from '@shared/index';
-import { TRAIN_NUCLEAR_CANNON, MAX_OWNED_ARTILLERY_SHELLS, trainArtilleryMuzzle, artilleryPitch } from '@shared/vehicles';
+import { TRAIN_NUCLEAR_CANNON, MAX_OWNED_ARTILLERY_SHELLS, trainArtilleryMuzzle, artilleryPitch,
+  DESTROYER_CLUSTER, DESTROYER_NUKE, DESTROYER_SALVO_COUNT } from '@shared/vehicles';
 import { placeTrainArtillery } from '@shared/transit-motion';
 
 function internals(game:Game) {return game as unknown as {
@@ -51,6 +52,22 @@ test('owned strategic shells reserve at most four existing snapshot slots beyond
   assert.ok(shells.every(e=>e.x>NET.INTEREST_RADIUS));
   assert.ok(!spectator.ents.some(e=>e.kind===ENT_PROJECTILE&&e.weapon===213),'other clients retain their ordinary interest radius');
   assert.ok(internals(game).buildSnapshotFor(owner).length<3000,'strategic interest does not grow the entity or packet cap');
+});
+
+test('a destroyer gunner follows a whole battery salvo and nuclear salvo past normal interest',()=>{
+  const game=new Game(1337),owner=game.addPlayer('owner',null),other=game.addPlayer('other',null);
+  for(const p of [owner,other])Object.assign(p.state,{px:0,py:600,pz:0});
+  for(let id=1;id<=75;id++)game.projectiles.set(id,{id,owner:other.id,weapon:3,x:20+id,y:600,z:0,
+    vx:0,vy:0,vz:0,distLeft:300,fuseLeft:10,ageSeconds:0,sleeping:false});
+  for(const [base,weapon] of [[500,DESTROYER_CLUSTER.id],[600,DESTROYER_NUKE.id]])for(let i=0;i<DESTROYER_SALVO_COUNT;i++)
+    game.projectiles.set(base+i,{id:base+i,owner:owner.id,weapon,x:900+i*60,y:650,z:base-500,
+      vx:100,vy:0,vz:0,distLeft:1000,fuseLeft:8,ageSeconds:1,sleeping:false});
+  const own=snapshot(game,owner),spectator=snapshot(game,other);
+  assert.equal(own.ents.length,NET.MAX_SNAPSHOT_ENTITIES);
+  for(const weapon of [DESTROYER_CLUSTER.id,DESTROYER_NUKE.id])
+    assert.equal(own.ents.filter(e=>e.kind===ENT_PROJECTILE&&e.weapon===weapon).length,DESTROYER_SALVO_COUNT,`all ${weapon} shells stay in view`);
+  assert.ok(!spectator.ents.some(e=>e.kind===ENT_PROJECTILE&&(e.weapon===DESTROYER_CLUSTER.id||e.weapon===DESTROYER_NUKE.id)),
+    'other clients keep their ordinary interest radius');
 });
 
 test('a shell travels beyond normal replication range and its eventual impact reaches only owner and nearby witnesses',()=>{

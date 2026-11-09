@@ -38,7 +38,8 @@ import { cityVehicleSites } from '@shared/cities';
 import { vesperRoutes } from '@shared/vesper-city';
 import { carryTransit, placeTrainArtillery, transitImpactDamage } from '@shared/transit-motion';
 import { carryCityLift } from '@shared/lifts';
-import { GUNBOAT_DRAFT, DESTROYER_DRAFT, trainArtilleryMuzzle, vehicleEyeOffset, artilleryPitch, MAX_OWNED_ARTILLERY_SHELLS } from '@shared/vehicles';
+import { GUNBOAT_DRAFT, DESTROYER_DRAFT, trainArtilleryMuzzle, vehicleEyeOffset, artilleryPitch, ownerTracksShell, MAX_OWNER_TRACKED_SHELLS, MAX_OWNED_ARTILLERY_SHELLS,
+  DESTROYER_NUKE_SQUARE, DESTROYER_NUKE_MIN_PITCH, ballisticPitch } from '@shared/vehicles';
 import { harborBoatSite, harborShipSite, DESTROYER_HARBOR_IDS } from '@shared/transport';
 import { airliftPose, airliftDuration, AIRLIFT_CHARGE_SECONDS } from '@shared/airlift';
 import { setVehicleColliders, updateVehicleCollider, withVehicleColliders, type VehicleColliderPose } from '@shared/vehicle-collision';
@@ -219,6 +220,10 @@ export interface ServerVehicle {
   deployed?: boolean;
   /** Tick a deployed hull was left without a crew (-1 while crewed). */
   abandonedAt?: number;
+  /** Per seat, the ticks at which its primary and alternate weapons are
+   * ready again. Reloads belong to the hull, so leaving and re-boarding (or
+   * swapping crew) does not reload a long-cooldown weapon. */
+  reloads?: Map<number, { fire: number; alt: number }>;
 }
 
 interface VehicleSite {
@@ -948,7 +953,7 @@ export class Game {
       if (!v.campaignHome || !v.campaignBaseId || v.transportRoute) continue;
       v.x = v.campaignHome.x; v.y = v.campaignHome.y + .05; v.z = v.campaignHome.z; v.heading = v.campaignHome.heading;
       v.health = vehicleDefinition(v.type, v.variant)!.maxHealth; v.occupant = -1; v.gunner = -1;
-      v.respawnAtTick = -1; v.motionState = undefined;
+      v.respawnAtTick = -1; v.motionState = undefined; v.reloads = undefined;
       v.campaignFaction = this.frontier?.bases.find(b => b.id === v.campaignBaseId)?.owner ?? 0;
     }
     // Hulls that do not return home stay where their crews left them.
@@ -1124,8 +1129,19 @@ export class Game {
     s.vx = 0; s.vy = 0; s.vz = 0;
     s.boostFuel = 1;
     if (driver) this.copyCrewPose(p, driver);
-    p.vehFireCd = 0.5;
-    p.vehAltCd = 1;
+    const reload = best.reloads?.get(s.seat);
+    p.vehFireCd = Math.max(0.5, reload ? (reload.fire - this.tick) / TICK_RATE : 0);
+    p.vehAltCd = Math.max(1, reload ? (reload.alt - this.tick) / TICK_RATE : 0);
+  }
+
+  /** Record a fired vehicle weapon's reload on the hull for this seat. */
+  private holdReload(p: ServerPlayer, slot: 'fire' | 'alt', seconds: number): void {
+    const hull = this.vehicles.get(p.vehicleId);
+    if (!hull) return;
+    const seat = p.state.seat ?? 0, reloads = hull.reloads ??= new Map();
+    const reload = reloads.get(seat) ?? { fire: 0, alt: 0 };
+    reload[slot] = this.tick + Math.round(seconds * TICK_RATE);
+    reloads.set(seat, reload);
   }
 
   /** The AA gunner of a destroyer: locks onto aircraft and fires flak pairs. */
@@ -1165,11 +1181,55 @@ export class Game {
 
   /** One shot, or a destroyer salvo or flak pair fanned slightly across the aim. */
   private fireVolley(p: ServerPlayer, cmd: InputCmd, def: WeaponDef, attachment?: { x: number; y: number; z: number }): void {
+    if (def.id === DESTROYER_NUKE.id && !attachment) { this.fireNuclearSalvo(p, cmd, def); return; }
     const pair = def.id === DESTROYER_AA_ROCKET.id, count = pair ? DESTROYER_AA_PAIR : salvoCount(def.id);
     for (let i = 0; i < count; i++) {
       const fan = (i - (count - 1) / 2) * (pair ? .03 : .045);
       this.fireProjectile(p, fan ? { ...cmd, yaw: cmd.yaw + fan } : cmd, def, i === 0, attachment);
     }
+  }
+
+  /** Five nuclear shells land as a square around the aimed point with one in
+   * the middle: the centre shell flies the gunner's aim (never flatter than
+   * the safety floor) and each corner shell is solved onto its own corner. */
+  private fireNuclearSalvo(p: ServerPlayer, cmd: InputCmd, def: WeaponDef): void {
+    const s = p.state, speed = def.speed ?? 116, gravity = def.gravity ?? 9;
+    const pitch = Math.max(DESTROYER_NUKE_MIN_PITCH, cmd.pitch);
+    const muzzle = gunboatGunMuzzle(s.heading, cmd.yaw, pitch, s.vehicleVariant);
+    const ox = s.px + muzzle.x, oy = s.py + muzzle.y, oz = s.pz + muzzle.z;
+    const center = this.ballisticImpact(ox, oy, oz, cmd.yaw, pitch, speed, gravity, def.fuse ?? 40);
+    const reach = Math.hypot(center.x - ox, center.z - oz);
+    const fx = reach > 1 ? (center.x - ox) / reach : -Math.sin(cmd.yaw), fz = reach > 1 ? (center.z - oz) / reach : -Math.cos(cmd.yaw);
+    const half = DESTROYER_NUKE_SQUARE / 2, high = pitch > Math.PI / 4;
+    const shots = [{ yaw: cmd.yaw, pitch }];
+    for (const [along, across] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+      const tx = center.x + fx * half * along - fz * half * across, tz = center.z + fz * half * along + fx * half * across;
+      const horizontal = Math.hypot(tx - ox, tz - oz);
+      shots.push({ yaw: Math.atan2(-(tx - ox), -(tz - oz)),
+        pitch: ballisticPitch(horizontal, this.surfaceHeight(tx, tz) - oy, speed, gravity, high) ?? Math.PI / 4 });
+    }
+    shots.forEach((shot, i) => this.fireProjectile(p, { ...cmd, yaw: shot.yaw, pitch: shot.pitch }, def, i === 0));
+  }
+
+  /** Where a shell launched this way first meets ground or water. */
+  private ballisticImpact(x: number, y: number, z: number, yaw: number, pitch: number, speed: number, gravity: number,
+    seconds: number): { x: number; y: number; z: number } {
+    const dir = viewDir(yaw, pitch), dt = 1 / 20;
+    let vx = dir.x * speed, vy = dir.y * speed, vz = dir.z * speed;
+    for (let t = 0; t < seconds; t += dt) {
+      x += vx * dt; y += vy * dt - gravity * dt * dt / 2; z += vz * dt; vy -= gravity * dt;
+      if (vy < 0) {
+        const surface = this.surfaceHeight(x, z);
+        if (y <= surface) return { x, y: surface, z };
+      }
+    }
+    return { x, y, z };
+  }
+
+  /** Ground height, or the surface of the water covering it. */
+  private surfaceHeight(x: number, z: number): number {
+    const ground = this.world.groundY(x, z), water = this.world.liquidAt(x, ground + .3, z);
+    return water ? Math.max(ground, water.surfaceY) : ground;
   }
 
   private copyCrewPose(passenger: ServerPlayer, driver: ServerPlayer): void {
@@ -1365,7 +1425,7 @@ export class Game {
   ): void {
     const def = vehicleDefinition(v.type, v.variant)!;
     v.health = 0;
-    v.respawnAtTick = this.tick + Math.round(def.respawnSeconds * TICK_RATE);
+    v.respawnAtTick = this.tick + Math.round(def.respawnSeconds * TICK_RATE); v.reloads = undefined;
     updateVehicleCollider(this.world, this.tick, this.vehicleCollider(v));
     const occupants = [this.players.get(v.occupant), this.players.get(v.gunner ?? -1)];
     if (attacker && this.frontier && occupants.some(o => o && o.faction !== attacker.faction) && !v.transportRoute) {
@@ -1969,7 +2029,7 @@ export class Game {
     if (p.state.seat === 2) {
       const def = weaponDefById(213)!;
       if ((cmd.buttons & (BTN.FIRE | BTN.ALTFIRE)) && p.vehFireCd <= 0) {
-        p.vehFireCd = def.interval; this.stats.shotsFired++;
+        p.vehFireCd = def.interval; this.stats.shotsFired++; this.holdReload(p, 'fire', def.interval);
         const aimed = { ...cmd, pitch: artilleryPitch(cmd.pitch) };
         this.fireProjectile(p, aimed, def, true, trainArtilleryMuzzle(p.state.heading, aimed.yaw, aimed.pitch));
       }
@@ -1980,12 +2040,12 @@ export class Game {
       const attachment = type === VEHICLE.JET ? aircraftCrewMuzzle(p.state)
         : crewGunMuzzle(type, p.state.vehicleVariant, p.state.heading, cmd.yaw, cmd.pitch);
       if ((cmd.buttons & BTN.FIRE) && p.vehFireCd <= 0) {
-        p.vehFireCd = crew.primary.interval; this.stats.shotsFired++;
+        p.vehFireCd = crew.primary.interval; this.stats.shotsFired++; this.holdReload(p, 'fire', crew.primary.interval);
         if (crew.primary.kind === 'hitscan') this.fireHitscan(p, cmd, crew.primary, attachment);
         else this.fireVolley(p, cmd, crew.primary, attachment);
       }
       if ((cmd.buttons & BTN.ALTFIRE) && p.vehAltCd <= 0 && crew.alt) {
-        p.vehAltCd = crew.alt.interval; this.stats.shotsFired++;
+        p.vehAltCd = crew.alt.interval; this.stats.shotsFired++; this.holdReload(p, 'alt', crew.alt.interval);
         this.fireVolley(p, cmd, crew.alt, attachment);
       }
       return;
@@ -1993,7 +2053,7 @@ export class Game {
     const armament = vehicleArmament(type, p.state.vehicleVariant);
     if ((cmd.buttons & BTN.FIRE) !== 0 && p.vehFireCd <= 0) {
       p.vehFireCd = armament.primary.interval;
-      this.stats.shotsFired++;
+      this.stats.shotsFired++; this.holdReload(p, 'fire', armament.primary.interval);
       if (type === VEHICLE.JET) {
         const nose = vehicleLocalOffset(p.state, 0, 0, -1);
         this.fireHitscan(p, { ...cmd, yaw: Math.atan2(-nose.x, -nose.z),
@@ -2004,7 +2064,7 @@ export class Game {
     // The destroyer's nuclear salvo is for human crews only.
     if ((cmd.buttons & BTN.ALTFIRE) !== 0 && p.vehAltCd <= 0 && armament.alt && !(p.isBot && armament.alt.id === DESTROYER_NUKE.id)) {
       p.vehAltCd = armament.alt.interval;
-      this.stats.shotsFired++;
+      this.stats.shotsFired++; this.holdReload(p, 'alt', armament.alt.interval);
       if (type === VEHICLE.JET) this.dropCarpetBombs(p, armament.alt);
       else this.fireVolley(p, cmd, armament.alt);
     }
@@ -2523,6 +2583,15 @@ export class Game {
         if (r.sleeping) r.ageSeconds += simDt;
         else if (this.advanceProjectile(r, def, simDt)) continue;
       }
+      // A nuclear shell bursts where it meets the sea, not on the seabed.
+      if (r.weapon === DESTROYER_NUKE.id && r.vy < 0) {
+        const water = this.world.liquidAt(r.x, r.y, r.z);
+        if (water) {
+          this.explode(r.x, water.surfaceY, r.z, this.players.get(r.owner) ?? null, def, -1, r.id);
+          this.projectiles.delete(r.id);
+          continue;
+        }
+      }
       r.fuseLeft -= simDt;
 
       // A low-energy early ricochet may settle on the ground. That continuous
@@ -2602,7 +2671,7 @@ export class Game {
     }
     this.events.push({
       bytes: encodeExplosion(parent.x, parent.y, parent.z, TANK_CLUSTER.id, parent.id),
-      x: parent.x, z: parent.z, radius: NET.FIRE_EVENT_RADIUS,
+      x: parent.x, z: parent.z, radius: NET.FIRE_EVENT_RADIUS, alwaysFor: parent.owner,
     });
   }
 
@@ -2861,7 +2930,7 @@ export class Game {
     this.events.push({
       bytes: encodeExplosion(x, y, z, def.id, projectileId),
       x, z, radius: NET.FIRE_EVENT_RADIUS,
-      alwaysFor: isOwnedArtillery(def.id) ? owner?.id : undefined,
+      alwaysFor: isOwnedArtillery(def.id) || def.id === CLUSTER_BOMBLET.id ? owner?.id : undefined,
     });
     const radius = def.splashRadius ?? 4.5;
     const maxDmg = def.splashMax ?? 70;
@@ -3544,7 +3613,7 @@ export class Game {
     for (const r of this.snapshotProjectiles(p)) {
       const dx = r.x - px, dy = r.y - py, dz = r.z - pz;
       const d2 = dx * dx + dy * dy + dz * dz;
-      const ownedArtillery = isOwnedArtillery(r.weapon) && r.owner === p.id;
+      const ownedArtillery = ownerTracksShell(r.weapon) && r.owner === p.id;
       if (d2 > R2 && !ownedArtillery) continue;
       (ownedArtillery ? strategic : withDist).push({
         d2,
@@ -3557,7 +3626,16 @@ export class Game {
       });
     }
     strategic.sort((a,b)=>a.d2-b.d2);
-    for (let i=0;i<strategic.length&&i<MAX_OWNED_ARTILLERY_SHELLS;i++) ents.push(strategic[i].e);
+    // Owned artillery keeps its own cap; the rest of the room serves the
+    // destroyer's battery salvo.
+    let tracked=0,artillery=0;
+    for (const shell of strategic) {
+      if (tracked>=MAX_OWNER_TRACKED_SHELLS) break;
+      const owned=isOwnedArtillery(shell.e.weapon);
+      if (owned&&artillery>=MAX_OWNED_ARTILLERY_SHELLS) continue;
+      if (owned) artillery++;
+      ents.push(shell.e); tracked++;
+    }
     withDist.sort((a, b) => a.d2 - b.d2);
     for (let i = 0; i < withDist.length && ents.length < NET.MAX_SNAPSHOT_ENTITIES; i++) ents.push(withDist[i].e);
     for (const pickup of this.pickups.values()) {
@@ -3628,6 +3706,7 @@ export class Game {
         vehicleHealth: myVehicle && p.state.vehicle !== VEHICLE.NONE
           ? Math.max(0, myVehicle.health)
           : 0,
+        vehicleFireCd: p.vehFireCd, vehicleAltCd: p.vehAltCd,
         lockState: p.lockState,
         aircraftThreat: aircraftThreatFor(p, this.players, this.projectiles, this.vehicles, (a, b) => this.areEnemies(a, b)),
       },
@@ -3658,7 +3737,7 @@ export class Game {
     for (const p of this.players.values()) this.playerIndex.insert(p, p.state.px, p.state.pz);
     for (const r of this.projectiles.values()) {
       this.projectileIndex.insert(r, r.x, r.z);
-      if (isOwnedArtillery(r.weapon)) {
+      if (ownerTracksShell(r.weapon)) {
         let shells = this.ownedArtillery.get(r.owner);
         if (!shells) this.ownedArtillery.set(r.owner, shells = []);
         shells.push(r);
@@ -3669,7 +3748,7 @@ export class Game {
 
   private *snapshotProjectiles(p: ServerPlayer): IterableIterator<Projectile> {
     for (const r of this.projectileIndex.query(p.state.px, p.state.pz, NET.INTEREST_RADIUS)) {
-      if (!isOwnedArtillery(r.weapon) || r.owner !== p.id) yield r;
+      if (!ownerTracksShell(r.weapon) || r.owner !== p.id) yield r;
     }
     yield* this.ownedArtillery.get(p.id) ?? [];
   }

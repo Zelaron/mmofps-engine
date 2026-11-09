@@ -293,6 +293,10 @@ export interface YourState {
   boosting?: boolean;
   /** Current hull health while driving (display only, never predicted). */
   vehicleHealth: number;
+  /** Seconds until this seat's primary and alternate weapons are ready
+   * (display only; the reloads belong to the hull). */
+  vehicleFireCd?: number;
+  vehicleAltCd?: number;
   /** LOCK_NONE / LOCK_ACQUIRING / LOCK_LOCKED for the homing HUD. */
   lockState: number;
   /** Target-side radar warning, sent to every occupied aircraft seat. */
@@ -430,7 +434,8 @@ export function encodeSnapshot(w: ByteWriter, snap: Snapshot): void {
   const yourVariant = validVehicleVariant(you.vehicle, you.vehicleVariant);
   w.u8(you.vehicle | (yourVariant ? 128 : 0));
   if (yourVariant) w.u8(yourVariant);
-  if (you.vehicle) w.u8(you.seat ?? 0).entity(you.vehicleId ?? NO_ENTITY_ID);
+  if (you.vehicle) w.u8(you.seat ?? 0).entity(you.vehicleId ?? NO_ENTITY_ID)
+    .u16(clamp(Math.ceil((you.vehicleFireCd ?? 0) * 100), 0, 65535)).u16(clamp(Math.ceil((you.vehicleAltCd ?? 0) * 100), 0, 65535));
   if (you.seat === 2) w.u8(you.transportRoute ?? 0);
   w.u16(quantYaw(you.heading));
   w.f32(you.vehiclePitch ?? 0).f32(you.vehicleRoll ?? 0);
@@ -547,7 +552,10 @@ export function decodeSnapshot(r: ByteReader): Snapshot {
   const yourType = r.u8();
   you.vehicle = yourType & 127;
   if (yourType & 128) you.vehicleVariant = validVehicleVariant(you.vehicle, r.u8());
-  if (you.vehicle) { const seat = r.u8(), vehicleId = r.entity(); if (seat) you.seat = seat; if (vehicleId !== NO_ENTITY_ID) you.vehicleId = vehicleId; }
+  if (you.vehicle) {
+    const seat = r.u8(), vehicleId = r.entity(); if (seat) you.seat = seat; if (vehicleId !== NO_ENTITY_ID) you.vehicleId = vehicleId;
+    you.vehicleFireCd = r.u16() / 100; you.vehicleAltCd = r.u16() / 100;
+  }
   if (you.seat === 2) you.transportRoute = r.u8();
   you.heading = unquantYaw(r.u16());
   you.vehiclePitch = r.f32(); you.vehicleRoll = r.f32();

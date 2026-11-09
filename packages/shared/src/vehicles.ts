@@ -652,13 +652,33 @@ export const TRAIN_NUCLEAR_CANNON: WeaponDef = {
   ...BASTION_SHOCK_SHELL,id:213,name:'Leviathan Nuclear Artillery',interval:5.5,
   damage:450,speed:190,gravity:4,range:2400,fuse:16,splashRadius:130,splashMax:420,splashImpulse:80,
 };
-/** The destroyer's main battery: five cluster shells a salvo, a little
- * faster than the tank's, for about 1.2x its reach. */
-export const DESTROYER_CLUSTER: WeaponDef = { ...TANK_CLUSTER, id: 216, name: 'Battery Salvo', speed: 74 };
-/** Five nuclear shells a salvo on a long cooldown. Bots never fire it. Its
- * 1.5 km reach threatens harbors and the coast, not the inland cities. */
-export const DESTROYER_NUKE: WeaponDef = { ...TRAIN_NUCLEAR_CANNON, id: 217, name: 'Warden Nuclear Salvo', interval: 60, range: 1500 };
+/** The destroyer's main battery: five cluster shells a salvo. Faster than the
+ * tank's and splitting sooner, it reaches from about 95 m to 710 m. */
+export const DESTROYER_CLUSTER: WeaponDef = { ...TANK_CLUSTER, id: 216, name: 'Battery Salvo', speed: 118, fuse: .8 };
+/** Five nuclear shells a salvo on a long cooldown. Bots never fire it. Each
+ * shell flies a true arc and bursts where it lands; at 45 degrees it reaches
+ * about 1.5 km, which threatens harbors and the coast, not the inland cities. */
+export const DESTROYER_NUKE: WeaponDef = { ...TRAIN_NUCLEAR_CANNON, id: 217, name: 'Warden Nuclear Salvo', interval: 60,
+  speed: 116, gravity: 9, range: 6000, fuse: 40, impactOnly: true };
 export const DESTROYER_SALVO_COUNT = 5;
+/** The nuclear salvo lands as a square with a shell at each corner and one in
+ * the middle, this many metres a side: five separate blasts. */
+export const DESTROYER_NUKE_SQUARE = 250;
+/** The salvo is never fired flatter than this, so its nearest shell lands
+ * well outside the ship's own blast radius. */
+export const DESTROYER_NUKE_MIN_PITCH = .14;
+/** Bot crews keep the battery to its former reach; the longer reach is for
+ * human gunners. */
+export const DESTROYER_BOT_BATTERY_REACH = 350;
+/** Launch pitch that carries a shell `horizontal` metres away and `rise`
+ * metres up (negative is down) at `speed` under `gravity`, on the low or the
+ * high arc. Null when the point is out of reach. */
+export function ballisticPitch(horizontal: number, rise: number, speed: number, gravity: number, high = false): number | null {
+  if (horizontal < 1e-6) return rise >= 0 ? Math.PI / 2 : -Math.PI / 2;
+  const v2 = speed * speed, root = v2 * v2 - gravity * (gravity * horizontal * horizontal + 2 * rise * v2);
+  if (root < 0) return null;
+  return Math.atan((v2 + (high ? 1 : -1) * Math.sqrt(root)) / (gravity * horizontal));
+}
 /** Pitch that lands the battery salvo `horizontal` metres away and `drop`
  * metres below the muzzle (negative drop = above), following the shell to its
  * split and the bomblets' steeper fall after it. Null when out of reach. */
@@ -686,6 +706,11 @@ export function isClusterShell(id: number): boolean { return id === TANK_CLUSTER
 export function isOwnedArtillery(id: number): boolean { return id === TRAIN_NUCLEAR_CANNON.id || id === DESTROYER_NUKE.id; }
 /** A private long-range view for the gunner, within the existing entity cap. */
 export const MAX_OWNED_ARTILLERY_SHELLS = 6;
+/** Shells their gunner follows past the interest radius: owned artillery and
+ * the destroyer's battery salvo, whose reach goes beyond it. */
+export function ownerTracksShell(id: number): boolean { return isOwnedArtillery(id) || id === DESTROYER_CLUSTER.id; }
+/** Room for a full battery salvo and a nuclear salvo in flight together. */
+export const MAX_OWNER_TRACKED_SHELLS = 10;
 export function artilleryPitch(pitch:number):number { return clamp(pitch,-.08,1.1); }
 export const CREW_MG: WeaponDef = {
   ...common,id:214,name:'Crew Machine Gun',kind:'hitscan',interval:.085,

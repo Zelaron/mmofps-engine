@@ -297,6 +297,7 @@ test('jet guns use the simulated nose while alternate fire releases the bomb rac
       assert.equal(weapon.name, 'Jet MG'); shot = cmd;
     },
     dropCarpetBombs() { bombs++; },
+    holdReload() {},
   };
   const pilot = { state: {vehicle: VEHICLE.JET, heading: 0.75, vehiclePitch: 0.3},
     vehFireCd: 0, vehAltCd: 0 };

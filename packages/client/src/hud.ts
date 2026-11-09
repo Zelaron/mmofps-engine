@@ -173,6 +173,15 @@ export class Hud {
     this.reloadBar.style.width = `${active ? p * 100 : 0}%`;
   }
 
+  /** A vehicle seat's long-reload weapon: its name and a filling bar while it
+   * reloads, then READY. Replaces the hand weapon's reload line. */
+  setMountedReload(name: string, left: number, interval: number): void {
+    const reloading = left > .05;
+    this.reloadLabel.textContent = reloading ? `${name.toUpperCase()} · ${Math.ceil(left)} s` : `${name.toUpperCase()} READY`;
+    this.reloadTrack.classList.toggle('active', reloading);
+    this.reloadBar.style.width = `${reloading ? Math.max(0, Math.min(1, 1 - left / Math.max(1e-6, interval))) * 100 : 0}%`;
+  }
+
   setStats(ping: number, fps: number): void {
     this.stats.textContent = `${Math.round(ping)} ms | ${Math.round(fps)} fps`;
   }

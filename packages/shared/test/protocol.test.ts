@@ -74,7 +74,7 @@ test('snapshot roundtrip preserves entities and player state', () => {
       reloadCooldown: 1.8 - 61 / 60,
       reloadHeld: true,
       vehicle: 2, heading: unquantYaw(quantYaw(0.75)),
-      boostFuel: 128 / 255, vehicleHealth: 640, lockState: 1,
+      boostFuel: 128 / 255, vehicleHealth: 640, vehicleFireCd: 2.5, vehicleAltCd: 41.25, lockState: 1,
       vehiclePitch: f(0.73), vehicleRoll: f(-2.4), boosting: true,
       airlift: { source: 0, destination: 1, startTick: 0x1_0000_0000 + 123400, durationTicks: 1800 },
     },

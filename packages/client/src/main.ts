@@ -17,7 +17,7 @@ import { FrontierMarkers } from './render/frontier.js';
 import {
   World, WEAPONS, PLAYER, NET, TICK_RATE, pelletDir, viewDir, clamp,
   VEHICLE, vehicleDefinition, vehicleArmament, vehicleWeaponColor, isJetBombWeapon, vehicleEyeHeight, weaponDefById, VEHICLE_WEAPON_ID_BASE,
-  isDestroyer, crewArmament, presentationWeaponId, VEHICLE_VARIANT,
+  isDestroyer, crewArmament, presentationWeaponId, VEHICLE_VARIANT, DESTROYER_NUKE,
   NUKE_BOMB,
   LOCK_ACQUIRING, LOCK_LOCKED, HOMING_SPEED_FACTOR,
   type VehicleType,
@@ -177,6 +177,8 @@ let lastVehicleVariant = 0;
 
 /** Previous-frame reload progress, to fire the mid-reload seating cue once. */
 let lastReloadProgress = 0;
+/** This seat's vehicle weapon reloads from the latest snapshot, counted down locally. */
+let vehicleReloads = { fire: 0, alt: 0, at: 0 };
 
 const params = new URLSearchParams(location.search);
 const queryNumber = (name: string, fallback: number): number => {
@@ -583,6 +585,7 @@ const net = new NetClient({
   },
 
   onSnapshot(snap: Snapshot): void {
+    vehicleReloads = { fire: snap.you.vehicleFireCd ?? 0, alt: snap.you.vehicleAltCd ?? 0, at: performance.now() };
     nearbyCreatures = snap.creatures ?? [];
     wildlifeModels.sync(snap.creatures ?? [], snap.tick);
     const mapNow = performance.now();
@@ -666,6 +669,7 @@ const net = new NetClient({
   },
 
   onExplosion(ev): void {
+    const nuclearSalvo = ev.weapon === DESTROYER_NUKE.id;
     if (presentationWeaponId(ev.weapon) !== ev.weapon) ev = { ...ev, weapon: presentationWeaponId(ev.weapon) };
     const cam = sceneMgr.camera;
     const ownArtilleryImpact=ev.weapon===213&&artilleryFeedback.impact(ev.projectileId,ev,performance.now()*.001);
@@ -684,7 +688,8 @@ const net = new NetClient({
       effects.addVoidExplosion(ev.x,ev.y,ev.z,cam.position,radius);
       hud.nukeFlash(.65-Math.hypot(ev.x-cam.position.x,ev.y-cam.position.y,ev.z-cam.position.z)/450);
     } else if(ev.weapon===213) {
-      effects.addArtilleryExplosion(ev.x,ev.y,ev.z,cam.position,radius);
+      // A destroyer's nuclear shell raises a cloud twice the size.
+      effects.addArtilleryExplosion(ev.x,ev.y,ev.z,cam.position,radius,nuclearSalvo?2:1);
       const distance=Math.hypot(ev.x-cam.position.x,ev.y-cam.position.y,ev.z-cam.position.z);
       hud.nukeFlash(1.05-distance/650);
       if(ownArtilleryImpact)hud.showAnnounce(`Artillery impact confirmed · ${(distance/1000).toFixed(2)} km`);
@@ -1246,6 +1251,15 @@ function frame(): void {
         ? crewArmament(pred.state.vehicle, pred.state.vehicleVariant).primary
         : vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant).primary;
       hud.setMountedWeapon(mounted?.name ?? 'Mounted weapon', pred.alive);
+      // The rail artillery seat keeps its own reload readout.
+      if (!artillery) {
+        const armament = gunner ? crewArmament(pred.state.vehicle, pred.state.vehicleVariant)
+          : vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant);
+        const elapsed = (performance.now() - vehicleReloads.at) / 1000;
+        const fireLeft = Math.max(0, vehicleReloads.fire - elapsed), altLeft = Math.max(0, vehicleReloads.alt - elapsed);
+        if (armament.primary) hud.setCooldown(fireLeft / Math.max(1e-6, armament.primary.interval));
+        if (armament.alt && armament.alt.interval >= 4) hud.setMountedReload(armament.alt.name, altLeft, armament.alt.interval);
+      }
     }
     // The round/mag seats home around the midpoint of the choreography.
     if (reloading) {

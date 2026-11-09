@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { NuclearBurstBudget, NUCLEAR_PARTICLE_CAP } from './nuclear-burst.js';
-import { presentationWeaponId, weaponDefById, TICK_DT, WEAPONS, NUKE_MARKER, NUKE_BOMB, vehicleWeaponColor } from '@shared/index';
+import { presentationWeaponId, weaponDefById, TICK_DT, WEAPONS, NUKE_MARKER, NUKE_BOMB, vehicleWeaponColor, DESTROYER_NUKE } from '@shared/index';
 import { VehicleGeometry } from './vehicle-geometry.js';
 import { StrategicBurst } from './strategic-burst.js';
 
@@ -119,6 +119,8 @@ export class Effects {
     opacity: .46, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
   private readonly nuclearShell = strategicShell(0xc6b583, false);
   private readonly artilleryBeaconGeo = new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute([0,0,0],3));
+  private readonly salvoBeaconMat = new THREE.PointsMaterial({color:0xffcf73,size:18,sizeAttenuation:false,
+    transparent:true,opacity:.95,blending:THREE.AdditiveBlending,depthWrite:false});
   private readonly artilleryBeaconMat = new THREE.PointsMaterial({color:0xfff0ae,size:10,sizeAttenuation:false,
     transparent:true,opacity:.95,depthWrite:false,depthTest:true,fog:false,blending:THREE.AdditiveBlending,toneMapped:false});
   private readonly voidShell = strategicShell(0x80639c, true);
@@ -305,8 +307,9 @@ export class Effects {
     x: number, y: number, z: number,
     camPos: THREE.Vector3,
     radius: number,
+    density = 1,
   ): void {
-    this.emitNuclearCloud(x,y,z,radius,false);
+    this.emitNuclearCloud(x,y,z,radius,false,density);
     for (const slot of this.lights) {
       if (slot.life > 0) continue;
       slot.light.color.setHex(0xffba69);
@@ -325,7 +328,7 @@ export class Effects {
 
   /** Layered billowing sparks/smoke restore the particle-led explosion. Each
    * accepted blast creates 6600 points, never an opaque sphere or cloud cap. */
-  private emitNuclearCloud(x:number,y:number,z:number,radius:number,voided:boolean):void {
+  private emitNuclearCloud(x:number,y:number,z:number,radius:number,voided:boolean,density=1):void {
     if (!this.nuclear.take()) return;
     const scale = Math.max(.65, Math.min(1.3, radius / 115));
     const layers = [
@@ -336,10 +339,11 @@ export class Effects {
       [6,350,30,0xffa245,0xd586ff,1.9,7],
     ];
     for (const [height,count,speed,fireColor,voidColor,life,gravity] of layers) {
-      this.burst(x,y+height*scale,z,count,speed*scale,voided?voidColor:fireColor,life,gravity*scale);
+      this.burst(x,y+height*scale,z,Math.round(count*density),speed*scale,voided?voidColor:fireColor,life,gravity*scale);
     }
     const dust = new THREE.Color(voided ? 0xb899ce : 0xcfc4ae);
-    for (const [count, lo, hi, life] of [[600, 48, 78, 1.5], [450, 22, 40, 2.4]] as const) {
+    for (const [full, lo, hi, life] of [[600, 48, 78, 1.5], [450, 22, 40, 2.4]] as const) {
+      const count = Math.round(full * density);
       this.reserveParticles(count);
       for (let i=0;i<count;i++) {
         const a=i/count*Math.PI*2+Math.random()*.08;
@@ -376,11 +380,13 @@ export class Effects {
     this.shake=Math.min(.85,this.shake+7/Math.max(16,distance));
   }
 
-  addArtilleryExplosion(x:number,y:number,z:number,camPos:THREE.Vector3,radius:number):void {
+  /** `scale` enlarges the long-range cloud; a larger cloud uses lighter
+   * nearby particles so a whole salvo's clouds stay on screen together. */
+  addArtilleryExplosion(x:number,y:number,z:number,camPos:THREE.Vector3,radius:number,scale=1):void {
     // Ordinary combat particles only help nearby viewers. The larger shared
     // cloud remains readable at artillery range without a solid mesh cap.
-    if(Math.hypot(x-camPos.x,y-camPos.y,z-camPos.z)<700)this.addNukeExplosion(x,y,z,camPos,radius);
-    this.strategic.emit(x,y,z);
+    if(Math.hypot(x-camPos.x,y-camPos.y,z-camPos.z)<700)this.addNukeExplosion(x,y,z,camPos,radius,scale>1?.5:1);
+    this.strategic.emit(x,y,z,scale);
   }
 
   private reserveParticles(count:number):void {
@@ -415,7 +421,8 @@ export class Effects {
   updateProjectiles(views: ProjectileVisual[]): void {
     const present = new Set<number>();
     for (const view of views) {
-      const look = presentationWeaponId(view.weapon), v = look === view.weapon ? view : { ...view, weapon: look };
+      // The nuclear salvo keeps its own heavy shell; other aliases borrow a look.
+      const look = view.weapon === DESTROYER_NUKE.id ? view.weapon : presentationWeaponId(view.weapon), v = look === view.weapon ? view : { ...view, weapon: look };
       present.add(v.id);
       let slot = this.projectileMeshes.get(v.id);
       if (!slot || slot.weapon !== v.weapon) {
@@ -433,9 +440,9 @@ export class Effects {
       if (!this.isGrenade(v.weapon) || v.weapon === 208) orientAlong(slot.object, v.vx, v.vy, v.vz);
       slot.object.visible = true;
 
-      if (v.weapon === 213) {
+      if (v.weapon === 213 || v.weapon === DESTROYER_NUKE.id) {
         const previous=this.projectileTrailPrev.get(v.id);
-        if(previous)this.addTracer(v.x,v.y,v.z,previous.x,previous.y,previous.z,0xffeda1,.6);
+        if(previous)this.addTracer(v.x,v.y,v.z,previous.x,previous.y,previous.z,v.weapon===213?0xffeda1:0xffc86b,v.weapon===213?.6:1.6);
         this.projectileTrailPrev.set(v.id,{x:v.x,y:v.y,z:v.z});
       } else if (v.weapon === 209) {
         this.burst(v.x,v.y,v.z,2,1.2,0xffd67e,.18,0);
@@ -624,6 +631,14 @@ export class Effects {
       const shell=new THREE.Group();shell.name='leviathan-shell';
       const body=this.nuclearShell.clone();body.scale.setScalar(2.2);shell.add(body);
       const beacon=new THREE.Points(this.artilleryBeaconGeo,this.artilleryBeaconMat);beacon.name='artillery-shell-beacon';shell.add(beacon);
+      return shell;
+    }
+    if (weapon === DESTROYER_NUKE.id) {
+      // A heavy warhead that stays readable kilometres away: a large shell and
+      // a bright beacon that does not shrink with distance.
+      const shell=new THREE.Group();shell.name='warden-nuclear-shell';
+      const body=this.nuclearShell.clone();body.scale.setScalar(4.5);shell.add(body);
+      const beacon=new THREE.Points(this.artilleryBeaconGeo,this.salvoBeaconMat);beacon.name='nuclear-salvo-beacon';shell.add(beacon);
       return shell;
     }
     if (weapon === 208) return this.voidShell.clone();

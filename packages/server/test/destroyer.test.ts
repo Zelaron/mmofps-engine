@@ -5,7 +5,8 @@ import { BTN, PLAYER, VEHICLE, VEHICLE_VARIANT, WEAPONS, LOCK_LOCKED, LOCK_TICKS
   type InputCmd, type WeaponDef } from '@shared/index';
 import { Game, ServerPlayer, type ServerVehicle } from '../src/game.js';
 import { Bot } from '../src/bots.js';
-import { batteryPitch, DESTROYER_BATTERY_PIVOT } from '@shared/vehicles';
+import { batteryPitch, DESTROYER_BATTERY_PIVOT, DESTROYER_BOT_BATTERY_REACH, DESTROYER_NUKE_MIN_PITCH, DESTROYER_NUKE_SQUARE,
+  gunboatGunMuzzle } from '@shared/vehicles';
 import { vehicleCollisionWorld } from '../../shared/test/vehicle-collision-fixture.js';
 
 const command = (seq: number, buttons = 0, yaw = 0, pitch = 0): InputCmd =>
@@ -156,4 +157,81 @@ test('a bot captain lobs the battery salvo on its solved arc and never fires the
   assert.equal(alt, 0, 'bots never press the nuclear salvo');
   const arc = batteryPitch(200, hull.y + DESTROYER_BATTERY_PIVOT.y - enemy.state.py - 1)!;
   assert.ok(Math.abs(pitch - arc) < .03, `aims on the lobbed arc (${pitch} vs ${arc})`);
+});
+
+test('the battery salvo reaches about twice as far, still lands close in, and bot captains keep its old reach', () => {
+  for (const [range, reachable] of [[100, true], [350, true], [700, true], [790, false]] as const)
+    assert.equal(batteryPitch(range, 6) !== null, reachable, `the battery ${reachable ? 'reaches' : 'cannot reach'} ${range} m`);
+  const { game, hull } = deckFixture();
+  game.world.trace = (x, y, z, dx, dy, dz, max) => ({ hit: false, dist: max, x: x + dx * max, y: y + dy * max, z: z + dz * max, nx: 0, ny: 0, nz: 0 });
+  game.shouldThinkBot = () => true;
+  const captain = new ServerPlayer(10050, 'Bot captain', null, true, { x: hull.x, y: hull.y, z: hull.z });
+  captain.faction = 1; game.players.set(captain.id, captain);
+  Object.assign(captain.state, { vehicle: VEHICLE.GUNBOAT, vehicleVariant: VEHICLE_VARIANT.DESTROYER, seat: 0, vehicleId: hull.id });
+  captain.vehicleId = hull.id; hull.occupant = captain.id;
+  const enemy = new ServerPlayer(10051, 'Distant gunner', null, true, { x: 0, y: 0, z: -(DESTROYER_BOT_BATTERY_REACH + 150) });
+  enemy.faction = 2; enemy.state.grounded = true; game.players.set(enemy.id, enemy);
+  const bot = new Bot(captain, 1337);
+  let fired = 0;
+  for (let i = 0; i < 30; i++) { const c = bot.think(game); game.tick++; if (c.buttons & BTN.FIRE) fired++; }
+  assert.equal(fired, 0, 'a bot captain holds fire beyond the battery\'s former reach');
+});
+
+test('the nuclear salvo lands where it is aimed, as a square around a centre shell', () => {
+  const reaches: number[] = [];
+  for (const aim of [.3, .5, 0]) {
+    const { game, hull } = deckFixture();
+    const captain = new ServerPlayer(10060, 'Captain', null, false, { x: hull.x, y: hull.y, z: hull.z });
+    captain.faction = 1; game.players.set(captain.id, captain);
+    Object.assign(captain.state, { vehicle: VEHICLE.GUNBOAT, vehicleVariant: VEHICLE_VARIANT.DESTROYER, seat: 0, vehicleId: hull.id });
+    captain.vehicleId = hull.id; hull.occupant = captain.id; captain.vehFireCd = 0; captain.vehAltCd = 0;
+    const blasts: { x: number; z: number }[] = [];
+    const internals = game as unknown as { explode: (x: number, y: number, z: number, owner: unknown, def: WeaponDef, ...rest: unknown[]) => unknown };
+    const explode = internals.explode.bind(game);
+    internals.explode = (x, y, z, owner, def, ...rest) => { if (def.id === DESTROYER_NUKE.id) blasts.push({ x, z }); return explode(x, y, z, owner, def, ...rest); };
+    game.queueInput(captain, command(captain.lastQueuedSeq + 1, BTN.ALTFIRE, 0, aim)); game.step();
+    for (let i = 0; i < 40 * TICK_RATE && blasts.length < 5; i++) { game.queueInput(captain, command(captain.lastQueuedSeq + 1, 0, 0, aim)); game.step(); }
+    assert.equal(blasts.length, 5, `five nuclear shells land (aim ${aim})`);
+    // The centre shell flies the aim, raised to the safety floor, onto level ground.
+    const pitch = Math.max(DESTROYER_NUKE_MIN_PITCH, aim), v = DESTROYER_NUKE.speed!, g = DESTROYER_NUKE.gravity!;
+    const muzzle = gunboatGunMuzzle(captain.state.heading, 0, pitch, VEHICLE_VARIANT.DESTROYER);
+    const ox = captain.state.px + muzzle.x, oy = captain.state.py + muzzle.y, oz = captain.state.pz + muzzle.z;
+    const climb = v * Math.sin(pitch), flight = (climb + Math.sqrt(climb * climb + 2 * g * oy)) / g, reach = v * Math.cos(pitch) * flight;
+    const expected = { x: ox, z: oz - reach };
+    const centre = blasts.reduce((a, b) => Math.hypot(a.x - expected.x, a.z - expected.z) <= Math.hypot(b.x - expected.x, b.z - expected.z) ? a : b);
+    assert.ok(Math.hypot(centre.x - expected.x, centre.z - expected.z) < 12,
+      `the centre shell lands where aimed, ${Math.round(reach)} m out (at ${Math.round(centre.x)},${Math.round(centre.z)})`);
+    const corners = blasts.filter(b => b !== centre), half = DESTROYER_NUKE_SQUARE / 2;
+    for (const c of corners) assert.ok(Math.abs(Math.abs(c.x - centre.x) - half) < 12 && Math.abs(Math.abs(c.z - centre.z) - half) < 12,
+      `a corner shell lands ${half} m along and across from the centre (${Math.round(c.x - centre.x)}, ${Math.round(c.z - centre.z)})`);
+    assert.equal(new Set(corners.map(c => `${Math.sign(c.x - centre.x)},${Math.sign(c.z - centre.z)}`)).size, 4, 'one shell in each corner');
+    reaches.push(Math.hypot(centre.x - hull.x, centre.z - hull.z));
+    if (aim === 0) assert.ok(reaches.at(-1)! - half > 250, 'a flat aim is raised so even the nearest shell lands clear of the ship');
+  }
+  assert.ok(reaches[1] > reaches[0] + 300, 'aiming higher reaches farther: no fixed burst distance');
+});
+
+test('weapon reloads stay with the ship when its crew leaves, boards again or changes', () => {
+  const { game, hull, soldier, press } = deckFixture();
+  const bridge = post(hull, { x: 1.5, z: DESTROYER_BRIDGE_EYE.z });
+  const captain = soldier(10070, bridge);
+  press(captain, BTN.USE);
+  assert.equal(captain.state.seat, 0, 'the captain takes the bridge');
+  captain.vehAltCd = 0;
+  const nukes = () => [...game.projectiles.values()].filter(r => r.weapon === DESTROYER_NUKE.id).length;
+  press(captain, BTN.ALTFIRE, 0, .3);
+  assert.equal(nukes(), 5, 'the nuclear salvo fires');
+  for (let i = 0; i < 2 * TICK_RATE; i++) { game.queueInput(captain, command(captain.lastQueuedSeq + 1)); game.step(); }
+  press(captain, BTN.USE);
+  assert.equal(captain.state.vehicle, VEHICLE.NONE, 'the captain steps off the bridge');
+  press(captain, BTN.USE);
+  assert.equal(captain.state.seat, 0, 'and takes it again');
+  assert.ok(captain.vehAltCd > DESTROYER_NUKE.interval - 5, `the nuclear salvo is still reloading (${captain.vehAltCd.toFixed(1)} s)`);
+  press(captain, BTN.ALTFIRE, 0, .3);
+  assert.ok(nukes() <= 5, 'boarding again does not reload it');
+  press(captain, BTN.USE);
+  const relief = soldier(10071, bridge);
+  press(relief, BTN.USE);
+  assert.equal(relief.state.seat, 0, 'a relief captain takes the bridge');
+  assert.ok(relief.vehAltCd > DESTROYER_NUKE.interval - 5, `the relief inherits the ship's reload (${relief.vehAltCd.toFixed(1)} s)`);
 });

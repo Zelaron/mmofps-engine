@@ -32,15 +32,16 @@ test('queued rail muzzle reports resolve against the moving barrel, and flash fo
 
 test('the strategic cloud is one bounded particle draw with analytic animation and no per-frame buffer uploads',()=>{
  const burst=new StrategicBurst(),points=burst.group.children[0] as THREE.Points<THREE.BufferGeometry,THREE.ShaderMaterial>;
- assert.equal(burst.group.visible,false);assert.equal(burst.capacity,2304);
+ assert.equal(burst.group.visible,false);assert.equal(burst.capacity,STRATEGIC_BURST_SLOTS*STRATEGIC_PARTICLES_PER_BURST);
+ assert.ok(STRATEGIC_BURST_SLOTS>=5,'a five-shell nuclear salvo keeps every cloud');
  assert.equal(points.geometry.getAttribute('position').count,STRATEGIC_BURST_SLOTS*STRATEGIC_PARTICLES_PER_BURST);
  assert.equal(points.material.fog,false);assert.equal(points.material.depthTest,true);assert.equal(points.material.depthWrite,false);
  assert.equal(points.material.blending,THREE.NormalBlending,'overlapping smoke must not saturate into a white disk');
  for(let i=0;i<100;i++)burst.emit(i*20,0,1800);
- assert.equal(burst.activeBursts,3);const position=points.geometry.getAttribute('position') as THREE.BufferAttribute;
- assert.equal(position.version,3,'bursts arriving in one frame cannot exceed three particle emissions');
+ assert.equal(burst.activeBursts,STRATEGIC_BURST_SLOTS);const position=points.geometry.getAttribute('position') as THREE.BufferAttribute;
+ assert.equal(position.version,STRATEGIC_BURST_SLOTS,'bursts arriving in one frame cannot exceed the slot count');
  assert.ok(Array.from(position.array).every(Number.isFinite));
- burst.update(4);assert.equal(position.version,3,'GPU motion does not upload positions every frame');assert.equal(burst.group.visible,true);
+ burst.update(4);assert.equal(position.version,STRATEGIC_BURST_SLOTS,'GPU motion does not upload positions every frame');assert.equal(burst.group.visible,true);
  burst.update(4.1);assert.equal(burst.activeBursts,0);assert.equal(burst.group.visible,false);burst.dispose();
 });
 
@@ -82,4 +83,16 @@ test('rail artillery has a distinct bounded muzzle report with preserved spatial
   if(weapon===213){assert.equal(calls.length,5);assert.ok(calls.some(c=>c[0]==='noise'&&Number(c[1])>=.85));}
  }
  assert.notEqual(signatures[0],signatures[1]);
+});
+
+test('a scaled strategic cloud spreads and rises farther with larger puffs',()=>{
+ const spread=(scale:number)=>{
+  const burst=new StrategicBurst();burst.emit(0,0,0,scale);
+  const points=burst.group.children[0] as THREE.Points<THREE.BufferGeometry,THREE.ShaderMaterial>;
+  const p=points.geometry.getAttribute('position') as THREE.BufferAttribute,t=points.geometry.getAttribute('timing') as THREE.BufferAttribute;
+  let reach=0,top=0,size=0;for(let i=0;i<STRATEGIC_PARTICLES_PER_BURST;i++){reach=Math.max(reach,Math.hypot(p.getX(i),p.getZ(i)));top=Math.max(top,p.getY(i));size=Math.max(size,t.getZ(i));}
+  burst.dispose();return {reach,top,size};
+ };
+ const plain=spread(1),large=spread(2);
+ assert.ok(large.reach>plain.reach*1.5&&large.top>plain.top*1.5&&large.size===plain.size*2,JSON.stringify({plain,large}));
 });
