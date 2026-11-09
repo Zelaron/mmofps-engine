@@ -70,6 +70,7 @@ import { TransportRenderer } from './render/transport.js';
 import { ViewModel } from './render/viewmodel.js';
 import { Hud, escapeHtml } from './hud.js';
 import { AudioFX } from './audio.js';
+import { engineVoice } from './vehicle-audio.js';
 import { AircraftWarning } from './aircraft-warning.js';
 import { BossWarning } from './boss-warning.js';
 import type { CreatureState } from '@shared/wildlife';
@@ -1311,7 +1312,7 @@ function frame(): void {
     const boosting = vt === VEHICLE.JEEP && pred.state.boosting && input.throttle > 0;
     const vdefSnd = vt !== VEHICLE.NONE ? vehicleDefinition(vt, pred.state.vehicleVariant)! : null;
     const airspeed = Math.hypot(pred.state.vx, pred.state.vy, pred.state.vz);
-    audio.engine(document.hidden || disconnected || artillery ? VEHICLE.NONE : vt,
+    audio.engine(document.hidden || disconnected || artillery ? VEHICLE.NONE : engineVoice(vt, pred.state.vehicleVariant),
       vdefSnd ? (vt === VEHICLE.JET ? airspeed : gspeed) / vdefSnd.maxSpeed : 0, boosting, {
       throttle: input.throttle, grounded: pred.state.grounded, turning: input.steering,
     });

@@ -66,6 +66,8 @@ export function vehicleEyeOffset(state: VehicleOrientation & {vehicle:number;veh
   let x=0,y=vehicleEyeHeight(state.vehicle as VehicleType,state.vehicleVariant),z=0;
   if(state.seat===2) {x=TRAIN_ARTILLERY_EYE.x;y=TRAIN_ARTILLERY_EYE.y;z=TRAIN_ARTILLERY_EYE.z;}
   else if(!state.seat&&isDestroyer(state.vehicle,state.vehicleVariant)) {x=DESTROYER_BRIDGE_EYE.x;y=DESTROYER_BRIDGE_EYE.y;z=DESTROYER_BRIDGE_EYE.z;}
+  else if(!state.seat&&state.vehicle===VEHICLE.JET&&validVehicleVariant(state.vehicle,state.vehicleVariant)===VEHICLE_VARIANT.CONDOR)
+    {x=CONDOR_COCKPIT_EYE.x;y=CONDOR_COCKPIT_EYE.y;z=CONDOR_COCKPIT_EYE.z;}
   else if(state.seat===1) {
     if(state.vehicle===VEHICLE.JET) {const scale=jetScale(state.vehicleVariant);y=.10*scale;z=.6*scale;}
     else {const pivot=crewGunPivot(state.vehicle,state.vehicleVariant);x=pivot.x;y=pivot.y+.48;z=pivot.z+.85;}
@@ -78,6 +80,8 @@ const NOCTURNE_GUN_MUZZLE = { x: 0, y: JET_GUN_MUZZLE.y * NOCTURNE_SCALE, z: JET
 const NOCTURNE_BOMB_BAY = { x: 0, y: JET_BOMB_BAY.y * NOCTURNE_SCALE, z: JET_BOMB_BAY.z * NOCTURNE_SCALE };
 /** The Condor's nose gun and the bay under its wing root. */
 const CONDOR_GUN_MUZZLE = { x: 0, y: 2.05, z: -10.1 };
+/** The Condor's pilot sits in the glazed nose, ahead of the wing and engines. */
+export const CONDOR_COCKPIT_EYE = { x: 0, y: 3.05, z: -8.4 } as const;
 const CONDOR_BOMB_BAY = { x: 0, y: 1, z: .4 };
 export function jetGunMuzzle(variant = 0): Readonly<{ x: number; y: number; z: number }> {
   return variant === VEHICLE_VARIANT.NOCTURNE ? NOCTURNE_GUN_MUZZLE : variant === VEHICLE_VARIANT.CONDOR ? CONDOR_GUN_MUZZLE : JET_GUN_MUZZLE;

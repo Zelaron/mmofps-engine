@@ -491,6 +491,14 @@ function condorTemplate():THREE.Group {
   body.add(new THREE.CylinderGeometry(.3,.3,.28,12),DARK,[0,.3,-7.4],[0,0,Math.PI/2]);
   body.box(1.6,.1,4,0,1.06,.4,DARK);
   glass.box(1.6,.7,1.4,0,2.95,-8.2,0x416c79);
+  // The windscreen frame the pilot looks out through, around the cockpit eye.
+  const frame=0x23282b;
+  for(const side of [-1,1]) {
+    body.box(.012,.72,.012,side*.8,3,-8.92,frame);
+    body.box(.012,.012,1.4,side*.8,3.36,-8.2,frame);
+  }
+  body.box(1.6,.012,.012,0,3.36,-8.92,frame);
+  body.box(1.6,.02,.1,0,2.62,-8.92,frame);
   root.add(body.mesh(ARMOR,'body'),glass.mesh(WINDOWS,'glass'));
   const muzzle=new THREE.Object3D();muzzle.name='weapon-muzzle';muzzle.position.set(0,2.05,-10.1);root.add(muzzle);
   return root;

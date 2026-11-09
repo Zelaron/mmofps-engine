@@ -2,7 +2,7 @@
 // Positional cues: stereo pan + distance attenuation.
 
 import { VEHICLE, VEHICLE_VARIANT } from '@shared/index';
-import { combustionSamples, VehicleEngineVoice, type VehicleAudioInput } from './vehicle-audio.js';
+import { combustionSamples, VehicleEngineVoice, PROPELLER_ENGINE, type VehicleAudioInput } from './vehicle-audio.js';
 import { CityLiftVoice, type LiftSound } from './city-lift-audio.js';
 
 export class AudioFX {
@@ -550,7 +550,8 @@ export class AudioFX {
   engine(vehicle: number, speed01: number, boost = false, input: VehicleAudioInput = {}): void {
     if (!this.ctx || !this.master || !this.noiseBuf) return;
     if (this.eng && this.eng.vehicle !== vehicle) this.stopEngine();
-    if (vehicle !== VEHICLE.JEEP && vehicle !== VEHICLE.TANK && vehicle !== VEHICLE.JET && vehicle !== VEHICLE.GUNBOAT) return;
+    if (vehicle !== VEHICLE.JEEP && vehicle !== VEHICLE.TANK && vehicle !== VEHICLE.JET && vehicle !== VEHICLE.GUNBOAT &&
+      vehicle !== PROPELLER_ENGINE) return;
     if (!this.eng) {
       let buffer = this.combustionBuffers.get(vehicle);
       if (!buffer && vehicle !== VEHICLE.JET) {

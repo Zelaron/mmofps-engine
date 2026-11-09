@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AudioFX } from '../src/audio.js';
-import { VEHICLE, WEAPONS } from '@shared/index';
-import { advanceEngineDrive, combustionSamples, initialEngineDrive } from '../src/vehicle-audio.js';
+import { VEHICLE, VEHICLE_VARIANT, WEAPONS } from '@shared/index';
+import { advanceEngineDrive, combustionSamples, initialEngineDrive, engineVoice, PROPELLER_ENGINE } from '../src/vehicle-audio.js';
 import { nearestMovingLift } from '../src/city-lift-audio.js';
 import type { CityLiftSite } from '@shared/cities';
 
@@ -92,9 +92,12 @@ test('found weapons have distinct reports and bounded fire/reload voice counts',
 test('combustion loops are deterministic, centered, bounded and distinct for each engine', () => {
   const jeep = combustionSamples(VEHICLE.JEEP, 48000);
   const tank = combustionSamples(VEHICLE.TANK, 48000);
+  const radials = combustionSamples(PROPELLER_ENGINE, 48000);
   assert.deepEqual(jeep, combustionSamples(VEHICLE.JEEP, 48000));
   assert.notEqual(jeep.length, tank.length);
-  for (const samples of [jeep, tank]) {
+  const crossings = (samples: Float32Array) => { let n = 0; for (let i = 1; i < samples.length; i++) if ((samples[i - 1] < 0) !== (samples[i] < 0)) n++; return n / samples.length; };
+  assert.ok(crossings(radials) < crossings(tank) * .75, "the Condor's radials rumble deeper than any other engine");
+  for (const samples of [jeep, tank, radials]) {
     let mean = 0;
     let energy = 0;
     let largestStep = 0;
@@ -347,4 +350,20 @@ test('gunboats use a finite diesel voice and new mounted weapons release their a
     audio.engine(VEHICLE.NONE,0);context.advance(3);
     assert.ok(context.nodes.slice(1).every(node=>node.connections.size===0));
   });
+});
+
+test('the Condor rumbles on its own propeller voice through a slow, heavy rev band', () => {
+  assert.equal(engineVoice(VEHICLE.JET, VEHICLE_VARIANT.CONDOR), PROPELLER_ENGINE);
+  assert.equal(engineVoice(VEHICLE.JET, 0), VEHICLE.JET, 'fighters keep their turbine');
+  assert.equal(engineVoice(VEHICLE.TANK, 0), VEHICLE.TANK);
+  let idle = initialEngineDrive(PROPELLER_ENGINE), full = idle;
+  for (let i = 0; i < 300; i++) {
+    idle = advanceEngineDrive(idle, PROPELLER_ENGINE, 0, false, { throttle: 0 }, i / 60, 1 / 60);
+    full = advanceEngineDrive(full, PROPELLER_ENGINE, 1, false, { throttle: 1 }, i / 60, 1 / 60);
+  }
+  assert.ok(Math.abs(idle.rpm - 560) < 20, `idles near 560 rpm (${idle.rpm})`);
+  assert.ok(full.rpm > 1350 && full.rpm <= 1600, `full power swings up to a deep 1.35-1.6k rpm (${full.rpm})`);
+  let slow = initialEngineDrive(PROPELLER_ENGINE);
+  slow = advanceEngineDrive(slow, PROPELLER_ENGINE, 1, false, { throttle: 1 }, 0, .1);
+  assert.ok(slow.rpm < 900, 'heavy propellers take time to spool up');
 });

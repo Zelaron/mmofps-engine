@@ -1,4 +1,12 @@
-import { VEHICLE } from '@shared/index';
+import { VEHICLE, VEHICLE_VARIANT } from '@shared/index';
+
+/** The Condor's voice: twin radial engines and big propellers, not a turbine. */
+export const PROPELLER_ENGINE = 100;
+/** The engine voice for a hull: its type, or the propeller voice for a Condor. */
+export function engineVoice(type: number, variant = 0): number {
+  return type === VEHICLE.JET && variant === VEHICLE_VARIANT.CONDOR ? PROPELLER_ENGINE : type;
+}
+const PROPELLER_IDLE = 560;
 
 export interface VehicleAudioInput {
   /** Signed drive input; jets treat negative input as an air brake. */
@@ -24,7 +32,8 @@ const approach = (a: number, b: number, dt: number, seconds: number): number =>
   a + (b - a) * (1 - Math.exp(-dt / seconds));
 
 export function initialEngineDrive(vehicle: number): EngineDrive {
-  return { speed: 0, load: 0, rpm: vehicle === VEHICLE.JET ? 0.23 : (vehicle === VEHICLE.TANK || vehicle === VEHICLE.GUNBOAT) ? 620 : 850, boost: 0,
+  return { speed: 0, load: 0, rpm: vehicle === VEHICLE.JET ? 0.23 : vehicle === PROPELLER_ENGINE ? PROPELLER_IDLE
+    : (vehicle === VEHICLE.TANK || vehicle === VEHICLE.GUNBOAT) ? 620 : 850, boost: 0,
     surface: 0, gear: 1, shiftUntil: 0 };
 }
 
@@ -37,7 +46,7 @@ export function advanceEngineDrive(
   // Boost can take the jeep to almost five times its normal road speed.
   const speed = approach(state.speed, limit(speed01, 0, 5), dt, 0.12);
   const drive = input.throttle === undefined ? Math.min(1, speed * 1.4) : limit(input.throttle, -1, 1);
-  const requestedLoad = vehicle === VEHICLE.JET ? Math.max(0, drive) : Math.abs(drive);
+  const requestedLoad = vehicle === VEHICLE.JET || vehicle === PROPELLER_ENGINE ? Math.max(0, drive) : Math.abs(drive);
   const load = approach(state.load, boost ? 1 : requestedLoad, dt, requestedLoad > state.load ? 0.18 : 0.32);
   const boosted = approach(state.boost, boost ? 1 : 0, dt, 0.16);
   const contact = input.grounded === false ? 0 : 1;
@@ -57,12 +66,16 @@ export function advanceEngineDrive(
     targetRpm = limit((850 + speed * ratios[gear - 1] + load * 450 + boosted * 400) * clutch, 780, 5800);
   } else if ((vehicle === VEHICLE.TANK || vehicle === VEHICLE.GUNBOAT)) {
     targetRpm = 620 + Math.min(1, speed) * 800 + load * 520;
+  } else if (vehicle === PROPELLER_ENGINE) {
+    // Heavy propellers: a lower, slower-swinging band than any car engine.
+    targetRpm = limit(PROPELLER_IDLE + Math.min(1.2, speed) * 380 + load * 520, 520, 1600);
   } else {
     // Turbine spool is separate from airspeed: coasting still creates wind.
     targetRpm = limit(0.23 + Math.min(1.2, speed) * 0.46 + load * 0.31 + Math.min(0, drive) * 0.12, 0.2, 1.1);
   }
   const rpm = approach(state.rpm, targetRpm, dt,
-    vehicle === VEHICLE.JET ? (targetRpm > state.rpm ? 0.8 : 1.1) : (targetRpm > state.rpm ? 0.16 : 0.09));
+    vehicle === VEHICLE.JET ? (targetRpm > state.rpm ? 0.8 : 1.1)
+      : vehicle === PROPELLER_ENGINE ? (targetRpm > state.rpm ? 0.5 : 0.7) : (targetRpm > state.rpm ? 0.16 : 0.09));
   return { speed, load, rpm, boost: boosted, surface, gear, shiftUntil };
 }
 
@@ -72,32 +85,33 @@ export function advanceEngineDrive(
  * wrapping each decay into the buffer makes the loop continuous at its seam.
  */
 export function combustionSamples(vehicle: number, sampleRate: number): Float32Array {
-  const tank = (vehicle === VEHICLE.TANK || vehicle === VEHICLE.GUNBOAT);
-  const idle = tank ? 620 : 850;
-  const cylinders = tank ? 12 : 8;
+  const tank = (vehicle === VEHICLE.TANK || vehicle === VEHICLE.GUNBOAT), radial = vehicle === PROPELLER_ENGINE;
+  const idle = radial ? PROPELLER_IDLE : tank ? 620 : 850;
+  // Two nine-cylinder radials, slightly out of step with each other.
+  const cylinders = radial ? 18 : tank ? 12 : 8;
   const cycleSeconds = 120 / idle;
   const length = Math.round(sampleRate * cycleSeconds * 8);
   const samples = new Float32Array(length);
-  let seed = vehicle === VEHICLE.GUNBOAT ? 49139 : tank ? 71237 : 19391;
+  let seed = radial ? 83221 : vehicle === VEHICLE.GUNBOAT ? 49139 : tank ? 71237 : 19391;
   const random = (): number => {
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
     return seed / 0xffffffff;
   };
   for (let firing = 0; firing < cylinders * 8; firing++) {
     const bank = firing % 2;
-    const offset = Math.round((firing + (bank ? 0.06 : -0.06)) * length / (cylinders * 8));
+    const offset = Math.round((firing + (bank ? (radial ? 0.21 : 0.06) : -0.06)) * length / (cylinders * 8));
     const strength = 0.72 + random() * 0.28;
-    const decay = tank ? 0.042 : 0.024;
+    const decay = radial ? 0.07 : tank ? 0.042 : 0.024;
     let grit = 0;
     for (let j = 0; j < sampleRate * decay * 5; j++) {
       const t = j / sampleRate;
       grit = grit * 0.62 + (random() * 2 - 1) * 0.38;
       const attack = 1 - Math.exp(-t * 3000);
-      const body = Math.sin(t * Math.PI * 2 * (tank ? 67 : 92)) * Math.exp(-t / decay);
-      const exhaust = Math.sin(t * Math.PI * 2 * (tank ? 141 : 213)) * Math.exp(-t / (decay * 0.42));
+      const body = Math.sin(t * Math.PI * 2 * (radial ? 42 : tank ? 67 : 92)) * Math.exp(-t / decay);
+      const exhaust = Math.sin(t * Math.PI * 2 * (radial ? 96 : tank ? 141 : 213)) * Math.exp(-t / (decay * 0.42));
       const combustion = grit * Math.exp(-t / (decay * 0.22));
       const index = (offset + j + length) % length;
-      samples[index] += strength * attack * (body * 0.66 + exhaust * 0.21 + combustion * 0.35);
+      samples[index] += strength * attack * (body * 0.66 + exhaust * 0.21 + combustion * (radial ? 0.16 : 0.35));
     }
   }
   let mean = 0;
@@ -150,7 +164,8 @@ export class VehicleEngineVoice {
     this.master = gain(0);
     this.master.connect(output);
     this.body = gain();
-    this.bodyFilter = filter('lowpass', (vehicle === VEHICLE.TANK || vehicle === VEHICLE.GUNBOAT) ? 400 : 950);
+    const radial = vehicle === PROPELLER_ENGINE;
+    this.bodyFilter = filter('lowpass', (vehicle === VEHICLE.TANK || vehicle === VEHICLE.GUNBOAT) ? 400 : radial ? 360 : 950);
     this.bodyFilter.connect(this.body); this.body.connect(this.master);
     if (vehicle !== VEHICLE.JET && combustionBuffer) {
       this.combustion = ctx.createBufferSource();
@@ -163,14 +178,15 @@ export class VehicleEngineVoice {
       this.turbine = oscillator('sine', 640);
       this.turbine.connect(this.bodyFilter);
     }
-    this.mechanical = oscillator(vehicle === VEHICLE.JEEP ? 'triangle' : 'sine', 100);
+    // The propeller's blade tone is a soft, low saw through the body filter.
+    this.mechanical = oscillator(vehicle === VEHICLE.JEEP ? 'triangle' : radial ? 'sawtooth' : 'sine', 100);
     this.mechanicalGain = gain();
-    this.mechanical.connect(this.mechanicalGain); this.mechanicalGain.connect(this.master);
+    this.mechanical.connect(this.mechanicalGain); this.mechanicalGain.connect(radial ? this.bodyFilter : this.master);
     this.roar = gain();
-    this.roarFilter = filter(vehicle === VEHICLE.JET ? 'lowpass' : 'bandpass', 450, 0.6);
+    this.roarFilter = filter(vehicle === VEHICLE.JET || radial ? 'lowpass' : 'bandpass', 450, 0.6);
     this.roarFilter.connect(this.roar); this.roar.connect(this.master);
     this.road = gain();
-    this.roadFilter = filter(vehicle === VEHICLE.JET ? 'highpass' : 'bandpass', 750, 0.5);
+    this.roadFilter = filter(vehicle === VEHICLE.JET || radial ? 'highpass' : 'bandpass', 750, 0.5);
     this.roadFilter.connect(this.road); this.road.connect(this.master);
     for (const [i, destination] of [this.roarFilter, this.roadFilter].entries()) {
       const source = ctx.createBufferSource(); source.buffer = noise; source.loop = true;
@@ -179,7 +195,8 @@ export class VehicleEngineVoice {
     }
     this.clatter = oscillator('triangle', 8);
     this.clatterDepth = gain();
-    this.clatter.connect(this.clatterDepth); this.clatterDepth.connect(this.road.gain);
+    // On the Condor the slow oscillator is the throb of two engines beating.
+    this.clatter.connect(this.clatterDepth); this.clatterDepth.connect(radial ? this.body.gain : this.road.gain);
     // A stopped source's ended event releases every node, including modulation
     // connections; the callback runs on audio time even after render updates stop.
     this.sources[0].onended = () => { for (const node of this.nodes) node.disconnect(); this.targets.clear(); };
@@ -227,6 +244,19 @@ export class VehicleEngineVoice {
       this.target(this.road.gain, surface * (this.vehicle === VEHICLE.GUNBOAT ? .06 : .14));
       this.target(this.clatter.frequency, 4 + surface * 39);
       this.target(this.clatterDepth.gain, this.vehicle === VEHICLE.GUNBOAT ? 0 : surface * .09);
+    } else if (this.vehicle === PROPELLER_ENGINE) {
+      this.target(this.combustion!.playbackRate, rpm / PROPELLER_IDLE, 0.2);
+      this.target(this.body.gain, 0.34 + load * 0.14, 0.2);
+      this.target(this.bodyFilter.frequency, 300 + load * 260 + (rpm - PROPELLER_IDLE) * 0.12, 0.2);
+      // Three blades a turn, geared down: a deep hum from about 35 to 90 Hz.
+      this.target(this.mechanical.frequency, rpm / 60 * 3 * 0.9, 0.25);
+      this.target(this.mechanicalGain.gain, 0.05 + load * 0.04, 0.25);
+      this.target(this.roarFilter.frequency, 220 + rpm * 0.12, 0.25);
+      this.target(this.roar.gain, 0.08 + load * 0.12, 0.25);
+      this.target(this.roadFilter.frequency, 800 + s * 700);
+      this.target(this.road.gain, Math.pow(Math.min(1.2, speed), 1.6) * 0.07);
+      this.target(this.clatter.frequency, 1.6 + rpm / 1900 * 1.4, 0.3);
+      this.target(this.clatterDepth.gain, 0.09 + load * 0.05, 0.3);
     } else {
       this.target(this.turbine!.frequency, 450 + rpm * 1650, 0.18);
       this.target(this.bodyFilter.frequency, 3300);
@@ -239,7 +269,7 @@ export class VehicleEngineVoice {
       this.target(this.road.gain, Math.pow(Math.min(1.2, speed), 1.6) * 0.1);
       this.target(this.clatterDepth.gain, 0);
     }
-    this.target(this.master.gain, 1, this.vehicle === VEHICLE.JET ? 0.45 : 0.22);
+    this.target(this.master.gain, 1, this.vehicle === VEHICLE.JET || this.vehicle === PROPELLER_ENGINE ? 0.45 : 0.22);
   }
 
   stop(): void {
