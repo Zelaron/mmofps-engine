@@ -21,6 +21,13 @@ import { harborStairs, type QuayStair } from '@shared/transport';
 import type { World } from '@shared/worldgen';
 /** Each world's quay stairs, gathered once. */
 const quayStairs = new WeakMap<World, QuayStair[]>();
+/** A swimmer heads up a quay flight only from inside its lane: steps are
+ * 1.5 m to either side of their centre line, less the player's radius. */
+const STAIR_LANE_HALF_WIDTH = .9;
+/** Past the foot, still in the lane: the lining-up point is 1 m out. */
+const STAIR_LANE_REACH = 3;
+/** Standing on a flight: its steps are 1.5 m to either side of centre. */
+const STAIR_FLIGHT_HALF_WIDTH = 1.6;
 export { botCampaignRole, botRoleId } from './bot-campaign-state.js';
 
 // Server-side bots. They produce InputCmds and go through the exact same
@@ -876,7 +883,8 @@ export class Bot {
           this.campaignCourse(game,objective);
           this.repathAtTick = tick + 120;
         }
-        this.stairApproach = !!s.swimming && !routePickup && this.vehicleGoal < 0 && this.climbOutByStairs(game);
+        // Swimmers head for quay stairs and keep climbing until on the quay.
+        this.stairApproach = (!!s.swimming || this.stairApproach) && !routePickup && this.vehicleGoal < 0 && this.climbOutByStairs(game);
         // Wander between (seeked or random) ground points.
         const dx = this.targetX - s.px;
         const dz = this.targetZ - s.pz;
@@ -892,7 +900,7 @@ export class Bot {
         const airlift = objective && !routePickup && this.vehicleGoal<0 && !enemy ? this.seekAirlift(game,objective) : false;
         if(routePickup||this.vehicleGoal>=0||airlift||(buttons&BTN.USE)!==0)this.groundDetour.clear(tick);
         yaw = Math.atan2(-(this.targetX - s.px), -(this.targetZ - s.pz)) + (objective || routePickup || this.vehicleGoal>=0 ? 0 : (this.rng() - 0.5) * 0.2);
-        const advancing = !airlift && Math.hypot(this.targetX-s.px,this.targetZ-s.pz)>(routePickup?0.5:this.groundDetour.active?1:3);
+        const advancing = !airlift && Math.hypot(this.targetX-s.px,this.targetZ-s.pz)>(routePickup||this.stairApproach?0.5:this.groundDetour.active?1:3);
         if(!airlift) {
           this.walkDeckLegacy=!!objective&&!routePickup&&this.vehicleGoal<0;
           this.walkSafety.target(routePickup?'pickup':this.vehicleGoal>=0?'vehicle':'course',
@@ -1270,8 +1278,19 @@ export class Bot {
       if(d<bestDistance&&d<400){bestDistance=d;best=stair;}
     }
     if(!best)return false;
-    const atFoot=bestDistance<3||Math.hypot(best.topX-s.px,best.topZ-s.pz)<Math.hypot(best.topX-best.footX,best.topZ-best.footZ);
-    this.targetX=atFoot?best.topX:best.footX;this.targetZ=atFoot?best.topZ:best.footZ;
+    // Line up in front of the flight before climbing. Heading for the top
+    // from beside the steps wedges a swimmer between their side and the wall.
+    const length=Math.hypot(best.footX-best.topX,best.footZ-best.topZ),ax=(best.footX-best.topX)/length,az=(best.footZ-best.topZ)/length;
+    const rx=s.px-best.topX,rz=s.pz-best.topZ,along=rx*ax+rz*az,lateral=Math.abs(rx*az-rz*ax);
+    if(!s.swimming){
+      // Out of the water but still on the steps: keep climbing straight up.
+      // Turning for an objective along the quay walks off their side.
+      if(lateral>STAIR_FLIGHT_HALF_WIDTH||along<1.1||along>length+.5)return false;
+      this.targetX=best.topX;this.targetZ=best.topZ;
+      return true;
+    }
+    const inLane=lateral<STAIR_LANE_HALF_WIDTH&&along<length+STAIR_LANE_REACH;
+    this.targetX=inLane?best.topX:best.topX+ax*(length+1);this.targetZ=inLane?best.topZ:best.topZ+az*(length+1);
     return true;
   }
 
