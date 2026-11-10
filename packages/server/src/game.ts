@@ -1,6 +1,8 @@
 import { allocateEntityId, isEntityId, namespaceRange, LOCAL_ENTITY_RANGE, type EntityIdRange, type EntityAllocator } from '@shared/entity-id';
 import {
   World, mulberry32, hash2i, clamp, viewDir, aircraftCrewAim, aircraftCrewMuzzle, crewGunMuzzle,
+  condorStation, condorStationAim, isCondor, CONDOR_STATIONS, CONDOR_CARPET, CONDOR_CARPET_ROWS, CONDOR_CARPET_RIPPLE_TICKS,
+  CONDOR_CARPET_FAN, CONDOR_MEGA_NUKE, CONDOR_LOCK_ROCKET, CONDOR_BOT_ARMAMENT,
   unquantYaw, rocketHullDamageFactor, ROCKET_LAUNCHER_ID,
   TICK_RATE, TICK_DT, SNAPSHOT_EVERY, PLAYER, WORLD, NET, SWIMMING,
   createMoveState, stepMove, fallDamage,
@@ -151,6 +153,8 @@ export class ServerPlayer {
   ranOverUntilTick = -1;
   vehFireCd = 0;
   vehAltCd = 0;
+  /** A Condor carpet still leaving the bay: rows left and when the next falls. */
+  carpetRun?: { hull: number; rows: number; next: number };
   /** Homing lock progress (rocket launcher aimed at an occupied hull). */
   lockTargetId = -1;
   /** Stable occupied hull; the target player changes when crew take over. */
@@ -210,6 +214,8 @@ export interface ServerVehicle {
   health: number;
   occupant: number;
   gunner?: number;
+  /** Who holds each Condor gun position, by station less one (-1 is free). */
+  stations?: number[];
   transportRoute?: number;
   motionState?: MoveState;
   respawnAtTick: number;
@@ -224,6 +230,19 @@ export interface ServerVehicle {
    * ready again. Reloads belong to the hull, so leaving and re-boarding (or
    * swapping crew) does not reload a long-cooldown weapon. */
   reloads?: Map<number, { fire: number; alt: number }>;
+}
+
+/** How far away the mega-nuke's blast can be seen from, in metres. */
+const MEGA_NUKE_EVENT_RADIUS = 3000;
+
+/** Everyone manning a gun aboard: the gunner seat and any Condor stations. */
+function hullGunners(v: ServerVehicle): number[] {
+  return [v.gunner ?? -1, ...(v.stations ?? [])].filter(id => id >= 0);
+}
+
+/** A seat's key in a hull's reloads: each Condor station has its own guns. */
+function reloadSeat(s: MoveState): number {
+  return (s.seat ?? 0) | (s.station ?? 0) << 4;
 }
 
 interface VehicleSite {
@@ -952,7 +971,7 @@ export class Game {
       if (v.deployed) { this.vehicles.delete(v.id); continue; }
       if (!v.campaignHome || !v.campaignBaseId || v.transportRoute) continue;
       v.x = v.campaignHome.x; v.y = v.campaignHome.y + .05; v.z = v.campaignHome.z; v.heading = v.campaignHome.heading;
-      v.health = vehicleDefinition(v.type, v.variant)!.maxHealth; v.occupant = -1; v.gunner = -1;
+      v.health = vehicleDefinition(v.type, v.variant)!.maxHealth; v.occupant = -1; v.gunner = -1; v.stations = undefined;
       v.respawnAtTick = -1; v.motionState = undefined; v.reloads = undefined;
       v.campaignFaction = this.frontier?.bases.find(b => b.id === v.campaignBaseId)?.owner ?? 0;
     }
@@ -1092,8 +1111,8 @@ export class Game {
     let best: ServerVehicle | null = null;
     let bestD2 = Infinity;
     for (const v of this.vehicles.values()) {
-      if ((v.occupant >= 0 && ((v.gunner ?? -1) >= 0 || v.transportRoute)) || v.respawnAtTick >= 0) continue;
-      const pilot = this.players.get(v.occupant) ?? this.players.get(v.gunner ?? -1);
+      if ((v.occupant >= 0 && this.noRoomAboard(v, p)) || v.respawnAtTick >= 0) continue;
+      const pilot = this.players.get(v.occupant) ?? this.players.get(hullGunners(v)[0] ?? -1);
       if (this.frontier && pilot && pilot.faction !== p.faction) continue;
       const def = vehicleDefinition(v.type, v.variant)!;
       const dx = v.x - p.state.px;
@@ -1115,13 +1134,15 @@ export class Game {
     const gunnerSeat = isDestroyer(best.type, best.variant)
       ? best.occupant >= 0 || ((best.gunner ?? -1) < 0 && wantsMount)
       : !!driver;
-    if (gunnerSeat) best.gunner = p.id;
-    else best.occupant = p.id;
+    const station = gunnerSeat && !p.isBot && isCondor(best.type, best.variant) ? this.takeNearestStation(best, p) : 0;
+    if (!gunnerSeat) best.occupant = p.id;
+    else if (!station) best.gunner = p.id;
     p.vehicleId = best.id;
     const s = p.state;
     s.vehicle = best.type;
     s.vehicleVariant = best.variant ?? 0;
     s.seat = best.transportRoute ? 2 : gunnerSeat ? 1 : 0; s.vehicleId = best.id; s.transportRoute = best.transportRoute;
+    s.station = station || undefined;
     s.heading = best.heading;
     s.vehiclePitch = 0; s.vehicleRoll = 0; s.boosting = false;
     s.vehicleRotation = undefined; // the first flight tick starts from this possession's runway heading
@@ -1129,16 +1150,42 @@ export class Game {
     s.vx = 0; s.vy = 0; s.vz = 0;
     s.boostFuel = 1;
     if (driver) this.copyCrewPose(p, driver);
-    const reload = best.reloads?.get(s.seat);
+    this.resumeSeatReload(p, best);
+  }
+
+  /** Whoever takes a seat inherits its weapons' reloads from the hull. */
+  private resumeSeatReload(p: ServerPlayer, hull: ServerVehicle): void {
+    const reload = hull.reloads?.get(reloadSeat(p.state));
     p.vehFireCd = Math.max(0.5, reload ? (reload.fire - this.tick) / TICK_RATE : 0);
     p.vehAltCd = Math.max(1, reload ? (reload.alt - this.tick) / TICK_RATE : 0);
+  }
+
+  /** An occupied hull with no place left for this soldier. Bots only ever
+   * use the ordinary gunner seat; the Condor's stations are for human crews. */
+  private noRoomAboard(v: ServerVehicle, p: ServerPlayer): boolean {
+    if (!p.isBot && isCondor(v.type, v.variant)) return (v.stations ?? []).filter(id => id >= 0).length >= CONDOR_STATIONS.length;
+    return (v.gunner ?? -1) >= 0 || !!v.transportRoute;
+  }
+
+  /** Claim the free Condor gun position nearest this soldier; its station number. */
+  private takeNearestStation(v: ServerVehicle, p: ServerPlayer): number {
+    const stations = v.stations ??= CONDOR_STATIONS.map(() => -1);
+    const c = Math.cos(v.heading), s = Math.sin(v.heading);
+    let best = -1, nearest = Infinity;
+    CONDOR_STATIONS.forEach(({ eye }, i) => {
+      if (stations[i] >= 0) return;
+      const distance = Math.hypot(v.x + eye.x * c + eye.z * s - p.state.px, v.z - eye.x * s + eye.z * c - p.state.pz);
+      if (distance < nearest) { nearest = distance; best = i; }
+    });
+    stations[best] = p.id;
+    return best + 1;
   }
 
   /** Record a fired vehicle weapon's reload on the hull for this seat. */
   private holdReload(p: ServerPlayer, slot: 'fire' | 'alt', seconds: number): void {
     const hull = this.vehicles.get(p.vehicleId);
     if (!hull) return;
-    const seat = p.state.seat ?? 0, reloads = hull.reloads ??= new Map();
+    const seat = reloadSeat(p.state), reloads = hull.reloads ??= new Map();
     const reload = reloads.get(seat) ?? { fire: 0, alt: 0 };
     reload[slot] = this.tick + Math.round(seconds * TICK_RATE);
     reloads.set(seat, reload);
@@ -1288,14 +1335,22 @@ export class Game {
     if (v?.occupant === p.id) {
       v.x = s.px; v.y = s.py; v.z = s.pz; v.heading = s.heading;
       v.motionState = undefined;
-      // A destroyer's AA gunner keeps their post; elsewhere the gunner takes the wheel.
-      const keepsPost = isDestroyer(v.type, v.variant), next = keepsPost ? undefined : this.players.get(v.gunner ?? -1);
-      if (next?.state.alive) { this.copyCrewPose(next, p); next.state.seat = 0; v.occupant = next.id; }
-      else v.occupant = -1;
-      if (!keepsPost) v.gunner = -1;
+      // A destroyer's AA gunner keeps their post; elsewhere a gunner takes the
+      // wheel, on a Condor the lowest manned station, and the rest stay put.
+      const keepsPost = isDestroyer(v.type, v.variant), station = keepsPost ? -1 : (v.stations ?? []).findIndex(id => id >= 0);
+      const next = keepsPost ? undefined : this.players.get(station >= 0 ? v.stations![station] : v.gunner ?? -1);
+      if (next?.state.alive) {
+        this.copyCrewPose(next, p); next.state.seat = 0; next.state.station = undefined; v.occupant = next.id;
+        // A Condor gunner taking the controls inherits the pilot's reloads, so
+        // a crew cannot skip the mega-nuke's by swapping seats.
+        if (station >= 0) this.resumeSeatReload(next, v);
+      } else v.occupant = -1;
+      if (station >= 0) v.stations![station] = -1;
+      else if (!keepsPost) v.gunner = -1;
     } else if (v?.gunner === p.id) v.gunner = -1;
-    s.vehicle = VEHICLE.NONE; s.vehicleVariant = 0; s.seat = undefined; s.vehicleId = undefined; s.transportRoute = undefined;
-    p.vehicleId = -1;
+    else if (v?.stations?.includes(p.id)) v.stations[v.stations.indexOf(p.id)] = -1;
+    s.vehicle = VEHICLE.NONE; s.vehicleVariant = 0; s.seat = undefined; s.station = undefined; s.vehicleId = undefined; s.transportRoute = undefined;
+    p.vehicleId = -1; p.carpetRun = undefined;
     return v;
   }
 
@@ -1406,13 +1461,13 @@ export class Game {
   ): void {
     if (v.respawnAtTick >= 0 || v.health <= 0 || amount <= 0) return;
     if (this.frontier && attacker) {
-      const occupants = [this.players.get(v.occupant), this.players.get(v.gunner ?? -1)].filter((p): p is ServerPlayer => !!p);
+      const occupants = [v.occupant, ...hullGunners(v)].map(id => this.players.get(id)).filter((p): p is ServerPlayer => !!p);
       if (occupants.some(p => p.id !== attacker.id && !this.areEnemies(attacker, p))) return;
       if (attacker.faction === 0 && !occupants.some(p => p.id === attacker.id)) return;
     }
     v.health -= amount;
     if (this.frontier && attacker) {
-      const victim = this.players.get(v.occupant) ?? this.players.get(v.gunner ?? -1);
+      const victim = this.players.get(v.occupant) ?? this.players.get(hullGunners(v)[0] ?? -1);
       if (victim && this.areEnemies(attacker, victim)) this.frontier.recordCombat(v.x, v.z, [attacker.faction, victim.faction], this.tick);
     }
     if (v.health <= 0) this.destroyVehicle(v, attacker, weaponId);
@@ -1427,18 +1482,18 @@ export class Game {
     v.health = 0;
     v.respawnAtTick = this.tick + Math.round(def.respawnSeconds * TICK_RATE); v.reloads = undefined;
     updateVehicleCollider(this.world, this.tick, this.vehicleCollider(v));
-    const occupants = [this.players.get(v.occupant), this.players.get(v.gunner ?? -1)];
+    const occupants = [v.occupant, ...hullGunners(v)].map(id => this.players.get(id));
     if (attacker && this.frontier && occupants.some(o => o && o.faction !== attacker.faction) && !v.transportRoute) {
       awardXp(attacker, XP_VALUES.vehicle, XP_REASON.VEHICLE);
       advanceDaily(attacker, 'vehicles');
     }
-    v.occupant = -1; v.gunner = -1;
+    v.occupant = -1; v.gunner = -1; v.stations = undefined;
     for (const occupant of occupants) if (occupant && occupant.vehicleId === v.id) {
       const s = occupant.state;
       v.x = s.px; v.y = s.py; v.z = s.pz;
-      occupant.vehicleId = -1;
+      occupant.vehicleId = -1; occupant.carpetRun = undefined;
       s.vehicle = VEHICLE.NONE; s.vehicleVariant = 0;
-      s.seat = undefined; s.vehicleId = undefined;
+      s.seat = undefined; s.station = undefined; s.vehicleId = undefined;
       s.transportRoute = undefined;
       if (s.alive) this.kill(occupant, attacker ?? occupant, weaponId);
     }
@@ -1454,7 +1509,7 @@ export class Game {
     for (const v of this.vehicles.values()) {
       // Unmanned depot stock follows the base when it changes hands. A crew
       // or a transport already on the road keeps its allegiance until lost.
-      if (v.campaignBaseId && v.campaignHome && v.occupant < 0 && (v.gunner ?? -1) < 0 &&
+      if (v.campaignBaseId && v.campaignHome && v.occupant < 0 && (v.gunner ?? -1) < 0 && !v.stations?.some(id => id >= 0) &&
           (v.respawnAtTick >= 0 || (this.tick % TICK_RATE === 0 && Math.hypot(v.x - v.campaignHome.x, v.z - v.campaignHome.z) < 8))) {
         const base = this.frontier?.bases.find(b => b.id === v.campaignBaseId);
         if (base) v.campaignFaction = base.owner;
@@ -1923,7 +1978,10 @@ export class Game {
       p.state.submerged = submerged;
       p.state.airSeconds = clamp((p.state.airSeconds ?? 18) + dt * (submerged ? -1 : 5), 0, 18);
       p.state.swimming = false;
-      if (p.state.vehicle === VEHICLE.JET) cmd = { ...cmd, ...aircraftCrewAim(p.state, cmd.yaw, cmd.pitch) };
+      if (p.state.vehicle === VEHICLE.JET) {
+        const station = condorStation(p.state);
+        cmd = { ...cmd, ...(station ? condorStationAim(p.state, station, cmd.yaw, cmd.pitch) : aircraftCrewAim(p.state, cmd.yaw, cmd.pitch)) };
+      }
       p.lastCmd = cmd;
     }
 
@@ -2011,7 +2069,7 @@ export class Game {
 
     if (p.state.alive) {
       if (p.state.vehicle !== VEHICLE.NONE) {
-        if (this.destroyerGunner(p)) this.updateHomingLock(p, cmd);
+        if (this.destroyerGunner(p) || p.state.station) this.updateHomingLock(p, cmd);
         else { p.lockTargetId = -1; p.lockVehicleId = -1; p.lockTicks = 0; p.lockState = LOCK_NONE; }
         this.fireVehicleWeapons(p, cmd);
       } else {
@@ -2036,7 +2094,7 @@ export class Game {
       return;
     }
     if (p.state.seat === 1) {
-      const crew = crewArmament(type, p.state.vehicleVariant);
+      const crew = crewArmament(type, p.state.vehicleVariant, p.state.station);
       const attachment = type === VEHICLE.JET ? aircraftCrewMuzzle(p.state)
         : crewGunMuzzle(type, p.state.vehicleVariant, p.state.heading, cmd.yaw, cmd.pitch);
       if ((cmd.buttons & BTN.FIRE) && p.vehFireCd <= 0) {
@@ -2050,11 +2108,12 @@ export class Game {
       }
       return;
     }
-    const armament = vehicleArmament(type, p.state.vehicleVariant);
+    const armament = p.isBot && isCondor(type, p.state.vehicleVariant) ? CONDOR_BOT_ARMAMENT : vehicleArmament(type, p.state.vehicleVariant);
     if ((cmd.buttons & BTN.FIRE) !== 0 && p.vehFireCd <= 0) {
       p.vehFireCd = armament.primary.interval;
       this.stats.shotsFired++; this.holdReload(p, 'fire', armament.primary.interval);
-      if (type === VEHICLE.JET) {
+      if (armament.primary.id === CONDOR_CARPET.id) p.carpetRun = { hull: p.vehicleId, rows: CONDOR_CARPET_ROWS, next: this.tick };
+      else if (type === VEHICLE.JET) {
         const nose = vehicleLocalOffset(p.state, 0, 0, -1);
         this.fireHitscan(p, { ...cmd, yaw: Math.atan2(-nose.x, -nose.z),
           pitch: Math.atan2(nose.y, Math.hypot(nose.x, nose.z)) }, armament.primary);
@@ -2068,6 +2127,31 @@ export class Game {
       if (type === VEHICLE.JET) this.dropCarpetBombs(p, armament.alt);
       else this.fireVolley(p, cmd, armament.alt);
     }
+    this.advanceCarpetRun(p);
+  }
+
+  /** The Condor's carpet leaves the bay a row at a time down the flight path,
+   * each row fanning three bombs across it. */
+  private advanceCarpetRun(p: ServerPlayer): void {
+    const run = p.carpetRun;
+    if (!run || this.tick < run.next) return;
+    if (run.hull !== p.vehicleId) { p.carpetRun = undefined; return; }
+    run.next = this.tick + CONDOR_CARPET_RIPPLE_TICKS;
+    if (--run.rows <= 0) p.carpetRun = undefined;
+    const s = p.state, def = CONDOR_CARPET, bay = jetBombBay(s.vehicleVariant), release = vehicleLocalOffset(s, bay.x, bay.y, bay.z);
+    const ox = s.px + release.x, oy = s.py + release.y, oz = s.pz + release.z;
+    for (const side of [-1, 0, 1]) {
+      const eject = vehicleLocalOffset(s, side * CONDOR_CARPET_FAN, -4, 0), id = this.allocateEntity('nextProjectileId', this.projectiles);
+      this.projectiles.set(id, {
+        id, owner: p.id, weapon: def.id, x: ox, y: oy, z: oz,
+        vx: s.vx * 0.85 + eject.x, vy: Math.min(0, s.vy) + eject.y, vz: s.vz * 0.85 + eject.z,
+        distLeft: def.range, fuseLeft: def.fuse ?? 20, ageSeconds: 0, sleeping: false,
+      });
+    }
+    this.events.push({
+      bytes: encodeFire({ shooter: p.id, weapon: def.id, seq: 0, ox, oy, oz, ends: [] }),
+      x: s.px, z: s.pz, radius: NET.FIRE_EVENT_RADIUS,
+    });
   }
 
   /** A stick of bombs released along the flight path - classic carpet run. */
@@ -2106,13 +2190,13 @@ export class Game {
    * near-center aim with line of sight. Breaking any condition resets.
    */
   private updateHomingLock(p: ServerPlayer, cmd: InputCmd): void {
-    const flak = this.destroyerGunner(p);
-    if (p.weapon !== 3 && !flak) {
+    const flak = this.destroyerGunner(p), mounted = flak || !!p.state.station;
+    if (p.weapon !== 3 && !mounted) {
       this.homingObstructions.delete(p);
       p.lockTargetId = -1; p.lockVehicleId = -1; p.lockTicks = 0; p.lockState = LOCK_NONE;
       return;
     }
-    const eye = flak ? vehicleEyeOffset(p.state) : { x: 0, y: PLAYER.EYE_HEIGHT, z: 0 };
+    const eye = mounted ? vehicleEyeOffset(p.state) : { x: 0, y: PLAYER.EYE_HEIGHT, z: 0 };
     const ex = p.state.px + eye.x, ey = p.state.py + eye.y, ez = p.state.pz + eye.z;
     const aim = viewDir(cmd.yaw, cmd.pitch);
     let best: ServerPlayer | null = null;
@@ -2493,7 +2577,7 @@ export class Game {
     const id = this.allocateEntity('nextProjectileId', this.projectiles);
     let speed = def.speed ?? 48;
     // A fully locked rocket flies hot and steers; see advanceProjectile.
-    const homing = (def.id === ROCKET_LAUNCHER_ID || def.id === DESTROYER_AA_ROCKET.id) &&
+    const homing = (def.id === ROCKET_LAUNCHER_ID || def.id === DESTROYER_AA_ROCKET.id || def.id === CONDOR_LOCK_ROCKET.id) &&
       p.lockState === LOCK_LOCKED && p.lockTargetId >= 0;
     const launcherBoost = homing && def.id === ROCKET_LAUNCHER_ID;
     if (launcherBoost) speed *= HOMING_SPEED_FACTOR;
@@ -2584,7 +2668,7 @@ export class Game {
         else if (this.advanceProjectile(r, def, simDt)) continue;
       }
       // A nuclear shell bursts where it meets the sea, not on the seabed.
-      if (r.weapon === DESTROYER_NUKE.id && r.vy < 0) {
+      if ((r.weapon === DESTROYER_NUKE.id || r.weapon === CONDOR_MEGA_NUKE.id) && r.vy < 0) {
         const water = this.world.liquidAt(r.x, r.y, r.z);
         if (water) {
           this.explode(r.x, water.surfaceY, r.z, this.players.get(r.owner) ?? null, def, -1, r.id);
@@ -2929,8 +3013,8 @@ export class Game {
   ): void {
     this.events.push({
       bytes: encodeExplosion(x, y, z, def.id, projectileId),
-      x, z, radius: NET.FIRE_EVENT_RADIUS,
-      alwaysFor: isOwnedArtillery(def.id) || def.id === CLUSTER_BOMBLET.id ? owner?.id : undefined,
+      x, z, radius: def.id === CONDOR_MEGA_NUKE.id ? MEGA_NUKE_EVENT_RADIUS : NET.FIRE_EVENT_RADIUS,
+      alwaysFor: isOwnedArtillery(def.id) || def.id === CLUSTER_BOMBLET.id || def.id === CONDOR_MEGA_NUKE.id ? owner?.id : undefined,
     });
     const radius = def.splashRadius ?? 4.5;
     const maxDmg = def.splashMax ?? 70;
@@ -3602,7 +3686,7 @@ export class Game {
           dead: !q.state.alive,
           weapon: q.weapon,
           vehicle: q.state.vehicle, vehicleVariant: q.state.vehicleVariant,
-          seat: q.state.seat, vehicleId: q.state.vehicleId,
+          seat: q.state.seat, station: q.state.station, vehicleId: q.state.vehicleId,
           transportRoute: q.state.transportRoute,
           heading: q.state.heading,
           vehiclePitch: q.state.vehiclePitch, vehicleRoll: q.state.vehicleRoll,
@@ -3695,7 +3779,7 @@ export class Game {
         reloadCooldown: p.reloadCd,
         reloadHeld: p.reloadHeld,
         vehicle: p.state.vehicle, vehicleVariant: p.state.vehicleVariant,
-        seat: p.state.seat, vehicleId: p.state.vehicleId,
+        seat: p.state.seat, station: p.state.station, vehicleId: p.state.vehicleId,
         transportRoute: p.state.transportRoute,
         heading: p.state.heading,
         vehiclePitch: p.state.vehiclePitch, vehicleRoll: p.state.vehicleRoll,

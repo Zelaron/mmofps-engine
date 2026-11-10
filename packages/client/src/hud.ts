@@ -175,9 +175,9 @@ export class Hud {
 
   /** A vehicle seat's long-reload weapon: its name and a filling bar while it
    * reloads, then READY. Replaces the hand weapon's reload line. */
-  setMountedReload(name: string, left: number, interval: number): void {
-    const reloading = left > .05;
-    this.reloadLabel.textContent = reloading ? `${name.toUpperCase()} · ${Math.ceil(left)} s` : `${name.toUpperCase()} READY`;
+  setMountedReload(name: string, left: number, interval: number, also?: string): void {
+    const reloading = left > .05, status = reloading ? `${name.toUpperCase()} · ${Math.ceil(left)} s` : `${name.toUpperCase()} READY`;
+    this.reloadLabel.textContent = also ? `${also} / ${status}` : status;
     this.reloadTrack.classList.toggle('active', reloading);
     this.reloadBar.style.width = `${reloading ? Math.max(0, Math.min(1, 1 - left / Math.max(1e-6, interval))) * 100 : 0}%`;
   }
@@ -188,10 +188,11 @@ export class Hud {
 
   /** Vehicle status line; label null hides it. Boost null hides its meter. */
   /** Aircraft weapons stay on the nose while the pilot looks around. */
-  setJetAim(x: number | null, y = 0, behind = false): void {
+  setJetAim(x: number | null, y = 0, behind = false, bombs = false): void {
     this.crosshair.style.display = x === null ? '' : 'none';
     this.jetAim.style.display = x === null ? 'none' : 'block';
     if (x === null) return;
+    this.jetAim.classList.toggle('bombs', bombs);
     const edge = behind || Math.abs(x) > 0.88 || Math.abs(y) > 0.76;
     if (behind && Math.abs(x) + Math.abs(y) < 0.05) y = -1;
     const fit = Math.min(1, 0.88 / Math.max(0.001, Math.abs(x)), 0.76 / Math.max(0.001, Math.abs(y)));

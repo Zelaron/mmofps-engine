@@ -29,6 +29,7 @@
   #jet-aim.offscreen { border-color: transparent; }
   #jet-aim.offscreen::before { content: '\27a4'; transform: rotate(var(--aim-angle)); }
   #jet-aim.offscreen::after { content: 'NOSE'; }
+  #jet-aim.bombs::after, #jet-aim.offscreen.bombs::after { content: 'BOMBS'; }
 
   #hitmarker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -52%);
     font-size: 30px; font-weight: 700; color: #fff; opacity: 0; }

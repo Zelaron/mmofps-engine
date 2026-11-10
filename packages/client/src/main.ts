@@ -18,7 +18,7 @@ import {
   World, WEAPONS, PLAYER, NET, TICK_RATE, pelletDir, viewDir, clamp,
   VEHICLE, vehicleDefinition, vehicleArmament, vehicleWeaponColor, isJetBombWeapon, vehicleEyeHeight, weaponDefById, VEHICLE_WEAPON_ID_BASE,
   isDestroyer, crewArmament, presentationWeaponId, VEHICLE_VARIANT, DESTROYER_NUKE,
-  NUKE_BOMB,
+  NUKE_BOMB, CONDOR_MEGA_NUKE, CONDOR_STATIONS, condorStation, isCondor,
   LOCK_ACQUIRING, LOCK_LOCKED, HOMING_SPEED_FACTOR,
   type VehicleType,
   PICKUP_AMMO, PICKUP_HEALTH, PICKUP_WEAPON, PICKUP_RESULT_COLLECTED,
@@ -77,6 +77,7 @@ import type { CreatureState } from '@shared/wildlife';
 import { DeathScene } from './render/death-scene.js';
 import { DEATH_CAMERA_SECONDS } from './death-motion.js';
 import type { AircraftThreat, DeathMotion } from '@shared/protocol';
+import { bombImpactPoint } from './bomb-sight.js';
 import { VehicleShotQueue } from './vehicle-shot-queue.js';
 import { ArtilleryFeedback } from './artillery-feedback.js';
 import { nearestMovingLift } from './city-lift-audio.js';
@@ -168,6 +169,8 @@ const vehicleEyeRotation = new THREE.Quaternion();
 const jetAimPoint = new THREE.Vector3();
 const localWeaponMuzzle = new THREE.Vector3();
 const pendingVehicleShots = new VehicleShotQueue();
+/** The mega-nuke's cloud is several times a nuclear salvo's, seen from anywhere near. */
+const MEGA_NUKE_CLOUD_SCALE = 4.5;
 const artilleryFeedback = new ArtilleryFeedback();
 const artilleryMarkerPoint = new THREE.Vector3(), artilleryViewDirection = new THREE.Vector3();
 let creatureAlerts = new Set<number>();
@@ -630,7 +633,7 @@ const net = new NetClient({
       if (oldVehicle === pred.state.vehicle) input.setVehicleMode(VEHICLE.NONE, 0);
     }
     input.setVehicleMode(pred.state.vehicle, pred.state.heading, pred.state.vehiclePitch,
-      pred.state.vehicleRoll, pred.state.vehicleRotation,pred.state.seat??0);
+      pred.state.vehicleRoll, pred.state.vehicleRotation,pred.state.seat??0,condorStation(pred.state));
     presentWeapon(pred.weaponState.weapon, wasInit);
     interp.push(snap);
     if ((!wasInit && pred.initialized) || resyncVersion !== pred.resyncVersion) {
@@ -670,7 +673,7 @@ const net = new NetClient({
   },
 
   onExplosion(ev): void {
-    const nuclearSalvo = ev.weapon === DESTROYER_NUKE.id;
+    const nuclearSalvo = ev.weapon === DESTROYER_NUKE.id, megaNuke = ev.weapon === CONDOR_MEGA_NUKE.id;
     if (presentationWeaponId(ev.weapon) !== ev.weapon) ev = { ...ev, weapon: presentationWeaponId(ev.weapon) };
     const cam = sceneMgr.camera;
     const ownArtilleryImpact=ev.weapon===213&&artilleryFeedback.impact(ev.projectileId,ev,performance.now()*.001);
@@ -681,9 +684,12 @@ const net = new NetClient({
       ev.projectileId, ev.weapon,
       ev.x, ev.y, ev.z,
     );
-    const radius = weaponDefById(ev.weapon)?.splashRadius ?? 6;
+    const radius = megaNuke ? CONDOR_MEGA_NUKE.splashRadius! : weaponDefById(ev.weapon)?.splashRadius ?? 6;
     cityLife?.blast(ev.x, ev.y, ev.z, radius);
-    if (ev.weapon === 207) {
+    if (megaNuke) {
+      effects.addArtilleryExplosion(ev.x, ev.y, ev.z, cam.position, radius, MEGA_NUKE_CLOUD_SCALE, 1);
+      hud.nukeFlash(1.4 - Math.hypot(ev.x - cam.position.x, ev.y - cam.position.y, ev.z - cam.position.z) / 1500);
+    } else if (ev.weapon === 207) {
       effects.addLanceExplosion(ev.x,ev.y,ev.z,radius);
     } else if (ev.weapon === 208) {
       effects.addVoidExplosion(ev.x,ev.y,ev.z,cam.position,radius);
@@ -706,7 +712,7 @@ const net = new NetClient({
     const p = audio.positional(
       ev.x, ev.y, ev.z,
       cam.position.x, cam.position.y, cam.position.z, cam.rotation.y,
-      ev.weapon===213?1000:14 + radius * 2,
+      megaNuke?3000:ev.weapon===213?1000:14 + radius * 2,
     );
     if(ev.weapon===207)audio.lanceImpact(p.pan,p.gain);
     else audio.explosion(p.pan,ownArtilleryImpact?Math.max(.14,p.gain):p.gain,radius,ev.weapon===208);
@@ -1088,7 +1094,7 @@ function frame(): void {
       rp.z + vehicleEyeOffset.z + (Math.random() - 0.5) * shake * 0.25,
     );
     input.setVehicleMode(pred.state.vehicle, pred.state.heading, pred.state.vehiclePitch,
-      pred.state.vehicleRoll, pred.state.vehicleRotation,pred.state.seat??0);
+      pred.state.vehicleRoll, pred.state.vehicleRotation,pred.state.seat??0,condorStation(pred.state));
     input.followJet(pred.state.heading, pred.state.vehiclePitch, pred.state.vehicleRoll, pred.state.vehicleRotation);
     if (pred.state.vehicle === VEHICLE.JET) {
       const q = input.viewRotation;
@@ -1107,8 +1113,11 @@ function frame(): void {
         const runway = pred.state.vehicle === VEHICLE.JET && Math.hypot(pred.state.vx, pred.state.vy, pred.state.vz) < 5;
         const destroyer = isDestroyer(pred.state.vehicle, pred.state.vehicleVariant);
         const condor = !gunner && pred.state.vehicle === VEHICLE.JET && pred.state.vehicleVariant === VEHICLE_VARIANT.CONDOR;
-        const hint = condor ? touch ? 'Condor: hold THRUST to roll, pull the stick back to lift off · ALT bomb carpet · slow, so stay high'
-            : 'Condor: hold SPACE for throttle, then S to lift off | RMB bomb carpet | slow, so stay high'
+        const gunPost = condorStation(pred.state);
+        const hint = gunPost ? touch ? `${gunPost.name} gunner: FIRE chaingun · hold aim on a vehicle to lock · ALT lock rocket`
+            : `${gunPost.name} gunner: LMB chaingun | hold aim on a vehicle to lock | RMB lock rocket | E bail out`
+          : condor ? touch ? 'Condor: hold THRUST to roll, pull the stick back to lift off · FIRE bomb carpet · ALT mega-nuke'
+            : 'Condor: hold SPACE for throttle, then S to lift off | LMB bomb carpet | RMB mega-nuke | the BOMBS marker shows where they land'
           : destroyer ? gunner
           ? touch ? 'AA mount: hold aim on an aircraft to lock · FIRE flak rockets · ALT battery salvo'
             : 'AA mount: hold aim on an aircraft to lock | LMB flak rockets | RMB battery salvo | E leave the mount'
@@ -1164,7 +1173,7 @@ function frame(): void {
     }
     if(localCrew&&localHull){localCrew.position.copy(localHull.position);localCrew.quaternion.copy(localHull.quaternion);
       aimVehicleWeapon(localCrew,input.yaw,input.pitch);updateVehicleHull(localCrew,{dt,speed:0});}
-    if(localSeat!==(pred.state.seat??0)&&gunner)hud.showAnnounce(pred.state.vehicle===VEHICLE.JET?'Ventral gunner: aim below the aircraft | FIRE rockets':'Gunner: independent crew machine gun | FIRE to shoot');
+    if(localSeat!==(pred.state.seat??0)&&gunner&&!pred.state.station)hud.showAnnounce(pred.state.vehicle===VEHICLE.JET?'Ventral gunner: aim below the aircraft | FIRE rockets':'Gunner: independent crew machine gun | FIRE to shoot');
     localSeat=pred.state.seat??0;
 
     // Remote entities at interpolated time.
@@ -1217,14 +1226,16 @@ function frame(): void {
     touch?.setSwimming(pred.state.swimming ?? false);
 
     // HUD.
-    if (pred.alive && pred.state.vehicle === VEHICLE.JET && !gunner) {
-      jetAimPoint.set(0, 0, -1).applyQuaternion(vehicleEyeRotation).multiplyScalar(400).add(cam.position);
+    const condorPilot = pred.alive && !gunner && isCondor(pred.state.vehicle, pred.state.vehicleVariant);
+    const bombSight = condorPilot && !pred.state.grounded && !!world && bombImpactPoint(world, pred.state, jetAimPoint);
+    if (bombSight || (pred.alive && pred.state.vehicle === VEHICLE.JET && !gunner && !condorPilot)) {
+      if (!bombSight) jetAimPoint.set(0, 0, -1).applyQuaternion(vehicleEyeRotation).multiplyScalar(400).add(cam.position);
       cam.updateMatrixWorld();
       jetAimPoint.applyMatrix4(cam.matrixWorldInverse);
       const behind = jetAimPoint.z >= 0;
       if (Math.abs(jetAimPoint.z) < 0.001) jetAimPoint.z = behind ? 0.001 : -0.001;
       jetAimPoint.applyMatrix4(cam.projectionMatrix);
-      hud.setJetAim(behind ? -jetAimPoint.x : jetAimPoint.x, behind ? -jetAimPoint.y : jetAimPoint.y, behind);
+      hud.setJetAim(behind ? -jetAimPoint.x : jetAimPoint.x, behind ? -jetAimPoint.y : jetAimPoint.y, behind, bombSight);
     } else hud.setJetAim(null);
     hud.setHealth(pred.health, pred.alive);
     const activeWeapon = pred.weaponState.weapon;
@@ -1249,17 +1260,18 @@ function frame(): void {
     hud.setWeaponAvailability(availability);
     if (pred.state.vehicle !== VEHICLE.NONE) {
       const mounted = artillery ? weaponDefById(213) : gunner
-        ? crewArmament(pred.state.vehicle, pred.state.vehicleVariant).primary
+        ? crewArmament(pred.state.vehicle, pred.state.vehicleVariant, pred.state.station).primary
         : vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant).primary;
       hud.setMountedWeapon(mounted?.name ?? 'Mounted weapon', pred.alive);
       // The rail artillery seat keeps its own reload readout.
       if (!artillery) {
-        const armament = gunner ? crewArmament(pred.state.vehicle, pred.state.vehicleVariant)
+        const armament = gunner ? crewArmament(pred.state.vehicle, pred.state.vehicleVariant, pred.state.station)
           : vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant);
         const elapsed = (performance.now() - vehicleReloads.at) / 1000;
         const fireLeft = Math.max(0, vehicleReloads.fire - elapsed), altLeft = Math.max(0, vehicleReloads.alt - elapsed);
         if (armament.primary) hud.setCooldown(fireLeft / Math.max(1e-6, armament.primary.interval));
-        if (armament.alt && armament.alt.interval >= 4) hud.setMountedReload(armament.alt.name, altLeft, armament.alt.interval);
+        if (armament.alt && armament.alt.interval >= 4) hud.setMountedReload(armament.alt.name, altLeft, armament.alt.interval,
+          armament.primary.interval >= 4 ? `${armament.primary.name.toUpperCase()} ${fireLeft > .05 ? `${Math.ceil(fireLeft)} s` : 'READY'}` : undefined);
       }
     }
     // The round/mag seats home around the midpoint of the choreography.
@@ -1274,7 +1286,7 @@ function frame(): void {
     if (pred.state.vehicle !== VEHICLE.NONE) {
       const vdef = vehicleDefinition(pred.state.vehicle, pred.state.vehicleVariant)!;
       hud.setVehicle(
-        artillery?'LEVIATHAN RAIL ARTILLERY: Nuclear Cannon':gunner?(isDestroyer(pred.state.vehicle,pred.state.vehicleVariant)?`${vdef.name} AA MOUNT: Flak Rockets / Battery Salvo`:`${vdef.name} GUNNER: ${pred.state.vehicle===VEHICLE.JET?'Ventral Rockets':'Crew Machine Gun'}`):
+        artillery?'LEVIATHAN RAIL ARTILLERY: Nuclear Cannon':gunner?condorStation(pred.state)?`${vdef.name} ${condorStation(pred.state)!.name.toUpperCase()} GUNNER: Chaingun / Lock Rockets`:(isDestroyer(pred.state.vehicle,pred.state.vehicleVariant)?`${vdef.name} AA MOUNT: Flak Rockets / Battery Salvo`:`${vdef.name} GUNNER: ${pred.state.vehicle===VEHICLE.JET?'Ventral Rockets':'Crew Machine Gun'}`):
         pred.state.vehicleVariant ? `${vdef.name}: ${vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant).primary.name} / ${vehicleArmament(pred.state.vehicle, pred.state.vehicleVariant).alt?.name}` : vdef.name,
         vdef ? vehicleHealth / vdef.maxHealth : 0,
         pred.state.vehicle === VEHICLE.JEEP ? pred.state.boostFuel : null,
@@ -1285,7 +1297,8 @@ function frame(): void {
         ? vehicleModels.nearestPrompt(rp.x, rp.y, rp.z)
         : null;
       const crewPrompt=pred.alive?views.filter(v=>v.vehicle!==VEHICLE.NONE&&!v.dead&&(v.seat??0)===0&&v.vehicleId!==undefined&&
-        !views.some(o=>o.vehicleId===v.vehicleId&&o.seat===1&&!o.dead)).map(v=>({v,d:Math.hypot(v.x-rp.x,v.y-rp.y,v.z-rp.z)}))
+        (isCondor(v.vehicle,v.vehicleVariant)?views.filter(o=>o.vehicleId===v.vehicleId&&o.station&&!o.dead).length<CONDOR_STATIONS.length
+          :!views.some(o=>o.vehicleId===v.vehicleId&&o.seat===1&&!o.dead))).map(v=>({v,d:Math.hypot(v.x-rp.x,v.y-rp.y,v.z-rp.z)}))
         .filter(({v,d})=>d<=(vehicleDefinition(v.vehicle,v.vehicleVariant)?.enterRange??0)).sort((a,b)=>a.d-b.d)[0]:undefined;
       hud.setPrompt(crewPrompt&&(!prompt||crewPrompt.d<prompt.dist)?`${touch?'ENTER':'[E] Join'} ${vehicleDefinition(crewPrompt.v.vehicle,crewPrompt.v.vehicleVariant)?.name??'vehicle'} gunner`:
         prompt ? `${touch ? 'ENTER' : '[E] Enter'} ${vehicleDefinition(prompt.type, prompt.variant)?.name ?? 'vehicle'}` : null);
@@ -1341,12 +1354,15 @@ function frame(): void {
   // tracer origins only after this frame's driving/aim pose is installed.
   for (const ev of pendingVehicleShots.take()) {
     localWeaponMuzzle.set(ev.ox, ev.oy, ev.oz);
-    const shotHull=ev.weapon===214?localCrew:ev.weapon===215?null:localHull;
+    const stationGun=!!pred?.state.station;
+    const shotHull=ev.weapon===214?localCrew:ev.weapon===215||stationGun?null:localHull;
     if (shotHull?.visible) {
       vehicleMuzzlePosition(shotHull, localWeaponMuzzle); flashVehicleWeapon(shotHull);
-    } else if(ev.weapon===215&&pred?.state.vehicle===VEHICLE.JET) {
+    } else if((ev.weapon===215||stationGun)&&pred?.state.vehicle===VEHICLE.JET) {
       const offset=aircraftCrewMuzzle(pred.state),rp=pred.renderPos();localWeaponMuzzle.set(rp.x+offset.x,rp.y+offset.y,rp.z+offset.z);
-      effects.addMuzzle(localWeaponMuzzle.x,localWeaponMuzzle.y,localWeaponMuzzle.z);
+      // A gun beside the gunner's eye flashes a little way out, not in their face.
+      const flash=stationGun?6:0,aim=viewDir(input.yaw,input.pitch);
+      effects.addMuzzle(localWeaponMuzzle.x+aim.x*flash,localWeaponMuzzle.y+aim.y*flash,localWeaponMuzzle.z+aim.z*flash);
     } else effects.addMuzzle(ev.ox, ev.oy, ev.oz);
     if(ev.weapon===213) {
       const cam=sceneMgr.camera,pos=audio.positional(localWeaponMuzzle.x,localWeaponMuzzle.y,localWeaponMuzzle.z,

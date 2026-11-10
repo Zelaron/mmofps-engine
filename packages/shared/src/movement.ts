@@ -70,6 +70,8 @@ export interface MoveState extends KinState {
   vehicleVariant: number;
   /** 0 pilots the hull; 1 operates an independent passenger weapon. */
   seat?: number;
+  /** Which Condor gun position a gunner holds, from 1; see CONDOR_STATIONS. */
+  station?: number;
   vehicleId?: number;
   transportRoute?: number;
   /** Vehicle hull yaw, independent from mouse view/aim. */
@@ -105,7 +107,7 @@ export function createMoveState(x: number, y: number, z: number): MoveState {
     // Keep one property order as actors walk, swim, board and return. Undefined
     // retains the existing defaults and omission from serialized state.
     jumpAscent: undefined, airlift: undefined, simulationTick: undefined,
-    seat: undefined, vehicleId: undefined, transportRoute: undefined,
+    seat: undefined, station: undefined, vehicleId: undefined, transportRoute: undefined,
     vehicleRotation: undefined, airSeconds: undefined, swimming: undefined, submerged: undefined,
   };
 }
@@ -122,7 +124,7 @@ export function copyMoveState(from: MoveState, to: MoveState): void {
   to.alive = from.alive;
   to.vehicle = from.vehicle;
   to.vehicleVariant = from.vehicleVariant ?? 0;
-  to.seat = from.seat; to.vehicleId = from.vehicleId;
+  to.seat = from.seat; to.station = from.station; to.vehicleId = from.vehicleId;
   to.transportRoute = from.transportRoute;
   to.heading = from.heading;
   to.boostFuel = from.boostFuel;

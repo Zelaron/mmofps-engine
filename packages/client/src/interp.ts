@@ -7,7 +7,7 @@ import {
 // the two snapshots bracketing the render time - the standard recipe for
 // smooth remote movement at 30 snapshots/sec.
 
-interface PSnap { tick: number; x: number; y: number; z: number; yaw: number; pitch: number; dead: boolean; grounded: boolean; weapon: number; vehicle: number; vehicleVariant?: number; seat?: number; vehicleId?: number; heading: number; vehiclePitch: number; vehicleRoll: number; vehicleRotation?: Rotation }
+interface PSnap { tick: number; x: number; y: number; z: number; yaw: number; pitch: number; dead: boolean; grounded: boolean; weapon: number; vehicle: number; vehicleVariant?: number; seat?: number; station?: number; vehicleId?: number; heading: number; vehiclePitch: number; vehicleRoll: number; vehicleRotation?: Rotation }
 interface ProjectileSnap {
   tick: number;
   x: number; y: number; z: number;
@@ -16,7 +16,7 @@ interface ProjectileSnap {
   weapon: number;
 }
 
-export interface PlayerView { id: number; x: number; y: number; z: number; yaw: number; pitch: number; dead: boolean; grounded: boolean; weapon: number; vehicle: number; vehicleVariant?: number; seat?: number; vehicleId?: number; heading: number; vehiclePitch?: number; vehicleRoll?: number; vehicleRotation?: Rotation; vx: number; vy: number; vz: number }
+export interface PlayerView { id: number; x: number; y: number; z: number; yaw: number; pitch: number; dead: boolean; grounded: boolean; weapon: number; vehicle: number; vehicleVariant?: number; seat?: number; station?: number; vehicleId?: number; heading: number; vehiclePitch?: number; vehicleRoll?: number; vehicleRotation?: Rotation; vx: number; vy: number; vz: number }
 export interface ProjectileView {
   id: number;
   x: number; y: number; z: number;
@@ -40,7 +40,7 @@ export class Interp {
         seen.add(e.id);
         let buf = this.players.get(e.id);
         if (!buf) { buf = []; this.players.set(e.id, buf); }
-        buf.push({ tick: snap.tick, x: e.x, y: e.y, z: e.z, yaw: e.yaw, pitch: e.pitch, dead: e.dead, grounded: e.grounded, weapon: e.weapon, vehicle: e.vehicle, vehicleVariant: e.vehicleVariant ?? 0, seat: e.seat ?? 0, vehicleId: e.vehicleId, heading: e.heading, vehiclePitch: e.vehiclePitch ?? 0, vehicleRoll: e.vehicleRoll ?? 0,
+        buf.push({ tick: snap.tick, x: e.x, y: e.y, z: e.z, yaw: e.yaw, pitch: e.pitch, dead: e.dead, grounded: e.grounded, weapon: e.weapon, vehicle: e.vehicle, vehicleVariant: e.vehicleVariant ?? 0, seat: e.seat ?? 0, station: e.station, vehicleId: e.vehicleId, heading: e.heading, vehiclePitch: e.vehiclePitch ?? 0, vehicleRoll: e.vehicleRoll ?? 0,
           vehicleRotation: e.vehicle === VEHICLE.JET ? { ...vehicleQuaternion(e) } : undefined });
         if (buf.length > BUF_CAP) buf.shift();
       } else if (e.kind === ENT_PROJECTILE) {
@@ -159,7 +159,7 @@ function sampleBuf(buf: PSnap[], renderTick: number):
 
   if (renderTick >= newest.tick) {
     const vel = velBetween(buf.length >= 2 ? buf[buf.length - 2] : newest, newest);
-    return { x: newest.x, y: newest.y, z: newest.z, yaw: newest.yaw, pitch: newest.pitch, dead: newest.dead, grounded: newest.grounded, weapon: newest.weapon, vehicle: newest.vehicle, vehicleVariant: newest.vehicleVariant ?? 0, seat: newest.seat ?? 0, vehicleId: newest.vehicleId, heading: newest.heading, vehiclePitch: newest.vehiclePitch, vehicleRoll: newest.vehicleRoll, vehicleRotation: newest.vehicleRotation, ...vel };
+    return { x: newest.x, y: newest.y, z: newest.z, yaw: newest.yaw, pitch: newest.pitch, dead: newest.dead, grounded: newest.grounded, weapon: newest.weapon, vehicle: newest.vehicle, vehicleVariant: newest.vehicleVariant ?? 0, seat: newest.seat ?? 0, station: newest.station, vehicleId: newest.vehicleId, heading: newest.heading, vehiclePitch: newest.vehiclePitch, vehicleRoll: newest.vehicleRoll, vehicleRotation: newest.vehicleRotation, ...vel };
   }
   for (let i = buf.length - 2; i >= 0; i--) {
     const a = buf[i], b = buf[i + 1];
@@ -167,7 +167,7 @@ function sampleBuf(buf: PSnap[], renderTick: number):
       const span = Math.max(1e-6, b.tick - a.tick);
       // Teleport guard: don't lerp across respawns.
       const jump = Math.abs(b.x - a.x) + Math.abs(b.y - a.y) + Math.abs(b.z - a.z);
-      if (jump > 20 || a.vehicle !== b.vehicle || (a.seat ?? 0) !== (b.seat ?? 0) || a.vehicleId !== b.vehicleId) return { x: b.x, y: b.y, z: b.z, yaw: b.yaw, pitch: b.pitch, dead: b.dead, grounded: b.grounded, weapon: b.weapon, vehicle: b.vehicle, vehicleVariant: b.vehicleVariant ?? 0, seat: b.seat ?? 0, vehicleId: b.vehicleId, heading: b.heading, vehiclePitch: b.vehiclePitch, vehicleRoll: b.vehicleRoll, vehicleRotation: b.vehicleRotation, vx: 0, vy: 0, vz: 0 };
+      if (jump > 20 || a.vehicle !== b.vehicle || (a.seat ?? 0) !== (b.seat ?? 0) || a.vehicleId !== b.vehicleId) return { x: b.x, y: b.y, z: b.z, yaw: b.yaw, pitch: b.pitch, dead: b.dead, grounded: b.grounded, weapon: b.weapon, vehicle: b.vehicle, vehicleVariant: b.vehicleVariant ?? 0, seat: b.seat ?? 0, station: b.station, vehicleId: b.vehicleId, heading: b.heading, vehiclePitch: b.vehiclePitch, vehicleRoll: b.vehicleRoll, vehicleRotation: b.vehicleRotation, vx: 0, vy: 0, vz: 0 };
       const t = (renderTick - a.tick) / span;
       const vehicleRotation = b.vehicle === VEHICLE.JET
         ? a.vehicle === VEHICLE.JET ? slerpRotations(vehicleQuaternion(a), vehicleQuaternion(b), t) : vehicleQuaternion(b)
@@ -183,7 +183,7 @@ function sampleBuf(buf: PSnap[], renderTick: number):
         // don't anticipate a jump or landing from the future endpoint.
         grounded: t < 1 ? a.grounded : b.grounded,
         weapon: b.weapon,
-        vehicle: b.vehicle, vehicleVariant: b.vehicleVariant ?? 0, seat: b.seat ?? 0, vehicleId: b.vehicleId,
+        vehicle: b.vehicle, vehicleVariant: b.vehicleVariant ?? 0, seat: b.seat ?? 0, station: b.station, vehicleId: b.vehicleId,
         heading: angleLerp(a.heading, b.heading, t),
         vehiclePitch: a.vehiclePitch + (b.vehiclePitch - a.vehiclePitch) * t,
         vehicleRoll: angleLerp(a.vehicleRoll, b.vehicleRoll, t),
@@ -193,7 +193,7 @@ function sampleBuf(buf: PSnap[], renderTick: number):
     }
   }
   const oldest = buf[0];
-  return { x: oldest.x, y: oldest.y, z: oldest.z, yaw: oldest.yaw, pitch: oldest.pitch, dead: oldest.dead, grounded: oldest.grounded, weapon: oldest.weapon, vehicle: oldest.vehicle, vehicleVariant: oldest.vehicleVariant ?? 0, seat: oldest.seat ?? 0, vehicleId: oldest.vehicleId, heading: oldest.heading, vehiclePitch: oldest.vehiclePitch, vehicleRoll: oldest.vehicleRoll, vehicleRotation: oldest.vehicleRotation, vx: 0, vy: 0, vz: 0 };
+  return { x: oldest.x, y: oldest.y, z: oldest.z, yaw: oldest.yaw, pitch: oldest.pitch, dead: oldest.dead, grounded: oldest.grounded, weapon: oldest.weapon, vehicle: oldest.vehicle, vehicleVariant: oldest.vehicleVariant ?? 0, seat: oldest.seat ?? 0, station: oldest.station, vehicleId: oldest.vehicleId, heading: oldest.heading, vehiclePitch: oldest.vehiclePitch, vehicleRoll: oldest.vehicleRoll, vehicleRotation: oldest.vehicleRotation, vx: 0, vy: 0, vz: 0 };
 }
 
 /**

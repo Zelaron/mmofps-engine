@@ -298,6 +298,7 @@ test('jet guns use the simulated nose while alternate fire releases the bomb rac
     },
     dropCarpetBombs() { bombs++; },
     holdReload() {},
+    advanceCarpetRun() {},
   };
   const pilot = { state: {vehicle: VEHICLE.JET, heading: 0.75, vehiclePitch: 0.3},
     vehFireCd: 0, vehAltCd: 0 };

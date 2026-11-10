@@ -69,3 +69,19 @@ test('each aircraft seat round-trips tracking, lock and incoming warnings withou
     assert.equal(quiet.decoded.you.aircraftThreat,undefined);
   }
 });
+
+test('a Condor gun station travels in the seat byte, without any artillery route byte',()=>{
+  for(const station of [1,5]) {
+    const snapshot:Snapshot={tick:90,lastSeq:80,you:{px:0,py:100,pz:0,vx:0,vy:0,vz:-60,
+      grounded:false,alive:true,dodgeCd:0,health:100,weapon:1,cooldown:0,ammo:createFullAmmoLoadout(),
+      reloadWeapon:-1,reloadCooldown:0,reloadHeld:false,vehicle:VEHICLE.JET,vehicleId:40,seat:1,station,
+      heading:0,boostFuel:1,vehicleHealth:2400,lockState:0},
+      ents:[{kind:ENT_PROJECTILE,id:900,owner:51,weapon:3,x:0,y:100,z:180,vx:0,vy:0,vz:-300}]};
+    const {decoded}=roundtrip(snapshot);
+    assert.equal(decoded.you.seat,1);assert.equal(decoded.you.station,station);
+    assert.equal(decoded.you.transportRoute,undefined);
+    assert.deepEqual(decoded.ents,snapshot.ents);
+    const pilot=roundtrip({...snapshot,you:{...snapshot.you,seat:0,station:undefined}});
+    assert.equal(pilot.decoded.you.station,undefined);
+  }
+});

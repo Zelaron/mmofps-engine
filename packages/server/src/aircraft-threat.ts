@@ -13,7 +13,7 @@ export function aircraftThreatFor(
   const hull = vehicles.get(player.vehicleId);
   if (!player.state.alive || player.state.vehicle !== VEHICLE.JET || !hull ||
       hull.health <= 0 || hull.respawnAtTick >= 0 ||
-      (hull.occupant !== player.id && hull.gunner !== player.id)) return;
+      (hull.occupant !== player.id && hull.gunner !== player.id && !hull.stations?.includes(player.id))) return;
   const pilot = players.get(hull.occupant);
   if (!pilot?.state.alive || pilot.vehicleId !== hull.id) return;
   const s = pilot.state, y = s.py + vehicleDefinition(hull.type, hull.variant)!.radius;

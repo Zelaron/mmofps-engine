@@ -491,14 +491,26 @@ function condorTemplate():THREE.Group {
   body.add(new THREE.CylinderGeometry(.3,.3,.28,12),DARK,[0,.3,-7.4],[0,0,Math.PI/2]);
   body.box(1.6,.1,4,0,1.06,.4,DARK);
   glass.box(1.6,.7,1.4,0,2.95,-8.2,0x416c79);
-  // The windscreen frame the pilot looks out through, around the cockpit eye.
+  // The glazed nose the pilot looks out through, framed around the cockpit eye.
   const frame=0x23282b;
+  glass.box(1.7,1.25,1.5,0,2.625,-9.7,0x416c79);
   for(const side of [-1,1]) {
-    body.box(.012,.72,.012,side*.8,3,-8.92,frame);
-    body.box(.012,.012,1.4,side*.8,3.36,-8.2,frame);
+    body.box(.014,1.25,.014,side*.85,2.625,-10.45,frame);
+    for(const y of [2,3.25])body.box(.014,.014,1.5,side*.85,y,-9.7,frame);
   }
-  body.box(1.6,.012,.012,0,3.36,-8.92,frame);
-  body.box(1.6,.02,.1,0,2.62,-8.92,frame);
+  for(const y of [2,3.25])body.box(1.7,.014,.014,0,y,-10.45,frame);
+  // Gun positions, matching CONDOR_STATIONS; each gunner's eye sits just
+  // outside the skin, with the barrels below the line of sight.
+  glass.add(new THREE.SphereGeometry(.6,12,8),0x416c79,[0,3.85,-5]);
+  for(const side of [-1,1])body.tube(.045,[side*.28,3.95,-5.4],[side*.28,4.9,-5.4],METAL,6);
+  body.add(new THREE.SphereGeometry(.55,12,8),DARK,[0,.85,3]);
+  for(const side of [-1,1])body.tube(.045,[side*.25,.6,3.25],[side*.25,.12,3.25],METAL,6);
+  for(const side of [-1,1]) {
+    body.box(.12,.8,1.1,side*.95,2.6,6.5,DARK);
+    body.tube(.045,[side*.95,2.25,6.5],[side*2,2.25,6.5],METAL,6);
+  }
+  glass.add(new THREE.SphereGeometry(.4,12,8),0x416c79,[0,3.05,9.85]);
+  for(const side of [-1,1])body.tube(.045,[side*.25,2.85,9.8],[side*.25,2.85,11.2],METAL,6);
   root.add(body.mesh(ARMOR,'body'),glass.mesh(WINDOWS,'glass'));
   const muzzle=new THREE.Object3D();muzzle.name='weapon-muzzle';muzzle.position.set(0,2.05,-10.1);root.add(muzzle);
   return root;

@@ -4,7 +4,7 @@ import {
   WEAPONS, type InputCmd,
   multiplyRotations, rotateVector, rotationFromEuler, vehicleQuaternion, type Rotation,
 } from '@shared/index';
-import { CREW_CONE_HALF_ANGLE } from '@shared/crew';
+import { CREW_CONE_HALF_ANGLE, CONDOR_STATION_CONE, type AircrewStation } from '@shared/crew';
 
 // Keyboard/mouse -> InputCmds. View angles are quantized through the wire
 // format BEFORE the local simulation uses them, so predicted movement is
@@ -41,6 +41,7 @@ export class InputTracker {
   private suspended = false;
   private vehicleMode: number = VEHICLE.NONE;
   private vehicleSeat = 0;
+  private vehicleStation: AircrewStation | undefined;
   private jetLookYaw = 0;
   private jetLookPitch = 0;
   private readonly jetRotation: Rotation = { x: 0, y: 0, z: 0, w: 1 };
@@ -241,8 +242,8 @@ export class InputTracker {
       this.jetLookYaw = wrapAngle(this.jetLookYaw - dx * this.sensitivity);
       this.jetLookPitch = clamp(this.jetLookPitch - dy * this.sensitivity, -1.55, 1.55);
       if(this.vehicleSeat===1) {
-        const length=Math.hypot(this.jetLookYaw,this.jetLookPitch);
-        if(length>CREW_CONE_HALF_ANGLE) {this.jetLookYaw*=CREW_CONE_HALF_ANGLE/length;this.jetLookPitch*=CREW_CONE_HALF_ANGLE/length;}
+        const length=Math.hypot(this.jetLookYaw,this.jetLookPitch),cone=this.vehicleStation?CONDOR_STATION_CONE:CREW_CONE_HALF_ANGLE;
+        if(length>cone) {this.jetLookYaw*=cone/length;this.jetLookPitch*=cone/length;}
       }
       this.updateJetLook();
     } else {
@@ -252,10 +253,11 @@ export class InputTracker {
     this.swayX += dx; this.swayY += dy;
   }
 
-  setVehicleMode(type: number, heading: number, pitch = 0, roll = 0, rotation?: Rotation, seat = 0): void {
-    if (type === this.vehicleMode && seat === this.vehicleSeat) return;
+  setVehicleMode(type: number, heading: number, pitch = 0, roll = 0, rotation?: Rotation, seat = 0, station?: AircrewStation): void {
+    if (type === this.vehicleMode && seat === this.vehicleSeat && station === this.vehicleStation) return;
     this.vehicleMode = type;
     this.vehicleSeat = seat;
+    this.vehicleStation = station;
     if (type !== VEHICLE.NONE) {
       this.yaw = heading; this.pitch = type === VEHICLE.JET ? pitch : 0;
       this.jetLookYaw = this.jetLookPitch = 0;
@@ -272,7 +274,7 @@ export class InputTracker {
 
   private updateJetLook(): void {
     const look = rotationFromEuler(this.jetLookYaw, this.jetLookPitch);
-    if(this.vehicleSeat===1) multiplyRotations(rotationFromEuler(0,-Math.PI/2),look,look);
+    if(this.vehicleSeat===1) multiplyRotations(this.vehicleStation?rotationFromEuler(this.vehicleStation.yaw,this.vehicleStation.pitch):rotationFromEuler(0,-Math.PI/2),look,look);
     multiplyRotations(this.jetRotation, look, this.viewRotation);
     const forward = rotateVector(this.viewRotation, 0, 0, -1);
     // Network aim is a direction only. Keeping its pitch canonical does not

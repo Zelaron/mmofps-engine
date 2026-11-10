@@ -216,6 +216,7 @@ export interface SnapshotPickup {
 export interface EntPlayer {
   transportRoute?: number;
   seat?: number;
+  station?: number;
   vehicleId?: number;
   kind: typeof ENT_PLAYER;
   id: number;
@@ -263,6 +264,7 @@ export interface YourState {
   airlift?: AirliftFlight;
   transportRoute?: number;
   seat?: number;
+  station?: number;
   vehicleId?: number;
   airSeconds?: number;
   swimming?: boolean;
@@ -434,7 +436,7 @@ export function encodeSnapshot(w: ByteWriter, snap: Snapshot): void {
   const yourVariant = validVehicleVariant(you.vehicle, you.vehicleVariant);
   w.u8(you.vehicle | (yourVariant ? 128 : 0));
   if (yourVariant) w.u8(yourVariant);
-  if (you.vehicle) w.u8(you.seat ?? 0).entity(you.vehicleId ?? NO_ENTITY_ID)
+  if (you.vehicle) w.u8((you.seat ?? 0) | (you.station ?? 0) << 4).entity(you.vehicleId ?? NO_ENTITY_ID)
     .u16(clamp(Math.ceil((you.vehicleFireCd ?? 0) * 100), 0, 65535)).u16(clamp(Math.ceil((you.vehicleAltCd ?? 0) * 100), 0, 65535));
   if (you.seat === 2) w.u8(you.transportRoute ?? 0);
   w.u16(quantYaw(you.heading));
@@ -468,7 +470,7 @@ export function encodeSnapshot(w: ByteWriter, snap: Snapshot): void {
       const variant = validVehicleVariant(e.vehicle, e.vehicleVariant);
       w.u8(e.vehicle | (variant ? 128 : 0));
       if (variant) w.u8(variant);
-      if (e.vehicle) w.u8(e.seat ?? 0).entity(e.vehicleId ?? NO_ENTITY_ID);
+      if (e.vehicle) w.u8((e.seat ?? 0) | (e.station ?? 0) << 4).entity(e.vehicleId ?? NO_ENTITY_ID);
       if (e.seat === 2) w.u8(e.transportRoute ?? 0);
       w.u16(quantYaw(e.heading));
       w.i16(quantPitch(e.vehiclePitch ?? 0));
@@ -553,7 +555,8 @@ export function decodeSnapshot(r: ByteReader): Snapshot {
   you.vehicle = yourType & 127;
   if (yourType & 128) you.vehicleVariant = validVehicleVariant(you.vehicle, r.u8());
   if (you.vehicle) {
-    const seat = r.u8(), vehicleId = r.entity(); if (seat) you.seat = seat; if (vehicleId !== NO_ENTITY_ID) you.vehicleId = vehicleId;
+    const seats = r.u8(), vehicleId = r.entity(), seat = seats & 15, station = seats >> 4;
+    if (seat) you.seat = seat; if (station) you.station = station; if (vehicleId !== NO_ENTITY_ID) you.vehicleId = vehicleId;
     you.vehicleFireCd = r.u16() / 100; you.vehicleAltCd = r.u16() / 100;
   }
   if (you.seat === 2) you.transportRoute = r.u8();
@@ -593,7 +596,7 @@ export function decodeSnapshot(r: ByteReader): Snapshot {
       const encodedVehicle = r.u8();
       const vehicle = encodedVehicle & 127;
       const vehicleVariant = encodedVehicle & 128 ? validVehicleVariant(vehicle, r.u8()) : 0;
-      const seat = vehicle ? r.u8() : 0, vehicleId = vehicle ? r.entity() : NO_ENTITY_ID;
+      const seats = vehicle ? r.u8() : 0, seat = seats & 15, station = seats >> 4, vehicleId = vehicle ? r.entity() : NO_ENTITY_ID;
       const transportRoute = seat === 2 ? r.u8() : 0;
       const heading = unquantYaw(r.u16());
       const vehiclePitch = unquantPitch(r.i16());
@@ -608,7 +611,7 @@ export function decodeSnapshot(r: ByteReader): Snapshot {
         weapon,
         vehicle,
         ...(vehicleVariant ? { vehicleVariant } : {}),
-        ...(seat ? { seat } : {}), ...(vehicleId !== NO_ENTITY_ID ? { vehicleId } : {}),
+        ...(seat ? { seat } : {}), ...(station ? { station } : {}), ...(vehicleId !== NO_ENTITY_ID ? { vehicleId } : {}),
         ...(transportRoute ? { transportRoute } : {}),
         heading, vehiclePitch, vehicleRoll,
         ...(vehicleRotation ? { vehicleRotation } : {}),

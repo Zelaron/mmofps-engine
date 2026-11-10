@@ -93,10 +93,10 @@ export class Prediction {
     this.state.airlift = you.airlift ? { ...you.airlift } : undefined;
     this.state.dodgeCd = you.dodgeCd;
     const nextVariant = you.vehicle === 0 ? 0 : you.vehicleVariant ?? 0;
-    const vehicleChanged = this.state.vehicle !== you.vehicle || this.state.vehicleVariant !== nextVariant || (this.state.seat ?? 0) !== (you.seat ?? 0) || this.state.vehicleId !== you.vehicleId;
+    const vehicleChanged = this.state.vehicle !== you.vehicle || this.state.vehicleVariant !== nextVariant || (this.state.seat ?? 0) !== (you.seat ?? 0) || (this.state.station ?? 0) !== (you.station ?? 0) || this.state.vehicleId !== you.vehicleId;
     this.state.vehicle = you.vehicle;
     this.state.vehicleVariant = nextVariant;
-    this.state.seat = you.seat; this.state.vehicleId = you.vehicleId;
+    this.state.seat = you.seat; this.state.station = you.station; this.state.vehicleId = you.vehicleId;
     this.state.transportRoute = you.transportRoute;
     this.state.heading = you.heading;
     this.state.boostFuel = you.boostFuel;

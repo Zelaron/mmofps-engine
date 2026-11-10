@@ -4,7 +4,7 @@ How the client, server and worlds fit together. For running and hosting, see [DE
 
 ## Packages
 
-- **`packages/shared`** is used by both sides. It holds deterministic world generation from a seed (terrain, caves, cities, roads, vegetation, boulders and the campaign layout's inputs), the movement and physics step, weapons and vehicles, and the binary network protocol (version 36). Because client and server run the same code on the same seed, the world never has to be downloaded and client prediction matches the server.
+- **`packages/shared`** is used by both sides. It holds deterministic world generation from a seed (terrain, caves, cities, roads, vegetation, boulders and the campaign layout's inputs), the movement and physics step, weapons and vehicles, and the binary network protocol (version 37). Because client and server run the same code on the same seed, the world never has to be downloaded and client prediction matches the server.
 - **`packages/server`** runs the authoritative simulation, bots and the war campaign.
 - **`packages/client`** is the browser game: Three.js on WebGL2. Every model and texture is generated in code.
 

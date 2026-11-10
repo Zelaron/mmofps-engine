@@ -62,6 +62,7 @@ export function captureActors(game: Game, ids: readonly number[]): DetachedHando
     vehicles.set(v.id, v);
     if (v.occupant >= 0) queue.push(v.occupant);
     if ((v.gunner ?? -1) >= 0) queue.push(v.gunner!);
+    for (const id of v.stations ?? []) if (id >= 0) queue.push(id);
   }
   const record = cloneRecord<RuntimeHandoff>({
     version: 1, seed: game.seed, tick: game.tick,
@@ -119,11 +120,12 @@ function validateRecord(record: RuntimeHandoff): void {
     }
     const v = byVehicle.get(p.vehicleId);
     if (!v || p.state.vehicle !== v.type || p.state.vehicleId !== v.id ||
-        (p.state.seat === 1 ? v.gunner !== p.id : v.occupant !== p.id)) throw new Error('Inconsistent handoff crew');
+        (p.state.seat === 1 ? v.gunner !== p.id && !v.stations?.includes(p.id) : v.occupant !== p.id)) throw new Error('Inconsistent handoff crew');
   }
   for (const v of record.vehicles) {
     if (!players.has(v.occupant) || byPlayer.get(v.occupant)!.vehicleId !== v.id ||
-        ((v.gunner ?? -1) >= 0 && (!players.has(v.gunner!) || byPlayer.get(v.gunner!)!.vehicleId !== v.id || v.gunner === v.occupant))) throw new Error('Incomplete handoff crew');
+        ((v.gunner ?? -1) >= 0 && (!players.has(v.gunner!) || byPlayer.get(v.gunner!)!.vehicleId !== v.id || v.gunner === v.occupant)) ||
+        (v.stations ?? []).some(id => id >= 0 && (!players.has(id) || byPlayer.get(id)!.vehicleId !== v.id || id === v.occupant))) throw new Error('Incomplete handoff crew');
   }
   for (const p of record.projectiles) {
     if (!players.has(p.owner)) throw new Error('Handoff projectile has no owner');

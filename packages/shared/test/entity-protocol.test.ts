@@ -33,7 +33,7 @@ test('all entity references survive legacy boundaries and the full safe-integer 
         heading: 0, boostFuel: 1, vehicleHealth: 80, lockState: 0 },
       ents: [
         { kind: ENT_PLAYER, id, x: 1, y: 2, z: 3, yaw: 0, pitch: 0, grounded: false,
-          dead: false, weapon: 1, vehicle: 1, vehicleId: id, seat: 1, heading: 0 },
+          dead: false, weapon: 1, vehicle: 1, vehicleId: id, seat: 1, station: 3, heading: 0 },
         { kind: ENT_PROJECTILE, id, owner: id, weapon: 4, x: 1, y: 2, z: 3, vx: 10, vy: 20, vz: 30 },
       ],
       pickups: [{ id, kind: PICKUP_AMMO, weapon: 1, x: 1, y: 2, z: 3 }],
@@ -45,6 +45,7 @@ test('all entity references survive legacy boundaries and the full safe-integer 
     assert.equal(r.remaining, 0); assert.equal(out.you.vehicleId, id);
     assert.deepEqual(out.ents.map(e => e.id), [id, id]);
     assert.equal(out.ents[0].kind === ENT_PLAYER && out.ents[0].vehicleId, id);
+    assert.equal(out.ents[0].kind === ENT_PLAYER && out.ents[0].station, 3);
     assert.equal(out.ents[1].kind === ENT_PROJECTILE && out.ents[1].owner, id);
     assert.equal(out.pickups![0].id, id); assert.equal(out.vehicles![0].id, id); assert.equal(out.creatures![0].id, id);
     delete snapshot.you.vehicleId;
